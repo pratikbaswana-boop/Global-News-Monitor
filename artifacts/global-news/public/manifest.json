@@ -1,0 +1,27 @@
+{
+  "name": "Global News Intelligence",
+  "short_name": "IntelDash",
+  "description": "Real-time geopolitical intelligence & Indian market analysis",
+  "start_url": "intelligence",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["finance", "news"],
+  "shortcuts": [
+    {
+      "name": "Intelligence",
+      "short_name": "Intel",
+      "description": "Market signals & track record",
+      "url": "intelligence"
+    }
+  ]
+}

@@ -1,0 +1,857 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: Global News Intelligence API
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: news
+    description: News aggregation operations
+  - name: intelligence
+    description: Intelligence analysis operations
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /news:
+    get:
+      operationId: getNews
+      tags: [news]
+      summary: Get aggregated news
+      description: Fetch political news from NewsAPI, GNews, and The Guardian
+      parameters:
+        - name: category
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [all, politics, deals, sanctions, tensions]
+            default: all
+        - name: country
+          in: query
+          required: false
+          schema:
+            type: string
+            description: Filter by country name
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 1
+        - name: pageSize
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 30
+      responses:
+        "200":
+          description: Aggregated news articles
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NewsResponse"
+
+  /news/summary:
+    get:
+      operationId: getNewsSummary
+      tags: [news]
+      summary: Get news summary stats
+      description: Returns counts by category and top sources
+      responses:
+        "200":
+          description: News summary statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NewsSummary"
+
+  /news/trending:
+    get:
+      operationId: getTrendingTopics
+      tags: [news]
+      summary: Get trending topics
+      description: Returns the most frequently mentioned countries, leaders, and topics
+      responses:
+        "200":
+          description: Trending topics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrendingTopics"
+
+  /intelligence/track-record:
+    get:
+      operationId: getIntelligenceTrackRecord
+      tags: [intelligence]
+      summary: Get prediction accuracy track record
+      description: Returns historical market signal predictions with resolution status and accuracy statistics
+      responses:
+        "200":
+          description: Track record with accuracy stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrackRecordResponse"
+
+  /intelligence/market-signals:
+    get:
+      operationId: getIntelligenceMarketSignals
+      tags: [intelligence]
+      summary: Get market impact signals
+      description: Agentic multi-angle analysis of how current geopolitical events will impact financial markets (Gold, Silver, Oil, USD, S&P 500)
+      responses:
+        "200":
+          description: Market impact analysis with bull/bear validation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MarketSignalsResponse"
+
+  /intelligence/predictions:
+    get:
+      operationId: getIntelligencePredictions
+      tags: [intelligence]
+      summary: Get event predictions
+      description: Analyses story clusters and causal chains to predict upcoming geopolitical events
+      responses:
+        "200":
+          description: Predicted upcoming events
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PredictionsResponse"
+
+  /intelligence/clusters:
+    get:
+      operationId: getIntelligenceClusters
+      tags: [intelligence]
+      summary: Get story clusters with causal chains
+      description: Groups related articles into story clusters and identifies causal relationships between events
+      responses:
+        "200":
+          description: Story clusters with causal chains
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntelligenceResponse"
+
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+
+    NewsArticle:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        url:
+          type: string
+        imageUrl:
+          type: string
+          nullable: true
+        source:
+          type: string
+        sourceName:
+          type: string
+          enum: [NewsAPI, GNews, Guardian]
+        publishedAt:
+          type: string
+          format: date-time
+        category:
+          type: string
+          enum: [politics, deals, sanctions, tensions, general]
+        countries:
+          type: array
+          items:
+            type: string
+        leaders:
+          type: array
+          items:
+            type: string
+      required:
+        - id
+        - title
+        - description
+        - url
+        - source
+        - sourceName
+        - publishedAt
+        - category
+        - countries
+        - leaders
+
+    NewsResponse:
+      type: object
+      properties:
+        articles:
+          type: array
+          items:
+            $ref: "#/components/schemas/NewsArticle"
+        totalResults:
+          type: integer
+        page:
+          type: integer
+        pageSize:
+          type: integer
+        sources:
+          type: object
+          properties:
+            newsapi:
+              type: integer
+            gnews:
+              type: integer
+            guardian:
+              type: integer
+          required:
+            - newsapi
+            - gnews
+            - guardian
+      required:
+        - articles
+        - totalResults
+        - page
+        - pageSize
+        - sources
+
+    NewsSummary:
+      type: object
+      properties:
+        totalArticles:
+          type: integer
+        byCategory:
+          type: object
+          properties:
+            politics:
+              type: integer
+            deals:
+              type: integer
+            sanctions:
+              type: integer
+            tensions:
+              type: integer
+            general:
+              type: integer
+          required:
+            - politics
+            - deals
+            - sanctions
+            - tensions
+            - general
+        bySource:
+          type: object
+          properties:
+            newsapi:
+              type: integer
+            gnews:
+              type: integer
+            guardian:
+              type: integer
+          required:
+            - newsapi
+            - gnews
+            - guardian
+        lastUpdated:
+          type: string
+          format: date-time
+      required:
+        - totalArticles
+        - byCategory
+        - bySource
+        - lastUpdated
+
+    TrendingTopic:
+      type: object
+      properties:
+        name:
+          type: string
+        count:
+          type: integer
+        type:
+          type: string
+          enum: [country, leader, topic]
+      required:
+        - name
+        - count
+        - type
+
+    TrendingTopics:
+      type: object
+      properties:
+        countries:
+          type: array
+          items:
+            $ref: "#/components/schemas/TrendingTopic"
+        leaders:
+          type: array
+          items:
+            $ref: "#/components/schemas/TrendingTopic"
+        topics:
+          type: array
+          items:
+            $ref: "#/components/schemas/TrendingTopic"
+      required:
+        - countries
+        - leaders
+        - topics
+
+    CausalLink:
+      type: object
+      properties:
+        fromArticleId:
+          type: string
+        toArticleId:
+          type: string
+        relationship:
+          type: string
+          description: Human-readable description of the causal relationship
+        strength:
+          type: number
+          description: Confidence score 0-1
+      required:
+        - fromArticleId
+        - toArticleId
+        - relationship
+        - strength
+
+    StoryCluster:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+          description: Auto-generated cluster name e.g. "Iran-Israel Tensions"
+        summary:
+          type: string
+          description: Brief description of the overall story arc
+        category:
+          type: string
+          enum: [politics, deals, sanctions, tensions, general]
+        countries:
+          type: array
+          items:
+            type: string
+        leaders:
+          type: array
+          items:
+            type: string
+        articles:
+          type: array
+          items:
+            $ref: "#/components/schemas/NewsArticle"
+        causalChain:
+          type: array
+          items:
+            $ref: "#/components/schemas/CausalLink"
+          description: Ordered list of causal relationships showing how events led to each other
+        articleCount:
+          type: integer
+        latestAt:
+          type: string
+          format: date-time
+        earliestAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - title
+        - summary
+        - category
+        - countries
+        - leaders
+        - articles
+        - causalChain
+        - articleCount
+        - latestAt
+        - earliestAt
+
+    RelationshipNode:
+      type: object
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        type:
+          type: string
+          enum: [country, leader, topic]
+        articleCount:
+          type: integer
+      required:
+        - id
+        - label
+        - type
+        - articleCount
+
+    RelationshipEdge:
+      type: object
+      properties:
+        source:
+          type: string
+        target:
+          type: string
+        weight:
+          type: integer
+          description: Number of articles connecting these two nodes
+        categories:
+          type: array
+          items:
+            type: string
+      required:
+        - source
+        - target
+        - weight
+        - categories
+
+    TrackRecordEntry:
+      type: object
+      properties:
+        id:
+          type: string
+        assetId:
+          type: string
+        assetName:
+          type: string
+        assetSymbol:
+          type: string
+        predictedDirection:
+          type: string
+          enum: [up, down, neutral]
+        predictedMagnitude:
+          type: string
+          enum: [strong, moderate, mild]
+        predictedConfidence:
+          type: string
+          enum: [high, medium, low]
+        priceImpactEstimate:
+          type: string
+        timeframe:
+          type: string
+        bullScore:
+          type: number
+        bearScore:
+          type: number
+        dominantNarrative:
+          type: string
+        verdict:
+          type: string
+          description: Full narrative verdict at time of snapshot
+        triggerNewsSummary:
+          type: string
+          description: The news headlines/signals that triggered this prediction
+        assumptions:
+          type: string
+          description: What the engine assumed based on the news
+        snapshotAt:
+          type: string
+          format: date-time
+        resolveAfter:
+          type: string
+          format: date-time
+        resolvedAt:
+          type: string
+          format: date-time
+          nullable: true
+        resolutionDirection:
+          type: string
+          nullable: true
+        realPriceAtSnapshot:
+          type: number
+          nullable: true
+          description: Real market price at time prediction was made
+        realPriceAtResolution:
+          type: number
+          nullable: true
+          description: Real market price when prediction was resolved
+        priceChangePct:
+          type: number
+          nullable: true
+          description: Actual % price change over the prediction window
+        isCorrect:
+          type: boolean
+          nullable: true
+        resolutionNotes:
+          type: string
+          nullable: true
+        flipReason:
+          type: string
+          nullable: true
+          description: Why the prediction flipped early (if applicable)
+        lessonsLearned:
+          type: string
+          nullable: true
+          description: What the engine learned from this failure
+        status:
+          type: string
+          enum: [pending, correct, incorrect]
+      required:
+        - id
+        - assetId
+        - assetName
+        - assetSymbol
+        - predictedDirection
+        - predictedMagnitude
+        - predictedConfidence
+        - priceImpactEstimate
+        - timeframe
+        - bullScore
+        - bearScore
+        - dominantNarrative
+        - verdict
+        - triggerNewsSummary
+        - assumptions
+        - snapshotAt
+        - resolveAfter
+        - status
+
+    AssetAccuracy:
+      type: object
+      properties:
+        total:
+          type: integer
+        resolved:
+          type: integer
+        correct:
+          type: integer
+        accuracyPct:
+          type: number
+      required:
+        - total
+        - resolved
+        - correct
+        - accuracyPct
+
+    TrackRecordStats:
+      type: object
+      properties:
+        totalPredictions:
+          type: integer
+        resolved:
+          type: integer
+        correct:
+          type: integer
+        accuracyPct:
+          type: number
+        byAsset:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/AssetAccuracy"
+        byConfidence:
+          type: object
+          properties:
+            high:
+              $ref: "#/components/schemas/AssetAccuracy"
+            medium:
+              $ref: "#/components/schemas/AssetAccuracy"
+            low:
+              $ref: "#/components/schemas/AssetAccuracy"
+          required: [high, medium, low]
+      required:
+        - totalPredictions
+        - resolved
+        - correct
+        - accuracyPct
+        - byAsset
+        - byConfidence
+
+    TrackRecordResponse:
+      type: object
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/TrackRecordEntry"
+        stats:
+          $ref: "#/components/schemas/TrackRecordStats"
+        generatedAt:
+          type: string
+          format: date-time
+      required:
+        - entries
+        - stats
+        - generatedAt
+
+    MarketSignal:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+          description: One-line description of the signal e.g. "Iran sanctions tighten global oil supply"
+        reasoning:
+          type: string
+          description: Why this signal pushes the asset in this direction
+        weight:
+          type: string
+          enum: [strong, moderate, weak]
+        sourceArticleIds:
+          type: array
+          items:
+            type: string
+        geopoliticalEvent:
+          type: string
+          description: The underlying geopolitical event driving this signal
+      required:
+        - id
+        - title
+        - reasoning
+        - weight
+        - sourceArticleIds
+        - geopoliticalEvent
+
+    MarketAsset:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Asset identifier e.g. gold, silver, oil, usd, sp500
+        name:
+          type: string
+          description: Full asset name e.g. Gold (XAU/USD)
+        symbol:
+          type: string
+          description: Short ticker e.g. XAU
+        direction:
+          type: string
+          enum: [up, down, neutral]
+          description: Predicted price direction
+        magnitude:
+          type: string
+          enum: [strong, moderate, mild]
+        confidence:
+          type: string
+          enum: [high, medium, low]
+        timeframe:
+          type: string
+          enum: ["intraday", "next-session", "1-2 weeks", "1 month", "3 months"]
+        priceImpactEstimate:
+          type: string
+          description: e.g. "+8-15%" or "-3-7%" or "±2-5%"
+        bullScore:
+          type: number
+          description: Weighted score of all bullish signals
+        bearScore:
+          type: number
+          description: Weighted score of all bearish signals
+        bullSignals:
+          type: array
+          items:
+            $ref: "#/components/schemas/MarketSignal"
+          description: Forces pushing the asset UP
+        bearSignals:
+          type: array
+          items:
+            $ref: "#/components/schemas/MarketSignal"
+          description: Forces pushing the asset DOWN
+        verdict:
+          type: string
+          description: Narrative summary of the bull vs bear debate outcome
+        dominantNarrative:
+          type: string
+          description: The single most important driver of this prediction
+        resolveAfter:
+          type: string
+          format: date-time
+          description: The exact UTC timestamp by which this market signal should be judged (now + timeframe duration)
+        currentRealPrice:
+          type: number
+          nullable: true
+          description: Current real market price fetched from Yahoo Finance
+        lessonsFromPastFailures:
+          type: string
+          nullable: true
+          description: Lessons extracted from past incorrect predictions for this asset
+        recentHistory:
+          type: array
+          nullable: true
+          description: Last N prediction snapshots for this asset (for timeline UI)
+          items:
+            $ref: "#/components/schemas/TrackRecordEntry"
+      required:
+        - id
+        - name
+        - symbol
+        - direction
+        - magnitude
+        - confidence
+        - timeframe
+        - priceImpactEstimate
+        - bullScore
+        - bearScore
+        - bullSignals
+        - bearSignals
+        - verdict
+        - dominantNarrative
+        - resolveAfter
+
+    MarketSignalsResponse:
+      type: object
+      properties:
+        assets:
+          type: array
+          items:
+            $ref: "#/components/schemas/MarketAsset"
+        totalArticlesAnalyzed:
+          type: integer
+        generatedAt:
+          type: string
+          format: date-time
+      required:
+        - assets
+        - totalArticlesAnalyzed
+        - generatedAt
+
+    Prediction:
+      type: object
+      properties:
+        id:
+          type: string
+        clusterId:
+          type: string
+        clusterTitle:
+          type: string
+        headline:
+          type: string
+          description: One-line prediction statement e.g. "Iran likely to escalate uranium enrichment"
+        reasoning:
+          type: string
+          description: Explanation of why this is predicted based on the causal chain
+        confidence:
+          type: string
+          enum: [high, medium, low]
+        riskLevel:
+          type: string
+          enum: [critical, high, medium, low]
+        timeframe:
+          type: string
+          enum: ["1-2 weeks", "1 month", "3 months", "6+ months"]
+        category:
+          type: string
+          enum: [politics, deals, sanctions, tensions, general]
+        countries:
+          type: array
+          items:
+            type: string
+        leaders:
+          type: array
+          items:
+            type: string
+        triggerArticleIds:
+          type: array
+          items:
+            type: string
+          description: IDs of articles that are the evidence signals for this prediction
+        triggerSummary:
+          type: string
+          description: Brief description of the current signals driving this prediction
+        historicalPrecedent:
+          type: string
+          description: Similar historical event that supports this prediction
+        potentialOutcomes:
+          type: array
+          items:
+            type: string
+          description: List of 2-3 possible outcomes if prediction materialises
+        generatedAt:
+          type: string
+          format: date-time
+        resolveAfter:
+          type: string
+          format: date-time
+          description: The exact UTC timestamp by which this prediction should be judged
+        snapshotId:
+          type: string
+          nullable: true
+          description: ID of the stored prediction record in the database, if persisted
+        templateAccuracy:
+          type: number
+          nullable: true
+          description: Historical accuracy percentage (0-100) for this prediction template based on past resolutions
+      required:
+        - id
+        - clusterId
+        - clusterTitle
+        - headline
+        - reasoning
+        - confidence
+        - riskLevel
+        - timeframe
+        - category
+        - countries
+        - leaders
+        - triggerArticleIds
+        - triggerSummary
+        - historicalPrecedent
+        - potentialOutcomes
+        - generatedAt
+        - resolveAfter
+
+    PredictionsResponse:
+      type: object
+      properties:
+        predictions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Prediction"
+        totalSignals:
+          type: integer
+        generatedAt:
+          type: string
+          format: date-time
+      required:
+        - predictions
+        - totalSignals
+        - generatedAt
+
+    IntelligenceResponse:
+      type: object
+      properties:
+        clusters:
+          type: array
+          items:
+            $ref: "#/components/schemas/StoryCluster"
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/RelationshipNode"
+        edges:
+          type: array
+          items:
+            $ref: "#/components/schemas/RelationshipEdge"
+        generatedAt:
+          type: string
+          format: date-time
+      required:
+        - clusters
+        - nodes
+        - edges
+        - generatedAt

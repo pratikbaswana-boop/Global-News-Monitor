@@ -1,0 +1,44 @@
+modules = ["nodejs-24"]
+
+[deployment]
+router = "application"
+deploymentTarget = "autoscale"
+
+[deployment.postBuild]
+args = ["pnpm", "store", "prune"]
+env = { "CI" = "true" }
+
+[workflows]
+runButton = "Project"
+
+[agent]
+stack = "PNPM_WORKSPACE"
+expertMode = true
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 20000
+
+[[ports]]
+localPort = 8080
+externalPort = 8080
+
+[[ports]]
+localPort = 8081
+externalPort = 80
+
+[[ports]]
+localPort = 8082
+externalPort = 3002
+
+[[ports]]
+localPort = 22519
+externalPort = 3000
+
+[userenv]
+
+[userenv.shared]
+NEWSAPI_KEY = "b54459f8962a43789974746fda09b5f2"
+GNEWS_KEY = "6bf8b57f2ea5441eb7e216fffb194986"
+GUARDIAN_KEY = "2ac81b88-06df-4775-803c-4b87f7295ef2"
+NEWS_FETCH_INTERVAL_HOURS = "6"
