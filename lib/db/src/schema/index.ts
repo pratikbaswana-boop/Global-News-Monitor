@@ -20,3 +20,13 @@
 export * from "./signal-snapshots";
 export * from "./prediction-snapshots";
 export * from "./push-subscriptions";
+// Phase 1 — Signal Harvesting & Intelligent Ingestion
+export * from "./feed-registry";
+export * from "./raw-articles";
+export * from "./extracted-events";
+// Phase 2 — Dynamic Knowledge Graph
+export * from "./stories";
+// Phase 3 — Multi-Agent Reasoning Engine
+export * from "./prediction-v2";
+// Phase 4 — Market Regime Detection
+export * from "./market-regimes";

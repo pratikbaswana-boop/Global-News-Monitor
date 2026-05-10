@@ -1,9 +1,17 @@
 import { Router } from "express";
 import { GetIntelligenceClustersResponse, GetIntelligencePredictionsResponse, GetIntelligenceMarketSignalsResponse, GetIntelligenceTrackRecordResponse } from "@workspace/api-zod";
-import { db, marketSnapshotsTable, predictionSnapshotsTable } from "@workspace/db";
+import { db, marketSnapshotsTable, predictionSnapshotsTable, predictionV2Table } from "@workspace/db";
 import { eq, lt, gt, isNull, and, desc } from "drizzle-orm";
 import { sendPushToAll } from "./push.js";
 import { openai } from "@workspace/integrations-openai-ai-server";
+import { getActiveStories, isGraphAvailable } from "../services/graph/index.js";
+import { isChromaAvailable } from "../services/reasoning/index.js";
+import type { SituationReport } from "../services/reasoning/agent-analyst.js";
+import type { HistorianReport } from "../services/reasoning/agent-historian.js";
+import type { ForecasterTree } from "../services/reasoning/agent-forecaster.js";
+import type { Scenario } from "../services/reasoning/agent-forecaster.js";
+import { detectRegime, fetchNSEPriceData, runMarketAgent } from "../services/market/index.js";
+import { marketRegimesTable } from "@workspace/db";
 
 const router = Router();
 
@@ -333,7 +341,45 @@ export function updateIntelligenceCache(articles: RawArticle[]) {
 }
 
 router.get("/intelligence/clusters", async (req, res) => {
-  // If cache empty, fetch fresh from the news endpoint internally
+  // ── Phase 2: Read from Neo4j knowledge graph when available ───────────────
+  const graphAvailable = await isGraphAvailable().catch(() => false);
+
+  if (graphAvailable) {
+    try {
+      const stories = await getActiveStories();
+      const clusters = stories.map((story) => ({
+        id: story.id,
+        title: story.label,
+        summary: `${story.eventCount} events tracked via knowledge graph.${
+          story.narrativeDriftScore > 0.25
+            ? ` Narrative drift detected: ${story.driftDescription ?? "story character changing."}`
+            : ""
+        }`,
+        category: "general" as const,
+        countries: story.countryIsos,
+        leaders: [] as string[],
+        articles: [] as RawArticle[],
+        causalChain: [] as { fromArticleId: string; toArticleId: string; relationship: string; strength: number }[],
+        articleCount: story.eventCount,
+        latestAt: story.latestEventDate
+          ? new Date(story.latestEventDate).toISOString()
+          : new Date().toISOString(),
+        earliestAt: new Date().toISOString(),
+      }));
+
+      const response = GetIntelligenceClustersResponse.parse({
+        clusters,
+        nodes: [],
+        edges: [],
+        generatedAt: new Date().toISOString(),
+      });
+      return res.json(response);
+    } catch {
+      // fall through to legacy path on graph error
+    }
+  }
+
+  // ── Legacy fallback: CLUSTER_TEMPLATES (active until Neo4j is connected) ──
   if (_articlesCache.length === 0) {
     try {
       const baseUrl = `http://localhost:${process.env["PORT"] ?? 8080}`;
@@ -349,7 +395,6 @@ router.get("/intelligence/clusters", async (req, res) => {
 
   const articles = _articlesCache;
 
-  // Score and cluster articles
   const clusterArticlesMap = new Map<string, RawArticle[]>();
   const articleClusterScore = new Map<string, Map<string, number>>();
 
@@ -362,7 +407,6 @@ router.get("/intelligence/clusters", async (req, res) => {
     articleClusterScore.set(article.id, scores);
   }
 
-  // Assign each article to its best-matching cluster (if score >= threshold)
   const THRESHOLD = 4;
   for (const article of articles) {
     const scores = articleClusterScore.get(article.id) ?? new Map();
@@ -381,20 +425,16 @@ router.get("/intelligence/clusters", async (req, res) => {
     }
   }
 
-  // Build StoryCluster objects
   const clusters = CLUSTER_TEMPLATES.map((template) => {
     const clusterArticles = clusterArticlesMap.get(template.id) ?? [];
-
     if (clusterArticles.length === 0) return null;
 
     const sorted = [...clusterArticles].sort(
       (a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime()
     );
-
     const dates = clusterArticles.map((a) => new Date(a.publishedAt).getTime());
     const latestAt = new Date(Math.max(...dates)).toISOString();
     const earliestAt = new Date(Math.min(...dates)).toISOString();
-
     const allCountries = [...new Set(clusterArticles.flatMap((a) => a.countries))];
     const allLeaders = [...new Set(clusterArticles.flatMap((a) => a.leaders))];
     const causalChain = buildCausalChain(sorted, template);
@@ -414,7 +454,6 @@ router.get("/intelligence/clusters", async (req, res) => {
     };
   }).filter(Boolean);
 
-  // Build relationship graph across all articles
   const { nodes, edges } = buildRelationshipGraph(articles);
 
   const response = GetIntelligenceClustersResponse.parse({
@@ -686,7 +725,114 @@ function scorePrediction(
   return { score, triggerArticles };
 }
 
+// ── Phase 3 helpers ─────────────────────────────────────────────────────────
+
+function daysToTimeframe(days: number): "1-2 weeks" | "1 month" | "3 months" | "6+ months" {
+  if (days <= 14) return "1-2 weeks";
+  if (days <= 30) return "1 month";
+  if (days <= 90) return "3 months";
+  return "6+ months";
+}
+
+function confidenceFromScore(score: number): "high" | "medium" | "low" {
+  if (score >= 0.7) return "high";
+  if (score >= 0.45) return "medium";
+  return "low";
+}
+
+function riskFromTensions(report: SituationReport): "critical" | "high" | "medium" | "low" {
+  const intensityOrder = ["critical", "high", "medium", "low"] as const;
+  for (const level of intensityOrder) {
+    if (report.tensionIndicators.some(t => t.intensity === level)) return level;
+  }
+  return "low";
+}
+
+function channelToCategory(channel: string): "politics" | "deals" | "sanctions" | "tensions" | "general" {
+  if (channel.startsWith("crude_oil") || channel === "middle_east_conflict") return "tensions";
+  if (channel === "china_trade_escalation" || channel === "russia_sanctions_tighten") return "sanctions";
+  if (channel === "fii_risk_off" || channel.startsWith("usd_inr") || channel === "fed_hawkish_signal" || channel === "rbi_surprise_action" || channel === "global_risk_off") return "politics";
+  return "general";
+}
+
+function adaptPredictionV2(row: typeof predictionV2Table.$inferSelect) {
+  try {
+    const analyst = JSON.parse(row.analystReport) as SituationReport;
+    const historian = JSON.parse(row.historianPrecedents) as HistorianReport;
+    const forecaster = JSON.parse(row.forecasterTree) as ForecasterTree;
+    const finalScenarios = JSON.parse(row.finalScenarios) as Scenario[];
+
+    const dominant = finalScenarios[forecaster.dominantScenario] ?? finalScenarios[0];
+    if (!dominant) return null;
+
+    const precedent = historian.analogues[0]
+      ? `${historian.historicalPattern} Most relevant: ${historian.analogues[0].document.slice(0, 200)}`
+      : historian.historicalPattern;
+
+    return {
+      id: row.id,
+      clusterId: row.storyId,
+      clusterTitle: `Story: ${row.storyId.slice(0, 8)}`,
+      headline: dominant.label,
+      reasoning: dominant.narrative,
+      confidence: confidenceFromScore(forecaster.modelConfidence),
+      riskLevel: riskFromTensions(analyst),
+      timeframe: daysToTimeframe(dominant.timeframeDays),
+      category: channelToCategory(row.dominantChannel ?? ""),
+      countries: analyst.primaryActors.map(a => a.actorLabel),
+      leaders: [] as string[],
+      triggerArticleIds: [] as string[],
+      triggerSummary: historian.historicalPattern,
+      historicalPrecedent: precedent.slice(0, 500),
+      potentialOutcomes: finalScenarios.map(s => s.label),
+      generatedAt: new Date(row.generatedAt).toISOString(),
+      resolveAfter: new Date(row.resolveAfter).toISOString(),
+      snapshotId: row.id,
+      templateAccuracy: null as number | null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 router.get("/intelligence/predictions", async (req, res) => {
+  // ── Phase 3: Serve from prediction_v2 when reasoning pipeline is active ────
+  const [graphOk, chromaOk] = await Promise.all([
+    isGraphAvailable().catch(() => false),
+    isChromaAvailable().catch(() => false),
+  ]);
+
+  if (graphOk && chromaOk) {
+    try {
+      const cutoff = new Date(Date.now() - 12 * 60 * 60 * 1000); // last 12h
+      const rows = await db
+        .select()
+        .from(predictionV2Table)
+        .where(and(
+          eq(predictionV2Table.resolutionStatus, "pending"),
+          gt(predictionV2Table.generatedAt, cutoff),
+        ))
+        .orderBy(desc(predictionV2Table.generatedAt))
+        .limit(25);
+
+      if (rows.length > 0) {
+        const predictions = rows.map(adaptPredictionV2).filter(Boolean);
+        if (predictions.length > 0) {
+          const response = GetIntelligencePredictionsResponse.parse({
+            predictions,
+            totalSignals: predictions.length,
+            generatedAt: new Date().toISOString(),
+          });
+          return res.json(response);
+        }
+      }
+    } catch {
+      // fall through to legacy path on error
+    }
+  }
+
+  // ── Legacy fallback: PREDICTION_TEMPLATES (active until reasoning pipeline has data) ──
+
   // Fetch articles via internal call if cache empty
   if (_articlesCache.length === 0) {
     try {
@@ -1889,6 +2035,25 @@ router.get("/intelligence/market-signals", async (req, res) => {
   }
   const articles = _articlesCache;
 
+  // ── Phase 4: Check if HMM regime data is available ───────────────────────────
+  // When market_regimes has recent data, use regime-aware runMarketAgent instead of
+  // keyword-based aiPredictAsset. Falls back to legacy path if no regime data.
+  const recentRegimeCutoff = new Date(Date.now() - 2 * 60 * 60 * 1000); // last 2h
+  const recentRegimes = await Promise.all(
+    ASSET_TEMPLATES.map(async (a) => {
+      try {
+        const rows = await db
+          .select()
+          .from(marketRegimesTable)
+          .where(and(eq(marketRegimesTable.assetId, a.id), gt(marketRegimesTable.detectedAt, recentRegimeCutoff)))
+          .orderBy(desc(marketRegimesTable.detectedAt))
+          .limit(1);
+        return rows[0] ?? null;
+      } catch { return null; }
+    })
+  );
+  const useRegimeAgent = recentRegimes.some(r => r !== null);
+
   // Fetch real prices + 7-day OHLCV history + DB snapshot history + lessons — all in parallel
   const [realPrices, historicalData, assetHistories, assetLessons] = await Promise.all([
     Promise.all(ASSET_TEMPLATES.map((a) => fetchRealPrice(a.id))),
@@ -1909,9 +2074,55 @@ router.get("/intelligence/market-signals", async (req, res) => {
 
   // Run AI predictions for all assets in parallel (each is cached 1hr individually)
   const aiPredictions = await Promise.all(
-    ASSET_TEMPLATES.map((asset, idx) =>
-      aiPredictAsset(asset, articles, historicalData[idx] ?? null, assetLessons[idx] ?? null)
-    )
+    ASSET_TEMPLATES.map(async (asset, idx) => {
+      const storedRegime = recentRegimes[idx];
+      const historical = historicalData[idx] ?? null;
+      const lessons = assetLessons[idx] ?? null;
+
+      // ── Phase 4 path: regime-aware market agent ──────────────────────────────
+      if (useRegimeAgent && storedRegime) {
+        try {
+          const candleSummary = historical
+            ? historical.candles.map((c) =>
+                `${c.date}: O=${c.open} H=${c.high} L=${c.low} C=${c.close} Chg=${c.changePct > 0 ? "+" : ""}${c.changePct}%`
+              ).join("\n")
+            : "Historical price data unavailable.";
+          const marketStats = historical
+            ? `7-day change: ${historical.sevenDayChangePct > 0 ? "+" : ""}${historical.sevenDayChangePct}% | Avg daily range: ${historical.avgDailyRangePct}% | Trend: ${historical.trend} | Volatility: ${historical.volatility}`
+            : "";
+
+          const regimeState = {
+            regime: storedRegime.regime as "bull" | "sideways" | "bear",
+            probabilities: { bull: storedRegime.bullProbability, sideways: storedRegime.sidewaysProbability, bear: storedRegime.bearProbability },
+            confidence: Math.max(storedRegime.bullProbability, storedRegime.sidewaysProbability, storedRegime.bearProbability),
+            sequenceSummary: "stored",
+          };
+
+          const signal = await runMarketAgent(asset.id, asset.name, asset.symbol, regimeState, candleSummary, marketStats, lessons);
+          // Adapt MarketSignal → AIPrediction shape
+          return {
+            direction: signal.direction,
+            magnitude: signal.magnitude,
+            confidence: signal.confidence,
+            timeframe: signal.timeframe,
+            priceImpactEstimate: signal.priceImpactEstimate,
+            verdict: signal.verdict,
+            dominantNarrative: signal.dominantNarrative,
+            assumptions: signal.assumptions,
+            triggerNewsSummary: signal.triggerNewsSummary,
+            bullScore: signal.bullScore,
+            bearScore: signal.bearScore,
+            activeBullSignals: [] as { template: MarketSignalTemplate; articleIds: string[] }[],
+            activeBearSignals: [] as { template: MarketSignalTemplate; articleIds: string[] }[],
+          };
+        } catch {
+          // fall through to legacy path
+        }
+      }
+
+      // ── Legacy path: keyword bull/bear scoring ────────────────────────────────
+      return aiPredictAsset(asset, articles, historical, lessons);
+    })
   );
 
   const assets = ASSET_TEMPLATES.map((asset, idx) => {
@@ -1924,12 +2135,12 @@ router.get("/intelligence/market-signals", async (req, res) => {
     const history = assetHistories[idx] ?? [];
 
     const triggerArticleIds = [...new Set([
-      ...activeBullSignals.flatMap((s) => s.articleIds),
-      ...activeBearSignals.flatMap((s) => s.articleIds),
+      ...(activeBullSignals ?? []).flatMap((s) => s.articleIds),
+      ...(activeBearSignals ?? []).flatMap((s) => s.articleIds),
     ])].slice(0, 10);
 
     // Fire-and-forget: early flip detection, resolve expired snapshots, save new snapshot
-    void detectEarlyFlipAndNotify(asset.id, asset.symbol, direction, verdict, activeBullSignals, activeBearSignals);
+    void detectEarlyFlipAndNotify(asset.id, asset.symbol, direction, verdict, activeBullSignals ?? [], activeBearSignals ?? []);
     void resolvePendingSnapshots(asset.id, direction, realPrice);
     void saveSnapshot(
       asset.id, asset.name, asset.symbol,
@@ -1988,7 +2199,7 @@ router.get("/intelligence/market-signals", async (req, res) => {
       priceImpactEstimate,
       bullScore,
       bearScore,
-      bullSignals: activeBullSignals.map((s) => ({
+      bullSignals: (activeBullSignals ?? []).map((s) => ({
         id: s.template.id,
         title: s.template.title,
         reasoning: s.template.reasoning,
@@ -1996,7 +2207,7 @@ router.get("/intelligence/market-signals", async (req, res) => {
         sourceArticleIds: s.articleIds,
         geopoliticalEvent: s.template.geopoliticalEvent,
       })),
-      bearSignals: activeBearSignals.map((s) => ({
+      bearSignals: (activeBearSignals ?? []).map((s) => ({
         id: s.template.id,
         title: s.template.title,
         reasoning: s.template.reasoning,
@@ -2153,6 +2364,168 @@ router.get("/intelligence/track-record", async (req, res) => {
   });
 
   res.json(response);
+});
+
+// ─── Phase 5: Brier score calibration summary ────────────────────────────────
+// GET /api/intelligence/calibration — returns Brier scores and Devil's Advocate accuracy
+// across all resolved prediction_v2 entries.
+
+router.get("/intelligence/calibration", async (_req, res) => {
+  try {
+    const resolved = await db
+      .select({
+        id: predictionV2Table.id,
+        storyId: predictionV2Table.storyId,
+        brierScore: predictionV2Table.brierScore,
+        devilWasRight: predictionV2Table.devilWasRight,
+        missedChannel: predictionV2Table.missedChannel,
+        dominantChannel: predictionV2Table.dominantChannel,
+        flags: predictionV2Table.flags,
+        generatedAt: predictionV2Table.generatedAt,
+        resolvedAt: predictionV2Table.resolvedAt,
+      })
+      .from(predictionV2Table)
+      .where(eq(predictionV2Table.resolutionStatus, "auto_resolved"))
+      .orderBy(desc(predictionV2Table.resolvedAt))
+      .limit(200);
+
+    const withScore = resolved.filter(r => r.brierScore !== null);
+    const avgBrier = withScore.length > 0
+      ? Math.round((withScore.reduce((s, r) => s + (r.brierScore ?? 0), 0) / withScore.length) * 10000) / 10000
+      : null;
+
+    const devilRight = resolved.filter(r => r.devilWasRight === "true").length;
+    const devilTotal = resolved.filter(r => r.devilWasRight !== null).length;
+
+    // Channel frequency from resolved predictions
+    const channelCounts: Record<string, number> = {};
+    for (const r of resolved) {
+      const ch = r.missedChannel ?? r.dominantChannel;
+      if (ch) channelCounts[ch] = (channelCounts[ch] ?? 0) + 1;
+    }
+
+    // Flag frequency
+    const flagCounts: Record<string, number> = {};
+    for (const r of resolved) {
+      try {
+        const flags = JSON.parse(r.flags ?? "[]") as string[];
+        for (const f of flags) flagCounts[f] = (flagCounts[f] ?? 0) + 1;
+      } catch { /* skip */ }
+    }
+
+    return res.json({
+      totalResolved: resolved.length,
+      averageBrierScore: avgBrier,
+      brierLabel: avgBrier !== null ? (avgBrier <= 0.10 ? "Excellent" : avgBrier <= 0.20 ? "Good" : avgBrier <= 0.33 ? "Acceptable" : "Poor") : null,
+      devilAdvocateAccuracy: devilTotal > 0 ? Math.round((devilRight / devilTotal) * 100) : null,
+      devilRight,
+      devilTotal,
+      topMissedChannels: Object.entries(channelCounts).sort((a, b) => b[1] - a[1]).slice(0, 5),
+      flagFrequency: flagCounts,
+      entries: resolved.slice(0, 50).map(r => ({
+        id: r.id,
+        storyId: r.storyId,
+        brierScore: r.brierScore,
+        devilWasRight: r.devilWasRight === "true",
+        missedChannel: r.missedChannel,
+        dominantChannel: r.dominantChannel,
+        generatedAt: r.generatedAt,
+        resolvedAt: r.resolvedAt,
+      })),
+      generatedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    return res.status(500).json({ error: "Calibration data unavailable", detail: String(err) });
+  }
+});
+
+// POST /api/intelligence/predictions/:id/resolve — manual resolution by admin
+// Body: { materialisedScenarioIndex: number | null, outcomeDescription: string }
+
+router.post("/intelligence/predictions/:id/resolve", async (req, res) => {
+  const adminToken = req.headers["x-admin-token"];
+  if (!adminToken || adminToken !== process.env["ADMIN_SECRET"]) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  const { id } = req.params;
+  const { materialisedScenarioIndex, outcomeDescription } = req.body as {
+    materialisedScenarioIndex: number | null;
+    outcomeDescription: string;
+  };
+
+  const rows = await db.select().from(predictionV2Table).where(eq(predictionV2Table.id, id)).limit(1);
+  if (!rows.length) return res.status(404).json({ error: "Prediction not found" });
+
+  const row = rows[0]!;
+  const { computeBrierScore } = await import("../services/resolution/index.js");
+  const { runForensicsAgent } = await import("../services/resolution/forensics.js");
+
+  try {
+    const finalScenarios = JSON.parse(row.finalScenarios) as Array<{ label: string; probability: number; narrative?: string; keyIndicators?: string[]; falsificationConditions?: string[]; transmissionChannelIds?: string[]; historicalBaseRate?: number; timeframeDays?: number }>;
+    const devilCritique = JSON.parse(row.devilCritique);
+
+    const scored = finalScenarios.map((s, i) => ({
+      label: s.label,
+      probability: s.probability,
+      materialised: i === materialisedScenarioIndex,
+    }));
+    const brierScore = computeBrierScore(scored);
+
+    const forensics = await runForensicsAgent(
+      row.storyId,
+      finalScenarios as Parameters<typeof runForensicsAgent>[1],
+      devilCritique as Parameters<typeof runForensicsAgent>[2],
+      materialisedScenarioIndex,
+      outcomeDescription
+    );
+
+    await db.update(predictionV2Table)
+      .set({
+        resolutionStatus: "manually_resolved",
+        resolvedAt: new Date(),
+        brierScore,
+        lessonsLearned: JSON.stringify(forensics.lessonsLearned),
+        devilWasRight: String(forensics.devilWasRight),
+        missedChannel: forensics.missedChannel,
+        dominantChannel: forensics.dominantChannel ?? row.dominantChannel,
+      })
+      .where(eq(predictionV2Table.id, id));
+
+    return res.json({ ok: true, brierScore, devilWasRight: forensics.devilWasRight });
+  } catch (err) {
+    return res.status(500).json({ error: "Resolution failed", detail: String(err) });
+  }
+});
+
+// ─── Phase 3: Corpus ingest (admin) ──────────────────────────────────────────
+// POST /api/intelligence/corpus/ingest  — idempotent, one-time data load
+// Body: { icb: IcbCrisis[], acled: AcledWindow[] }
+// Requires ADMIN_TOKEN header matching ADMIN_SECRET env var.
+
+router.post("/intelligence/corpus/ingest", async (req, res) => {
+  const adminToken = req.headers["x-admin-token"];
+  const adminSecret = process.env["ADMIN_SECRET"];
+  if (!adminSecret || adminToken !== adminSecret) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  const { ingestIcbCorpus, ingestAcledCorpus } = await import("../services/reasoning/index.js");
+  const body = req.body as { icb?: unknown[]; acled?: unknown[] };
+
+  const results: Record<string, string> = {};
+
+  if (Array.isArray(body.icb) && body.icb.length > 0) {
+    await ingestIcbCorpus(body.icb as Parameters<typeof ingestIcbCorpus>[0]);
+    results["icb"] = `${body.icb.length} crises submitted`;
+  }
+
+  if (Array.isArray(body.acled) && body.acled.length > 0) {
+    await ingestAcledCorpus(body.acled as Parameters<typeof ingestAcledCorpus>[0]);
+    results["acled"] = `${body.acled.length} windows submitted`;
+  }
+
+  return res.json({ ok: true, results });
 });
 
 export default router;
