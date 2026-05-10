@@ -85,7 +85,7 @@ Identify the weakest assumption, ignored signals, a missing minority scenario, a
 
   const response = await openai.chat.completions.create({
     model: "gpt-4o",
-    temperature: 0.4,
+    temperature: 0.9,
     max_tokens: 2000,
     response_format: { type: "json_object" },
     messages: [

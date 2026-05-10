@@ -12,6 +12,7 @@ import { runHistorianAgent } from "./agent-historian.js";
 import { runForecasterAgent } from "./agent-forecaster.js";
 import { runDevilAgent } from "./agent-devil.js";
 import { getFeedbackLessons } from "../resolution/forensics.js";
+import { getCalibrationWarning } from "./self-calibration.js";
 
 // ── Pipeline state ─────────────────────────────────────────────────────────────
 
@@ -29,6 +30,7 @@ async function fetchStorySubgraph(storyId: string): Promise<string> {
     `
     MATCH (s:Story {id: $storyId})
     OPTIONAL MATCH (s)-[:CONTAINS]->(e:Event)
+      WHERE e.eventDate >= datetime() - duration({hours: 72})
     OPTIONAL MATCH (e)-[:ACTED_ON]->(c:Country)
     OPTIONAL MATCH (e1:Event)-[r:CONTRADICTS]->(e2:Event)
       WHERE (s)-[:CONTAINS]->(e1) AND (s)-[:CONTAINS]->(e2)
@@ -121,9 +123,15 @@ export async function runPipeline(storyId: string): Promise<void> {
       state.flags.push("no_historical_analogue");
     }
 
-    // ── Stage 4: Forecaster ───────────────────────────────────────────────────
+    // ── Stage 4: Forecaster (with self-calibration warning if Brier > 0.22) ────
     state.stage = "forecaster";
-    const forecasterTree = await runForecasterAgent(storyId, situationReport, historianReport);
+    const dominantChannel = situationReport.indianMarketExposure?.channels?.[0] ?? "unknown";
+    const calibrationWarning = getCalibrationWarning(dominantChannel);
+    if (calibrationWarning) {
+      logger.warn({ storyId, dominantChannel }, "pipeline: calibration penalty active for this story type");
+      state.flags.push("calibration_penalty_active");
+    }
+    const forecasterTree = await runForecasterAgent(storyId, situationReport, historianReport, calibrationWarning ?? undefined);
 
     // ── Stage 5: Devil's Advocate ─────────────────────────────────────────────
     state.stage = "devil";

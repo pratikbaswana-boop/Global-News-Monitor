@@ -66,7 +66,8 @@ Rules:
 export async function runForecasterAgent(
   storyId: string,
   situationReport: SituationReport,
-  historianReport: HistorianReport
+  historianReport: HistorianReport,
+  calibrationWarning?: string
 ): Promise<ForecasterTree> {
   logger.info({ storyId }, "forecaster agent: generating scenario tree");
 
@@ -74,7 +75,9 @@ export async function runForecasterAgent(
     .map(r => `${r.outcome}: ${(r.probability * 100).toFixed(0)}% (n=${r.analogueCount} analogues)`)
     .join(", ");
 
-  const userContent = `Generate a probabilistic scenario tree for this geopolitical situation.
+  const calibrationSection = calibrationWarning ? `\n${calibrationWarning}\n` : "";
+
+  const userContent = `Generate a probabilistic scenario tree for this geopolitical situation.${calibrationSection}
 
 SITUATION ASSESSMENT:
 Power configuration: ${situationReport.powerConfiguration}

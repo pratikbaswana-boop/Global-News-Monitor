@@ -506,4 +506,46 @@ export const FEED_REGISTRY_SEED: InsertFeedRegistry[] = [
     fetchIntervalSeconds: 1800,
     parser: "rss",
   },
+
+  // ─── FRED (St Louis Federal Reserve) — macro economic indicators ──────────
+  {
+    id: "fred-fed-funds-rate",
+    name: "FRED: Federal Funds Rate",
+    url: "https://api.stlouisfed.org/fred/series/observations?series_id=FEDFUNDS&api_key=public&file_type=json&limit=12&sort_order=desc",
+    type: "api",
+    credibilityTier: 1,
+    isStateMedia: false,
+    fetchIntervalSeconds: 86400, // daily
+    parser: "fred",
+  },
+  {
+    id: "fred-us-cpi",
+    name: "FRED: US CPI (YoY)",
+    url: "https://api.stlouisfed.org/fred/series/observations?series_id=CPIAUCSL&api_key=public&file_type=json&limit=12&sort_order=desc",
+    type: "api",
+    credibilityTier: 1,
+    isStateMedia: false,
+    fetchIntervalSeconds: 86400,
+    parser: "fred",
+  },
+  {
+    id: "fred-wti-crude",
+    name: "FRED: WTI Crude Oil Price",
+    url: "https://api.stlouisfed.org/fred/series/observations?series_id=DCOILWTICO&api_key=public&file_type=json&limit=30&sort_order=desc",
+    type: "api",
+    credibilityTier: 1,
+    isStateMedia: false,
+    fetchIntervalSeconds: 86400,
+    parser: "fred",
+  },
+  {
+    id: "fred-usd-dxy",
+    name: "FRED: US Dollar Index (DXY)",
+    url: "https://api.stlouisfed.org/fred/series/observations?series_id=DTWEXBGS&api_key=public&file_type=json&limit=30&sort_order=desc",
+    type: "api",
+    credibilityTier: 1,
+    isStateMedia: false,
+    fetchIntervalSeconds: 86400,
+    parser: "fred",
+  },
 ];

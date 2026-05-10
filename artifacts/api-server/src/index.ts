@@ -3,8 +3,11 @@ import { logger } from "./lib/logger";
 import { startIngestionScheduler } from "./services/ingestion/index.js";
 import { startGraphScheduler } from "./services/graph/index.js";
 import { startReasoningScheduler } from "./services/reasoning/index.js";
+import { startSelfCalibrationScheduler } from "./services/reasoning/self-calibration.js";
 import { startMarketScheduler } from "./services/market/index.js";
 import { startResolutionScheduler } from "./services/resolution/index.js";
+import { startMarketCloseSummaryScheduler } from "./services/notifications/push-notifications.js";
+import { startChannelRecalibrationScheduler } from "./services/graph/channel-recalibration.js";
 
 const rawPort = process.env["PORT"];
 
@@ -48,4 +51,13 @@ app.listen(port, (err) => {
 
   // Phase 5: Start automated resolution watcher (runs every 6h).
   startResolutionScheduler();
+
+  // Phase 5+: Self-calibration job (runs daily — injects Brier penalty when rolling score > 0.22).
+  startSelfCalibrationScheduler();
+
+  // Notifications: Market close summary (fires at 15:30 IST = 10:00 UTC daily).
+  startMarketCloseSummaryScheduler();
+
+  // Quarterly: Pearson recalibration of transmission channel correlations.
+  startChannelRecalibrationScheduler();
 });

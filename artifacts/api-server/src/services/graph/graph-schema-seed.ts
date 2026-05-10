@@ -222,9 +222,61 @@ export async function seedTransmissionChannels(): Promise<void> {
   }, "transmission channels and Indian assets seeded");
 }
 
+// ─── Organization Nodes ──────────────────────────────────────────────────────
+
+const ORGANIZATIONS = [
+  { id: "UN", name: "United Nations", type: "IGO", founded: 1945 },
+  { id: "NATO", name: "North Atlantic Treaty Organization", type: "military_alliance", founded: 1949 },
+  { id: "SCO", name: "Shanghai Cooperation Organisation", type: "IGO", founded: 2001 },
+  { id: "BRICS", name: "BRICS", type: "economic_bloc", founded: 2009 },
+  { id: "G7", name: "Group of Seven", type: "economic_forum", founded: 1975 },
+  { id: "G20", name: "Group of Twenty", type: "economic_forum", founded: 1999 },
+  { id: "OPEC", name: "OPEC", type: "commodity_cartel", founded: 1960 },
+  { id: "WTO", name: "World Trade Organization", type: "trade_body", founded: 1995 },
+  { id: "IMF", name: "International Monetary Fund", type: "financial_institution", founded: 1945 },
+  { id: "FATF", name: "Financial Action Task Force", type: "regulatory", founded: 1989 },
+];
+
+export async function seedOrganizations(): Promise<void> {
+  for (const org of ORGANIZATIONS) {
+    await runCypher(
+      `MERGE (o:Organization {id: $id})
+       SET o.name = $name, o.type = $type, o.founded = $founded`,
+      org
+    );
+  }
+  logger.info({ count: ORGANIZATIONS.length }, "organization nodes seeded");
+}
+
+// ─── Treaty Nodes ─────────────────────────────────────────────────────────────
+
+const TREATIES = [
+  { id: "NPT", name: "Treaty on the Non-Proliferation of Nuclear Weapons", domain: "nuclear", year: 1968 },
+  { id: "JCPOA", name: "Joint Comprehensive Plan of Action (Iran Deal)", domain: "nuclear", year: 2015 },
+  { id: "INF", name: "Intermediate-Range Nuclear Forces Treaty", domain: "nuclear", year: 1987 },
+  { id: "START3", name: "New START Treaty", domain: "nuclear", year: 2010 },
+  { id: "UNCLOS", name: "UN Convention on the Law of the Sea", domain: "maritime", year: 1982 },
+  { id: "Paris_Agreement", name: "Paris Agreement on Climate Change", domain: "climate", year: 2015 },
+  { id: "QUAD", name: "Quadrilateral Security Dialogue", domain: "security", year: 2007 },
+  { id: "AUKUS", name: "AUKUS Security Partnership", domain: "defense", year: 2021 },
+];
+
+export async function seedTreaties(): Promise<void> {
+  for (const treaty of TREATIES) {
+    await runCypher(
+      `MERGE (t:Treaty {id: $id})
+       SET t.name = $name, t.domain = $domain, t.year = $year`,
+      treaty
+    );
+  }
+  logger.info({ count: TREATIES.length }, "treaty nodes seeded");
+}
+
 export async function seedGraphSchema(): Promise<void> {
   await createIndexes();
   await seedCountries();
   await seedTransmissionChannels();
+  await seedOrganizations();
+  await seedTreaties();
   logger.info("phase 2 graph schema seed complete");
 }

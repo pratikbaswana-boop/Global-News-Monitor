@@ -1,4 +1,4 @@
-import { pgTable, text, numeric, boolean, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, text, numeric, boolean, timestamp, real } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -30,6 +30,13 @@ export const marketSnapshotsTable = pgTable("market_snapshots", {
   resolutionNotes: text("resolution_notes"),
   flipReason: text("flip_reason"),
   lessonsLearned: text("lessons_learned"),
+  // Regime & ensemble columns
+  regimeAtSnapshot: text("regime_at_snapshot"),           // RISK_ON | RISK_OFF | CRISIS
+  activeChannels: text("active_channels"),                // JSON array of active Neo4j transmission channel IDs
+  ensembleVotes: text("ensemble_votes"),                  // JSON: { "6h": "BULLISH", "24h": "BEARISH", "72h": "BULLISH", "final": "UNCERTAIN" }
+  uncertaintyFlag: boolean("uncertainty_flag").default(false),
+  dominantChannel: text("dominant_channel"),              // e.g. "crude_oil_spike"
+  brierScoreContribution: real("brier_score_contribution"),
 });
 
 export const insertMarketSnapshotSchema = createInsertSchema(marketSnapshotsTable).omit({
@@ -42,6 +49,7 @@ export const insertMarketSnapshotSchema = createInsertSchema(marketSnapshotsTabl
   priceChangePct: true,
   flipReason: true,
   lessonsLearned: true,
+  brierScoreContribution: true,
 });
 export type InsertMarketSnapshot = z.infer<typeof insertMarketSnapshotSchema>;
 export type MarketSnapshot = typeof marketSnapshotsTable.$inferSelect;
