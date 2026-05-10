@@ -19,7 +19,9 @@
     "express": "^5",
     "pino": "^9",
     "pino-http": "^10",
-    "web-push": "^3.6.7"
+    "web-push": "^3.6.7",
+    "neo4j-driver": "^5.27.0",
+    "chromadb": "^1.9.2"
   },
   "devDependencies": {
     "@types/cookie-parser": "^1.4.10",
