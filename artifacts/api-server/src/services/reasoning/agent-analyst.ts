@@ -2,7 +2,7 @@
 // Input: story subgraph JSON (actors, events, contradictions, edges)
 // Output: SituationReport JSON
 
-import { openai } from "@workspace/integrations-openai-ai-server";
+import { chatComplete } from "@workspace/integrations-openai-ai-server";
 import { logger } from "../../lib/logger.js";
 
 export interface ActorPosition {
@@ -86,7 +86,7 @@ export async function runAnalystAgent(
 ): Promise<SituationReport> {
   logger.info({ storyId }, "analyst agent: starting situation assessment");
 
-  const response = await openai.chat.completions.create({
+  const response = await chatComplete({
     model: "gpt-4o",
     temperature: 0.2,
     max_tokens: 2000,

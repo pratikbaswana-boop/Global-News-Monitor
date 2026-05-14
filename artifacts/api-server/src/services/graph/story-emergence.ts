@@ -1,11 +1,11 @@
-import { openai } from "@workspace/integrations-openai-ai-server";
+import { chatComplete } from "@workspace/integrations-openai-ai-server";
 import { runCypher } from "./neo4j-client.js";
 import { detectCommunities, groupCommunities } from "./louvain.js";
 import { logger } from "../../lib/logger.js";
 import { randomUUID } from "crypto";
 
-const MIN_COMMUNITY_EVENTS = 5;
-const MIN_COMMUNITY_COUNTRIES = 2;
+const MIN_COMMUNITY_EVENTS = 4;
+const MIN_COMMUNITY_COUNTRIES = 1;
 const STORY_CONTINUITY_OVERLAP_THRESHOLD = 0.60;
 const LOOKBACK_DAYS = 21;
 const MAX_ACTIVE_STORIES = 25; // hard cap per blueprint
@@ -44,7 +44,7 @@ async function labelCommunity(events: EventNode[]): Promise<string> {
     .join("\n");
 
   try {
-    const response = await openai.chat.completions.create({
+    const response = await chatComplete({
       model: "gpt-4o",
       temperature: 0.2,
       max_tokens: 30,

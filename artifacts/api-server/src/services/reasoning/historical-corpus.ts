@@ -4,7 +4,7 @@
 //
 // Run via: POST /api/intelligence/corpus/ingest (admin only, idempotent)
 
-import { openai } from "@workspace/integrations-openai-ai-server";
+import { openai, chatComplete } from "@workspace/integrations-openai-ai-server";
 import { getOrCreateCollection, COLLECTION_ICB, COLLECTION_ACLED } from "./chromadb-client.js";
 import { logger } from "../../lib/logger.js";
 
@@ -28,7 +28,7 @@ interface AcledWindow {
 
 // GPT-4o generates a 200-word summary of each crisis for embedding
 async function summarizeCrisis(crisis: IcbCrisis): Promise<string> {
-  const response = await openai.chat.completions.create({
+  const response = await chatComplete({
     model: "gpt-4o",
     temperature: 0.2,
     max_tokens: 250,

@@ -100,6 +100,9 @@ async function buildAll() {
       "puppeteer",
       "puppeteer-core",
       "electron",
+      "cohere-ai",
+      "ollama",
+      "chromadb-default-embed",
     ],
     sourcemap: "linked",
     plugins: [

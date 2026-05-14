@@ -1,0 +1,172 @@
+# Production stack — one-server Docker deploy.
+#
+# Quickstart on a fresh server (Ubuntu 22.04+, Docker installed):
+#   1. cp .env.production.example .env.production && $EDITOR .env.production
+#   2. docker compose -f docker-compose.prod.yml --env-file .env.production build
+#   3. docker compose -f docker-compose.prod.yml --env-file .env.production up -d
+#   4. docker compose -f docker-compose.prod.yml --env-file .env.production exec -T api-server \
+#        node -e "console.log('ok')"   # smoke check
+#   5. (one-time) Run DB migrations from a host with the lib/db package:
+#        pnpm --filter @workspace/db run push
+#      OR exec into a one-shot container using the same image.
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: gnm_postgres_prod
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-gnm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env.production}
+      POSTGRES_DB: ${POSTGRES_DB:-gnm}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gnm} -d ${POSTGRES_DB:-gnm}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [gnm]
+
+  neo4j:
+    image: neo4j:5
+    container_name: gnm_neo4j_prod
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:?set in .env.production}
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+      # Resource limits suitable for a small/medium VPS
+      NEO4J_server_memory_heap_initial__size: "512m"
+      NEO4J_server_memory_heap_max__size: "1G"
+      NEO4J_server_memory_pagecache_size: "512m"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    networks: [gnm]
+
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: gnm_chromadb_prod
+    restart: unless-stopped
+    environment:
+      IS_PERSISTENT: "TRUE"
+      ANONYMIZED_TELEMETRY: "FALSE"
+    volumes:
+      - chroma_data:/chroma/chroma
+    networks: [gnm]
+
+  # Run once after first `up -d`:
+  #   docker compose -f docker-compose.prod.yml --env-file .env.production run --rm migrate
+  migrate:
+    image: gnm/migrate:latest
+    build:
+      context: .
+      dockerfile: lib/db/Dockerfile
+    profiles: ["migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-gnm}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-gnm}
+    networks: [gnm]
+
+  api-server:
+    image: gnm/api-server:latest
+    build:
+      context: .
+      dockerfile: artifacts/api-server/Dockerfile
+    container_name: gnm_api_prod
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      chromadb:
+        condition: service_started
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+
+      # LLM provider — flip via .env.production
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
+      LLM_MODEL_CHAT: ${LLM_MODEL_CHAT:-gpt-4o-mini}
+      LLM_MODEL_EMBED: ${LLM_MODEL_EMBED:-text-embedding-3-small}
+
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?set in .env.production}
+      AI_INTEGRATIONS_OPENAI_API_KEY: ${OPENAI_API_KEY}
+      AI_INTEGRATIONS_OPENAI_BASE_URL: ${AI_INTEGRATIONS_OPENAI_BASE_URL:-https://api.openai.com/v1}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+
+      # Service URLs inside the docker network
+      DATABASE_URL: postgres://${POSTGRES_USER:-gnm}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-gnm}
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: ${NEO4J_USER:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      CHROMADB_HOST: chromadb
+      CHROMADB_PORT: "8000"
+
+      # News ingestion keys
+      NEWSAPI_KEY: ${NEWSAPI_KEY:-}
+      GNEWS_KEY: ${GNEWS_KEY:-}
+      GUARDIAN_KEY: ${GUARDIAN_KEY:-}
+      ACLED_API_KEY: ${ACLED_API_KEY:-}
+      ACLED_EMAIL: ${ACLED_EMAIL:-}
+      NEWS_FETCH_INTERVAL_HOURS: ${NEWS_FETCH_INTERVAL_HOURS:-1}
+
+      # Push / admin
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
+      ADMIN_SECRET: ${ADMIN_SECRET:?set in .env.production}
+      NOTIFICATION_WEBHOOK_URL: ${NOTIFICATION_WEBHOOK_URL:-}
+    networks: [gnm]
+
+  frontend:
+    image: gnm/frontend:latest
+    build:
+      context: .
+      dockerfile: artifacts/global-news/Dockerfile
+      args:
+        VITE_PORT: "80"
+        VITE_BASE_PATH: "/"
+    container_name: gnm_frontend_prod
+    restart: unless-stopped
+    networks: [gnm]
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: gnm_caddy_prod
+    restart: unless-stopped
+    depends_on:
+      - api-server
+      - frontend
+    environment:
+      DOMAIN: ${DOMAIN:-:80}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [gnm]
+
+networks:
+  gnm:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  neo4j_data:
+  neo4j_logs:
+  chroma_data:
+  caddy_data:
+  caddy_config:

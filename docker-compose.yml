@@ -1,0 +1,56 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: gnm_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gnm
+      POSTGRES_PASSWORD: gnm_dev_password
+      POSTGRES_DB: gnm
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gnm -d gnm"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  neo4j:
+    image: neo4j:5
+    container_name: gnm_neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/gnm_dev_password
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: gnm_chromadb
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    environment:
+      IS_PERSISTENT: "TRUE"
+      ANONYMIZED_TELEMETRY: "FALSE"
+
+volumes:
+  postgres_data:
+  neo4j_data:
+  neo4j_logs:
+  chroma_data:

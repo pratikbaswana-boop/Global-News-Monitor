@@ -2,7 +2,7 @@
 // Input: ForecasterTree only (isolated from analyst/historian to avoid anchoring)
 // Output: DevilCritique with revised probability intervals
 
-import { openai } from "@workspace/integrations-openai-ai-server";
+import { chatComplete } from "@workspace/integrations-openai-ai-server";
 import { logger } from "../../lib/logger.js";
 import type { ForecasterTree, Scenario } from "./agent-forecaster.js";
 
@@ -83,7 +83,7 @@ ${scenarioText}
 
 Identify the weakest assumption, ignored signals, a missing minority scenario, and revise the probability intervals.`;
 
-  const response = await openai.chat.completions.create({
+  const response = await chatComplete({
     model: "gpt-4o",
     temperature: 0.9,
     max_tokens: 2000,

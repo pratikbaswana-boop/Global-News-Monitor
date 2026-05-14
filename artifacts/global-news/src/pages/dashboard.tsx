@@ -45,11 +45,11 @@ export default function Dashboard() {
                 <>
                   <div className="flex items-center gap-2">
                     <Database className="h-4 w-4" />
-                    <span>{summaryData.totalArticles.toLocaleString()} Signals</span>
+                    <span>{(summaryData.totalArticles ?? 0).toLocaleString()} Signals</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <Clock className="h-4 w-4" />
-                    <span>Updated: {new Date(summaryData.lastUpdated).toLocaleTimeString()}</span>
+                    <span>Updated: {summaryData.lastUpdated ? new Date(summaryData.lastUpdated).toLocaleTimeString() : "—"}</span>
                   </div>
                 </>
               ) : null}
@@ -136,10 +136,10 @@ export default function Dashboard() {
                         </div>
                       ))}
                     </div>
-                  ) : trendingData && trendingData.countries.length > 0 ? (
+                  ) : trendingData?.countries && trendingData.countries.length > 0 ? (
                     <div className="p-4 space-y-5">
                       {trendingData.countries.slice(0, 8).map((country) => {
-                        const maxCount = trendingData.countries[0].count;
+                        const maxCount = trendingData.countries[0]?.count || 1;
                         const percentage = (country.count / maxCount) * 100;
                         return (
                           <div key={country.name} className="space-y-1.5 group">
@@ -167,23 +167,23 @@ export default function Dashboard() {
                     <div className="space-y-1.5">
                       <div className="flex justify-between text-sm">
                         <span className="text-emerald-400 font-medium">NewsAPI</span>
-                        <span className="text-xs font-mono">{summaryData.bySource.newsapi}</span>
+                        <span className="text-xs font-mono">{summaryData.bySource?.newsapi ?? 0}</span>
                       </div>
-                      <Progress value={(summaryData.bySource.newsapi / summaryData.totalArticles) * 100} className="h-1 bg-muted [&>div]:bg-emerald-400" />
+                      <Progress value={((summaryData.bySource?.newsapi ?? 0) / (summaryData.totalArticles || 1)) * 100} className="h-1 bg-muted [&>div]:bg-emerald-400" />
                     </div>
                     <div className="space-y-1.5">
                       <div className="flex justify-between text-sm">
                         <span className="text-violet-400 font-medium">GNews</span>
-                        <span className="text-xs font-mono">{summaryData.bySource.gnews}</span>
+                        <span className="text-xs font-mono">{summaryData.bySource?.gnews ?? 0}</span>
                       </div>
-                      <Progress value={(summaryData.bySource.gnews / summaryData.totalArticles) * 100} className="h-1 bg-muted [&>div]:bg-violet-400" />
+                      <Progress value={((summaryData.bySource?.gnews ?? 0) / (summaryData.totalArticles || 1)) * 100} className="h-1 bg-muted [&>div]:bg-violet-400" />
                     </div>
                     <div className="space-y-1.5">
                       <div className="flex justify-between text-sm">
                         <span className="text-rose-400 font-medium">The Guardian</span>
-                        <span className="text-xs font-mono">{summaryData.bySource.guardian}</span>
+                        <span className="text-xs font-mono">{summaryData.bySource?.guardian ?? 0}</span>
                       </div>
-                      <Progress value={(summaryData.bySource.guardian / summaryData.totalArticles) * 100} className="h-1 bg-muted [&>div]:bg-rose-400" />
+                      <Progress value={((summaryData.bySource?.guardian ?? 0) / (summaryData.totalArticles || 1)) * 100} className="h-1 bg-muted [&>div]:bg-rose-400" />
                     </div>
                   </CardContent>
                 </Card>

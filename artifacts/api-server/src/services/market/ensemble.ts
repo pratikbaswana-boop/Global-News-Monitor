@@ -2,7 +2,7 @@
 // Three independent GPT-4o calls with different context windows: 6h / 24h / 72h.
 // Majority vote determines final call; 3-way split or CRISIS regime → UNCERTAIN.
 
-import { openai } from "@workspace/integrations-openai-ai-server";
+import { chatComplete } from "@workspace/integrations-openai-ai-server";
 import { logger } from "../../lib/logger.js";
 import type { Regime } from "./hmm-regime.js";
 
@@ -59,7 +59,7 @@ CONTEXT (${window} window):
 ${contextSummary}`;
 
   try {
-    const response = await openai.chat.completions.create({
+    const response = await chatComplete({
       model: "gpt-4o",
       temperature: 0.2,
       max_tokens: 300,

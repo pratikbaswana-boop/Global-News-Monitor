@@ -2,7 +2,7 @@
 // Input: SituationReport + historical analogues from ChromaDB
 // Output: HistorianReport with base rates per outcome type
 
-import { openai } from "@workspace/integrations-openai-ai-server";
+import { chatComplete } from "@workspace/integrations-openai-ai-server";
 import { logger } from "../../lib/logger.js";
 import type { SituationReport } from "./agent-analyst.js";
 import { queryHistoricalAnalogues, type HistoricalAnalogue } from "./historical-corpus.js";
@@ -79,7 +79,7 @@ export async function runHistorianAgent(
     ? `No strong historical analogues found (best similarity: ${analogues[0]?.similarityScore?.toFixed(3) ?? "none"}). Generate base rates reflecting maximum uncertainty.\n\nSituation:\n${situationText}${feedbackSection}`
     : `Historical analogues found:\n\n${analogueSummaries}\n\nCurrent situation:\n${situationText}${feedbackSection}\n\nExtract base rates from these analogues.`;
 
-  const response = await openai.chat.completions.create({
+  const response = await chatComplete({
     model: "gpt-4o",
     temperature: 0.1,
     max_tokens: 1500,

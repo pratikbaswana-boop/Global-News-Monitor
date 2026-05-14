@@ -1,4 +1,4 @@
-import { openai } from "@workspace/integrations-openai-ai-server";
+import { chatComplete } from "@workspace/integrations-openai-ai-server";
 import { db, extractedEventsTable, extractionErrorsTable } from "@workspace/db";
 import { logger } from "../../lib/logger.js";
 import { randomUUID } from "crypto";
@@ -59,12 +59,13 @@ export async function extractEventFromArticle(
   title: string,
   body: string,
   credibilityTier: number,
-  isStateMedia: boolean
+  isStateMedia: boolean,
+  publishedAt?: Date,
 ): Promise<void> {
   const userContent = `Article title: ${title}\n\nArticle body:\n${body.slice(0, 3000)}`;
 
   try {
-    const response = await openai.chat.completions.create({
+    const response = await chatComplete({
       model: "gpt-4o",
       temperature: 0.1,
       messages: [
@@ -104,7 +105,12 @@ export async function extractEventFromArticle(
       actionLabel: parsed.action_label ?? "",
       target: JSON.stringify(parsed.target ?? {}),
       location: JSON.stringify(parsed.location ?? {}),
-      eventDate: parsed.event_date ?? "UNKNOWN",
+      eventDate:
+        parsed.event_date && parsed.event_date !== "UNKNOWN"
+          ? parsed.event_date
+          : publishedAt
+            ? publishedAt.toISOString().slice(0, 10)
+            : "UNKNOWN",
       statedIntent: (parsed.stated_intent ?? "").slice(0, 500),
       requiresCorroboration,
       isHypothesis: requiresCorroboration,

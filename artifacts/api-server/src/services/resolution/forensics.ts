@@ -1,7 +1,7 @@
 // Post-mortem forensics agent — runs after a prediction_v2 is resolved.
 // Determines: was Devil's Advocate right? Which channel was missed? Lessons for future runs.
 
-import { openai } from "@workspace/integrations-openai-ai-server";
+import { chatComplete } from "@workspace/integrations-openai-ai-server";
 import { logger } from "../../lib/logger.js";
 import type { Scenario } from "../reasoning/agent-forecaster.js";
 import type { DevilCritique } from "../reasoning/agent-devil.js";
@@ -67,7 +67,7 @@ ACTUAL OUTCOME:
 ${outcome}`;
 
   try {
-    const response = await openai.chat.completions.create({
+    const response = await chatComplete({
       model: "gpt-4o",
       temperature: 0.2,
       max_tokens: 800,

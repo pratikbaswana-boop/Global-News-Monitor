@@ -36,7 +36,7 @@ export default function Sources() {
                   <div className="space-y-4">
                     <div className="flex flex-col gap-1">
                       <span className="text-4xl font-mono font-bold text-foreground">
-                        {summaryData.bySource.newsapi.toLocaleString()}
+                        {(summaryData.bySource?.newsapi ?? 0).toLocaleString()}
                       </span>
                       <span className="text-sm text-muted-foreground uppercase tracking-wider font-semibold">Articles Indexed</span>
                     </div>
@@ -64,7 +64,7 @@ export default function Sources() {
                   <div className="space-y-4">
                     <div className="flex flex-col gap-1">
                       <span className="text-4xl font-mono font-bold text-foreground">
-                        {summaryData.bySource.gnews.toLocaleString()}
+                        {(summaryData.bySource?.gnews ?? 0).toLocaleString()}
                       </span>
                       <span className="text-sm text-muted-foreground uppercase tracking-wider font-semibold">Articles Indexed</span>
                     </div>
@@ -92,7 +92,7 @@ export default function Sources() {
                   <div className="space-y-4">
                     <div className="flex flex-col gap-1">
                       <span className="text-4xl font-mono font-bold text-foreground">
-                        {summaryData.bySource.guardian.toLocaleString()}
+                        {(summaryData.bySource?.guardian ?? 0).toLocaleString()}
                       </span>
                       <span className="text-sm text-muted-foreground uppercase tracking-wider font-semibold">Articles Indexed</span>
                     </div>
@@ -119,7 +119,7 @@ export default function Sources() {
                 <div className="flex flex-col">
                   <span className="text-foreground font-semibold">All Systems Operational</span>
                   {summaryData && (
-                    <span className="text-muted-foreground">Last DB sync: {new Date(summaryData.lastUpdated).toLocaleString()}</span>
+                    <span className="text-muted-foreground">Last DB sync: {summaryData.lastUpdated ? new Date(summaryData.lastUpdated).toLocaleString() : "—"}</span>
                   )}
                 </div>
               </div>

@@ -126,10 +126,13 @@ export async function runMarketAgent(
   regimeState: RegimeState,
   candleSummary: string,
   marketStats: string,
-  lessons: string | null
+  lessons: string | null,
+  options: { force?: boolean } = {},
 ): Promise<MarketSignal> {
-  const cached = _cache.get(assetId);
-  if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) return cached.signal;
+  if (!options.force) {
+    const cached = _cache.get(assetId);
+    if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) return cached.signal;
+  }
 
   logger.info({ assetId, regime: regimeState.regime }, "market-agent: running ensemble inference");
 

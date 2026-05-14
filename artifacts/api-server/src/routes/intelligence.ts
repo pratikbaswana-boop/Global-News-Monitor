@@ -3,7 +3,7 @@ import { GetIntelligenceClustersResponse, GetIntelligencePredictionsResponse, Ge
 import { db, marketSnapshotsTable, predictionSnapshotsTable, predictionV2Table } from "@workspace/db";
 import { eq, lt, gt, isNull, and, desc } from "drizzle-orm";
 import { sendPushToAll } from "./push.js";
-import { openai } from "@workspace/integrations-openai-ai-server";
+import { chatComplete } from "@workspace/integrations-openai-ai-server";
 import { getActiveStories, isGraphAvailable } from "../services/graph/index.js";
 import { isChromaAvailable } from "../services/reasoning/index.js";
 import type { SituationReport } from "../services/reasoning/agent-analyst.js";
@@ -804,7 +804,7 @@ router.get("/intelligence/predictions", async (req, res) => {
 
   if (graphOk && chromaOk) {
     try {
-      const cutoff = new Date(Date.now() - 12 * 60 * 60 * 1000); // last 12h
+      const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000); // last 7d
       const rows = await db
         .select()
         .from(predictionV2Table)
@@ -1465,7 +1465,7 @@ ${bearCatalog}${lessonsSection}
 }`;
 
   try {
-    const response = await openai.chat.completions.create({
+    const response = await chatComplete({
       model: "gpt-5.1",
       max_completion_tokens: 1200,
       messages: [{ role: "user", content: prompt }],
@@ -2038,7 +2038,18 @@ router.get("/intelligence/market-signals", async (req, res) => {
   // ── Phase 4: Check if HMM regime data is available ───────────────────────────
   // When market_regimes has recent data, use regime-aware runMarketAgent instead of
   // keyword-based aiPredictAsset. Falls back to legacy path if no regime data.
-  const recentRegimeCutoff = new Date(Date.now() - 2 * 60 * 60 * 1000); // last 2h
+  const recentRegimeCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000); // last 24h
+  // Scheduler writes a single market-wide row under assetId="nse_market".
+  // All Indian assets share that regime. Per-asset rows are also accepted (override).
+  const sharedRegime = await db
+    .select()
+    .from(marketRegimesTable)
+    .where(and(eq(marketRegimesTable.assetId, "nse_market"), gt(marketRegimesTable.detectedAt, recentRegimeCutoff)))
+    .orderBy(desc(marketRegimesTable.detectedAt))
+    .limit(1)
+    .then((r) => r[0] ?? null)
+    .catch(() => null);
+
   const recentRegimes = await Promise.all(
     ASSET_TEMPLATES.map(async (a) => {
       try {
@@ -2048,8 +2059,8 @@ router.get("/intelligence/market-signals", async (req, res) => {
           .where(and(eq(marketRegimesTable.assetId, a.id), gt(marketRegimesTable.detectedAt, recentRegimeCutoff)))
           .orderBy(desc(marketRegimesTable.detectedAt))
           .limit(1);
-        return rows[0] ?? null;
-      } catch { return null; }
+        return rows[0] ?? sharedRegime;
+      } catch { return sharedRegime; }
     })
   );
   const useRegimeAgent = recentRegimes.some(r => r !== null);
@@ -2092,10 +2103,18 @@ router.get("/intelligence/market-signals", async (req, res) => {
             : "";
 
           const regimeState = {
-            regime: storedRegime.regime as "bull" | "sideways" | "bear",
-            probabilities: { bull: storedRegime.bullProbability, sideways: storedRegime.sidewaysProbability, bear: storedRegime.bearProbability },
-            confidence: Math.max(storedRegime.bullProbability, storedRegime.sidewaysProbability, storedRegime.bearProbability),
-            sequenceSummary: "stored",
+            regime: storedRegime.regime as "RISK_ON" | "RISK_OFF" | "CRISIS",
+            probabilities: {
+              RISK_ON: storedRegime.riskOnProbability,
+              RISK_OFF: storedRegime.riskOffProbability,
+              CRISIS: storedRegime.crisisProbability,
+            },
+            confidence: Math.max(
+              storedRegime.riskOnProbability,
+              storedRegime.riskOffProbability,
+              storedRegime.crisisProbability,
+            ),
+            sequenceSummary: storedRegime.sequenceSummary ?? "stored",
           };
 
           const signal = await runMarketAgent(asset.id, asset.name, asset.symbol, regimeState, candleSummary, marketStats, lessons);

@@ -64,7 +64,7 @@ async function processArticle(
   // Step 3: GPT-4o CAMEO extraction (skip for state-media-only hypotheses until corroborated)
   const skipExtraction = isStateMedia && credibilityTier >= 3;
   if (!skipExtraction) {
-    await extractEventFromArticle(articleId, title, body, credibilityTier, isStateMedia);
+    await extractEventFromArticle(articleId, title, body, credibilityTier, isStateMedia, publishedAt);
   }
 }
 

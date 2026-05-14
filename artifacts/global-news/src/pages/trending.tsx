@@ -39,7 +39,7 @@ export default function Trending() {
                       </div>
                     ))}
                   </div>
-                ) : trendingData ? (
+                ) : trendingData?.countries ? (
                   <div className="divide-y divide-border">
                     {trendingData.countries.map((item, idx) => {
                       const max = trendingData.countries[0]?.count || 1;
@@ -80,7 +80,7 @@ export default function Trending() {
                       </div>
                     ))}
                   </div>
-                ) : trendingData ? (
+                ) : trendingData?.leaders ? (
                   <div className="divide-y divide-border">
                     {trendingData.leaders.map((item, idx) => {
                       const max = trendingData.leaders[0]?.count || 1;
@@ -121,7 +121,7 @@ export default function Trending() {
                       </div>
                     ))}
                   </div>
-                ) : trendingData ? (
+                ) : trendingData?.topics ? (
                   <div className="divide-y divide-border">
                     {trendingData.topics.map((item, idx) => {
                       const max = trendingData.topics[0]?.count || 1;

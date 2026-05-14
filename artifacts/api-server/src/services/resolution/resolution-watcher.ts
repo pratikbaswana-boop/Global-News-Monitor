@@ -9,7 +9,7 @@
 //
 // UNCERTAIN retrospective scoring: if uncertaintyFlag=true and |actual_pct_change| > 1% → CORRECT
 
-import { openai } from "@workspace/integrations-openai-ai-server";
+import { chatComplete } from "@workspace/integrations-openai-ai-server";
 import { db, predictionV2Table, marketSnapshotsTable } from "@workspace/db";
 import { eq, lt, and, isNull, lte } from "drizzle-orm";
 import { logger } from "../../lib/logger.js";
@@ -188,7 +188,7 @@ async function determineOutcomeGpt(
     ? `\nEXTERNAL SIGNALS (OFAC/ACLED/UN/Price):\n${watcherSignals.join("\n")}`
     : "";
 
-  const response = await openai.chat.completions.create({
+  const response = await chatComplete({
     model: "gpt-4o",
     temperature: 0.1,
     max_tokens: 600,

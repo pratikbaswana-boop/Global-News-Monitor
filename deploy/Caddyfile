@@ -1,0 +1,32 @@
+# Caddy reverse proxy with automatic HTTPS via Let's Encrypt.
+#
+# Usage:
+#   • For a real domain: set DOMAIN=yourdomain.com in .env.production.
+#     Caddy will auto-issue and renew certs (DNS A record must point to this server).
+#   • For local testing: leave DOMAIN unset; this file's default `:80` block serves HTTP only.
+
+{$DOMAIN}, {$DOMAIN:80} {
+    encode gzip zstd
+
+    # API → api-server container
+    handle /api/* {
+        reverse_proxy api-server:3000 {
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Everything else → static frontend
+    handle {
+        reverse_proxy frontend:80
+    }
+
+    # Sensible request limits and security headers
+    header {
+        Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        # CSP intentionally permissive — adjust if you lock down embedded assets
+    }
+}

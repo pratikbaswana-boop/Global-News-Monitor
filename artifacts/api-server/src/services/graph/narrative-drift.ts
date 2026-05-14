@@ -1,4 +1,4 @@
-import { openai } from "@workspace/integrations-openai-ai-server";
+import { chatComplete } from "@workspace/integrations-openai-ai-server";
 import { db, rawArticlesTable, storyCentroidsTable } from "@workspace/db";
 import { runCypher } from "./neo4j-client.js";
 import { embedText } from "../ingestion/semantic-dedup.js";
@@ -174,7 +174,7 @@ async function describeDrift(
   _currentEmbeddings: number[][]
 ): Promise<string> {
   try {
-    const response = await openai.chat.completions.create({
+    const response = await chatComplete({
       model: "gpt-4o",
       temperature: 0.3,
       max_tokens: 60,

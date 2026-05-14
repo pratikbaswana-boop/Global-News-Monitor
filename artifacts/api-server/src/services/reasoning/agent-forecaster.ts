@@ -2,7 +2,7 @@
 // Input: SituationReport + HistorianReport
 // Output: 3 scenarios with probabilities, timeframes, falsification conditions
 
-import { openai } from "@workspace/integrations-openai-ai-server";
+import { chatComplete } from "@workspace/integrations-openai-ai-server";
 import { logger } from "../../lib/logger.js";
 import type { SituationReport } from "./agent-analyst.js";
 import type { HistorianReport } from "./agent-historian.js";
@@ -96,7 +96,7 @@ Analogue confidence: ${historianReport.analogueConfidence.toFixed(2)}
 
 Generate exactly 3 scenarios. Anchor probabilities to historical base rates but adjust for current structural differences.`;
 
-  const response = await openai.chat.completions.create({
+  const response = await chatComplete({
     model: "gpt-4o",
     temperature: 0.3,
     max_tokens: 2500,

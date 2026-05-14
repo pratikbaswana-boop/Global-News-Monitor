@@ -235,12 +235,20 @@ export async function fetchRegimeFeatures(lookbackDays = 20): Promise<RegimeFeat
 
   // Retain up to lookbackDays-1 prior snapshots plus today
   const prior = FEATURES_CACHE.data.slice(-(lookbackDays - 1));
-  const features = [...prior, todayFeature];
+  let features = [...prior, todayFeature];
+
+  // HMM needs ≥5 rows. On cold start the cache is empty — pad by repeating
+  // today's snapshot so the model can decode a regime immediately. Real
+  // history accumulates as cycles run.
+  const MIN_HMM_ROWS = 5;
+  while (features.length < MIN_HMM_ROWS) {
+    features = [todayFeature, ...features];
+  }
 
   FEATURES_CACHE.data = features;
   FEATURES_CACHE.expiresAt = Date.now() + 60 * 60 * 1000; // 1h cache
 
-  logger.debug({ regime_features: todayFeature }, "NSE features fetched");
+  logger.debug({ regime_features: todayFeature, rowCount: features.length }, "NSE features fetched");
   return features;
 }
 
