@@ -19,10 +19,10 @@ function isWeekend(): boolean {
 
 function msUntil330PM_IST(): number {
   const now = new Date();
-  const istMs = now.getTime() + 330 * 60 * 1000;
-  const istDate = new Date(istMs);
-  istDate.setUTCHours(10, 0, 0, 0); // 15:30 IST = 10:00 UTC
-  let targetMs = istDate.getTime() - 330 * 60 * 1000;
+  // 15:30 IST = 10:00 UTC. Set UTC hours directly on `now` — no shift dance.
+  const target = new Date(now);
+  target.setUTCHours(10, 0, 0, 0);
+  let targetMs = target.getTime();
 
   if (targetMs <= now.getTime()) {
     targetMs += 24 * 60 * 60 * 1000; // next day

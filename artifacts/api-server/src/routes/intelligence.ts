@@ -2134,15 +2134,15 @@ async function saveSnapshot(
     if (recent.length > 0) return; // already snapshotted in last 6h
 
     const id = `${assetId}-${Date.now()}`;
-    // If timeframe is "today", set resolveAfter to 3:30 PM IST today
+    // If timeframe is "today", set resolveAfter to 3:30 PM IST today (= 10:00 UTC).
+    // Old code did a +330min / setUTCHours(10) / -330min dance which ended up at
+    // 04:30 UTC = 10:00 IST (mid-session), making all resolutions capture the
+    // wrong intraday price. Just set 10:00 UTC directly on `now`.
     let resolveAfter: Date;
     if (timeframe === "today") {
       const now = new Date();
-      const istMs = now.getTime() + 330 * 60 * 1000;
-      const istDate = new Date(istMs);
-      // Set to 3:30 PM IST = 10:00 UTC
-      istDate.setUTCHours(10, 0, 0, 0);
-      resolveAfter = new Date(istDate.getTime() - 330 * 60 * 1000);
+      resolveAfter = new Date(now);
+      resolveAfter.setUTCHours(10, 0, 0, 0); // 15:30 IST market close
       // If it's already past 3:30 PM IST, push to next market day
       if (resolveAfter <= now) {
         resolveAfter = new Date(resolveAfter.getTime() + 24 * 60 * 60 * 1000);
