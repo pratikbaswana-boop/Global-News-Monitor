@@ -10,7 +10,7 @@
 // Each cycle: HMM regime → 3-window ensemble per asset → persist to market_snapshots cache.
 
 import { randomUUID } from "crypto";
-import { db, marketRegimesTable } from "@workspace/db";
+import { db, marketRegimesTable, flipGuardsTable } from "@workspace/db";
 import { logger } from "../../lib/logger.js";
 import { fetchRegimeFeatures, fetchNSEPriceData } from "./nse-direct-scraper.js";
 import { detectRegime } from "./hmm-regime.js";
@@ -36,25 +36,79 @@ const FORECAST_ASSETS: Array<{ id: string; name: string; symbol: string }> = [
   { id: "silver",     name: "Silver (₹/kg)",          symbol: "SILVER" },
 ];
 
-type Window = "pre-market" | "open" | "post-close" | "off-hours";
+type Window = "pre-market" | "open" | "closed";
 
+/**
+ * IST market windows:
+ *   pre-market : 08:45–09:15  (snapshots warm up before open)
+ *   open       : 09:15–15:30  (live 5-min cycles)
+ *   closed     : everything else (overnight + weekend + post-close + off-hours)
+ *
+ * During `closed` we still run HMM regime detection (Yahoo data is fresh 24/7)
+ * but we DO NOT generate market-snapshot rows. The UI shows "Markets closed —
+ * next session: <date>". Tomorrow's pre-market window generates the next day's
+ * first fresh prediction.
+ */
 function currentWindow(): Window {
   const now = new Date();
   // IST = UTC+5:30
   const istMin = (now.getUTCHours() * 60 + now.getUTCMinutes() + 330) % (24 * 60);
+  const istDay = (new Date(now.getTime() + 330 * 60 * 1000)).getUTCDay(); // 0=Sun, 6=Sat
+  // Weekends are always closed
+  if (istDay === 0 || istDay === 6) return "closed";
   if (istMin >= 525 && istMin < 555) return "pre-market";   // 08:45–09:15
   if (istMin >= 555 && istMin < 930) return "open";          // 09:15–15:30
-  if (istMin >= 930 && istMin < 990) return "post-close";    // 15:30–16:30
-  return "off-hours";
+  return "closed";                                            // post-close + overnight
 }
 
 function cadenceForWindow(w: Window): number {
   switch (w) {
     case "open":       return CADENCE_OPEN;
     case "pre-market": return CADENCE_PRE_POST;
-    case "post-close": return CADENCE_PRE_POST;
-    case "off-hours":  return CADENCE_OFF_HOURS;
+    case "closed":     return CADENCE_OFF_HOURS;
   }
+}
+
+// Compute the next 09:15 IST trading-day timestamp (skips Sat/Sun)
+export function nextSessionOpenAt(from: Date = new Date()): Date {
+  const offsetMs = 330 * 60 * 1000;
+  // Next open = today 09:15 IST if we haven't reached it; else next day; skip weekends
+  let candidate = new Date(from.getTime() + offsetMs);
+  candidate.setUTCHours(3, 45, 0, 0); // 03:45 UTC = 09:15 IST
+  candidate = new Date(candidate.getTime() - offsetMs);
+  if (candidate <= from) {
+    candidate = new Date(candidate.getTime() + 24 * 60 * 60 * 1000);
+  }
+  // Skip weekend
+  for (let i = 0; i < 7; i++) {
+    const day = (new Date(candidate.getTime() + offsetMs)).getUTCDay();
+    if (day !== 0 && day !== 6) break;
+    candidate = new Date(candidate.getTime() + 24 * 60 * 60 * 1000);
+  }
+  return candidate;
+}
+
+// Compute today's 15:30 IST close timestamp
+export function currentSessionClosesAt(from: Date = new Date()): Date {
+  const offsetMs = 330 * 60 * 1000;
+  let candidate = new Date(from.getTime() + offsetMs);
+  candidate.setUTCHours(10, 0, 0, 0); // 10:00 UTC = 15:30 IST
+  return new Date(candidate.getTime() - offsetMs);
+}
+
+export function getMarketStatus(now: Date = new Date()): {
+  status: "open" | "pre-market" | "closed";
+  nextOpen: string;
+  currentClose: string;
+} {
+  const w = currentWindow();
+  // Map internal Window to public status
+  const status = w === "open" ? "open" as const : w === "pre-market" ? "pre-market" as const : "closed" as const;
+  return {
+    status,
+    nextOpen: nextSessionOpenAt(now).toISOString(),
+    currentClose: currentSessionClosesAt(now).toISOString(),
+  };
 }
 
 async function detectAndStoreRegime(): Promise<boolean> {
@@ -243,13 +297,48 @@ async function onMarketOpen(): Promise<void> {
   }
 }
 
+// Reset flip guards once when transitioning into pre-market for a new trading
+// day. Tomorrow's first prediction starts with no inertia from yesterday's
+// confirmed BULLISH/BEARISH state.
+let _flipGuardsResetFor: string | null = null;
+
+async function resetFlipGuardsForNewSession(): Promise<void> {
+  const today = todayIstDateKey();
+  if (_flipGuardsResetFor === today) return;
+  try {
+    await db
+      .update(flipGuardsTable)
+      .set({
+        pendingDirection: null,
+        pendingCount: 0,
+        confirmedDirection: "uncertain",
+        updatedAt: new Date(),
+      });
+    _flipGuardsResetFor = today;
+    logger.info({ tradingDate: today }, "market-scheduler: flip guards reset for new session");
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : err }, "market-scheduler: flip guard reset failed");
+  }
+}
+
 async function runCycle(): Promise<void> {
   const window = currentWindow();
   logger.info({ window }, "market-scheduler: cycle starting");
 
+  // HMM regime detection runs in every cycle — Yahoo data is fresh 24/7, so the
+  // regime stays current even outside market hours, ready for the next open.
+  await detectAndStoreRegime();
+
+  // Skip ensemble + snapshot generation when market is closed.
+  // No new market_snapshots rows are written; UI shows "Markets closed".
+  if (window === "closed") {
+    logger.info({ window }, "market-scheduler: market closed — skipping ensemble + snapshot");
+    return;
+  }
+
   // Session priors: load once per session at first open cycle (or pre-market).
   // The 5-minute live cycle never re-fetches these EOD signals.
-  if ((window === "open" || window === "pre-market") && _priorsLoadedFor !== todayIstDateKey()) {
+  if (_priorsLoadedFor !== todayIstDateKey()) {
     await onMarketOpen();
   }
   // Ensure priors exist on cold start mid-day so live cycles can compose them.
@@ -257,12 +346,11 @@ async function runCycle(): Promise<void> {
     await onMarketOpen();
   }
 
-  // Try regime detection only when Yahoo data is likely fresh (pre-market through post-close)
-  if (window !== "off-hours") {
-    await detectAndStoreRegime();
-  }
+  // Fresh trading day → wipe stale flip guard state from yesterday before any
+  // ensemble runs, so the first prediction isn't anchored to yesterday's confirmed direction.
+  await resetFlipGuardsForNewSession();
 
-  // Always run ensemble — uses last known regime if no fresh one
+  // Run ensemble (creates market_snapshots row)
   await runEnsembleForAllAssets(window);
 }
 

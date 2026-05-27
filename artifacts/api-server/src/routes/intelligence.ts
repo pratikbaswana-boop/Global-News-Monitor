@@ -12,6 +12,7 @@ import type { HistorianReport } from "../services/reasoning/agent-historian.js";
 import type { ForecasterTree } from "../services/reasoning/agent-forecaster.js";
 import type { Scenario } from "../services/reasoning/agent-forecaster.js";
 import { detectRegime, fetchNSEPriceData, runMarketAgent } from "../services/market/index.js";
+import { getMarketStatus } from "../services/market/scheduler.js";
 import { marketRegimesTable } from "@workspace/db";
 
 const router = Router();
@@ -2480,12 +2481,24 @@ router.get("/intelligence/market-signals", async (req, res) => {
     };
   });
 
+  const marketStatusInfo = getMarketStatus();
+  const reasonByStatus: Record<typeof marketStatusInfo.status, string | undefined> = {
+    "open": undefined,
+    "pre-market": "Market is in pre-open session (08:45–09:15 IST)",
+    "closed": isWeekend()
+      ? "Indian markets are closed for the weekend"
+      : "Indian markets are closed — next session opens at 9:15 AM IST",
+  };
+
   const response = GetIntelligenceMarketSignalsResponse.parse({
     assets,
     totalArticlesAnalyzed: articles.length,
     generatedAt: new Date().toISOString(),
-    marketClosed: isWeekend(),
-    marketClosedReason: isWeekend() ? "Indian markets are closed on weekends (Saturday & Sunday)" : undefined,
+    marketClosed: marketStatusInfo.status === "closed",
+    marketClosedReason: reasonByStatus[marketStatusInfo.status],
+    marketStatus: marketStatusInfo.status,
+    nextSessionOpenAt: marketStatusInfo.nextOpen,
+    currentSessionClosesAt: marketStatusInfo.currentClose,
   });
 
   // Fire-and-forget: push notification — throttled per asset

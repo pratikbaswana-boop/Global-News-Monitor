@@ -332,10 +332,11 @@ function AssetHistoryTimeline({ history }: { history: NonNullable<MarketAsset["r
   );
 }
 
-function MarketAssetCard({ asset, allArticles, onArticleClick }: {
+function MarketAssetCard({ asset, allArticles, onArticleClick, marketClosed }: {
   asset: MarketAsset;
   allArticles: NewsArticle[];
   onArticleClick: (a: NewsArticle) => void;
+  marketClosed?: boolean;
 }) {
   const [showDebate, setShowDebate] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
@@ -407,11 +408,13 @@ function MarketAssetCard({ asset, allArticles, onArticleClick }: {
           <div className="bg-muted/30 rounded-lg p-2 text-center space-y-0.5">
             <p className="text-[9px] uppercase tracking-wider text-muted-foreground font-semibold">Timeframe</p>
             <p className="text-sm font-bold font-mono text-foreground">
-              {asset.timeframe === "today" ? "For Today" : asset.timeframe}
+              {marketClosed ? "Last Session" : asset.timeframe === "today" ? "For Today" : asset.timeframe}
             </p>
             {asset.resolveAfter && (
               <p className="text-[9px] font-mono text-amber-400">
-                {asset.timeframe === "today"
+                {marketClosed
+                  ? "Closed at 3:30 PM IST"
+                  : asset.timeframe === "today"
                   ? `Resolves 3:30 PM IST`
                   : `due ${new Date(asset.resolveAfter).toLocaleDateString(undefined, { month: "short", day: "numeric" })}`}
               </p>
@@ -1920,8 +1923,13 @@ export default function Intelligence() {
                 <div className="bg-red-400/10 border border-red-400/30 rounded-lg px-4 py-3 flex items-start gap-3">
                   <ShieldAlert className="h-4 w-4 text-red-400 shrink-0 mt-0.5" />
                   <div className="space-y-0.5">
-                    <p className="text-xs font-bold text-red-400">Market Closed</p>
-                    <p className="text-xs text-muted-foreground">{marketData.marketClosedReason ?? "Indian markets are closed today."} No predictions will be generated until the next trading day (Monday–Friday, 9:15 AM – 3:30 PM IST).</p>
+                    <p className="text-xs font-bold text-red-400">Markets Closed</p>
+                    <p className="text-xs text-muted-foreground">
+                      {marketData.marketClosedReason ?? "Indian markets are closed."}
+                      {marketData.nextSessionOpenAt && (
+                        <> Next session opens <strong className="text-foreground">{new Date(marketData.nextSessionOpenAt).toLocaleString("en-IN", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" })} IST</strong>. Showing last session's prediction — no new snapshots will be generated until then.</>
+                      )}
+                    </p>
                   </div>
                 </div>
               )}
@@ -2012,6 +2020,7 @@ export default function Intelligence() {
                         asset={asset}
                         allArticles={allArticles}
                         onArticleClick={setSelectedArticle}
+                        marketClosed={marketData?.marketClosed}
                       />
                     ))}
                   </div>

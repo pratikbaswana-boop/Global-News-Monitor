@@ -13,4 +13,7 @@ export interface MarketSignalsResponse {
   generatedAt: Date;
   marketClosed?: boolean;
   marketClosedReason?: string;
+  marketStatus?: "open" | "pre-market" | "closed";
+  nextSessionOpenAt?: string;
+  currentSessionClosesAt?: string;
 }

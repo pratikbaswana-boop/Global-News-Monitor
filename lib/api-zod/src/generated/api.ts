@@ -360,6 +360,9 @@ export const GetIntelligenceMarketSignalsResponse = zod.object({
   generatedAt: zod.coerce.date(),
   marketClosed: zod.boolean().optional().describe("True when Indian markets are closed (Saturday/Sunday IST)"),
   marketClosedReason: zod.string().optional().describe("Explanation for why the market is closed"),
+  marketStatus: zod.enum(["open", "pre-market", "closed"]).optional().describe("Current NSE market status in IST"),
+  nextSessionOpenAt: zod.string().optional().describe("ISO timestamp of next NSE open (09:15 IST)"),
+  currentSessionClosesAt: zod.string().optional().describe("ISO timestamp of today's NSE close (15:30 IST)"),
 });
 
 /**
