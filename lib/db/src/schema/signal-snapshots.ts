@@ -1,4 +1,4 @@
-import { pgTable, text, numeric, boolean, timestamp, real } from "drizzle-orm/pg-core";
+import { pgTable, text, numeric, boolean, timestamp, real, integer } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -37,6 +37,15 @@ export const marketSnapshotsTable = pgTable("market_snapshots", {
   uncertaintyFlag: boolean("uncertainty_flag").default(false),
   dominantChannel: text("dominant_channel"),              // e.g. "crude_oil_spike"
   brierScoreContribution: real("brier_score_contribution"),
+
+  // ── New Phase-5 fields ──
+  priceScore: real("price_score"),                        // -1.0 to +1.0 weighted score before thresholding
+  flipConfirmed: boolean("flip_confirmed").default(false), // true only if direction changed AND held for 2 cycles
+  tier3Evidence: text("tier3_evidence"),                  // JSON: auditable Tier 3 signals
+  candleTrustScore: real("candle_trust_score"),            // 0.0–1.0 from Tier 1 filter
+  candleFlags: text("candle_flags"),                       // JSON array of flags
+  regimeAge: integer("regime_age"),                      // consecutive cycles HMM has been in current state
+  channelDecaySummary: text("channel_decay_summary"),    // JSON: active channels after decay
 });
 
 export const insertMarketSnapshotSchema = createInsertSchema(marketSnapshotsTable).omit({

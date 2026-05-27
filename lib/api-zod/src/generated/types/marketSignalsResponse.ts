@@ -11,4 +11,6 @@ export interface MarketSignalsResponse {
   assets: MarketAsset[];
   totalArticlesAnalyzed: number;
   generatedAt: Date;
+  marketClosed?: boolean;
+  marketClosedReason?: string;
 }

@@ -104,7 +104,7 @@ function IntelligenceShell({ children }: { children: React.ReactNode }) {
   return (
     <AppLayout>
       <div className="flex-1 overflow-y-auto">
-        <div className="p-6 max-w-screen-xl mx-auto space-y-6">
+        <div className="p-6 max-w-screen-2xl mx-auto space-y-5">
           {children}
         </div>
       </div>
@@ -203,7 +203,7 @@ function SignalRow({ signal, side, allArticles, onArticleClick }: {
   const sources = allArticles.filter((a) => signal.sourceArticleIds.includes(a.id));
 
   return (
-    <div className={`rounded-lg border ${isBull ? "border-emerald-500/20 bg-emerald-500/5" : "border-red-500/20 bg-red-500/5"}`}>
+    <div className={`rounded-lg border ${isBull ? "border-emerald-400/15 bg-emerald-400/[0.04]" : "border-red-400/15 bg-red-400/[0.04]"}`}>
       <button
         onClick={() => setExpanded((e) => !e)}
         className="w-full flex items-start gap-3 p-3 text-left"
@@ -376,7 +376,7 @@ function MarketAssetCard({ asset, allArticles, onArticleClick }: {
   const bearPct = 100 - bullPct;
 
   return (
-    <Card className="border-border/60 overflow-hidden">
+    <Card className="bg-[#10131b] border-border/20 rounded-lg overflow-hidden">
       {/* Direction stripe */}
       <div className={`h-1 w-full ${dirConfig.stripe}`} />
 
@@ -406,10 +406,14 @@ function MarketAssetCard({ asset, allArticles, onArticleClick }: {
           </div>
           <div className="bg-muted/30 rounded-lg p-2 text-center space-y-0.5">
             <p className="text-[9px] uppercase tracking-wider text-muted-foreground font-semibold">Timeframe</p>
-            <p className="text-sm font-bold font-mono text-foreground">{asset.timeframe}</p>
+            <p className="text-sm font-bold font-mono text-foreground">
+              {asset.timeframe === "today" ? "For Today" : asset.timeframe}
+            </p>
             {asset.resolveAfter && (
               <p className="text-[9px] font-mono text-amber-400">
-                due {new Date(asset.resolveAfter).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                {asset.timeframe === "today"
+                  ? `Resolves 3:30 PM IST`
+                  : `due ${new Date(asset.resolveAfter).toLocaleDateString(undefined, { month: "short", day: "numeric" })}`}
               </p>
             )}
           </div>
@@ -423,29 +427,38 @@ function MarketAssetCard({ asset, allArticles, onArticleClick }: {
       <CardContent className="p-0">
         {/* Bull vs Bear score bar */}
         <div className="px-4 py-3 space-y-2 border-b border-border/30">
-          <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider">
-            <span className="flex items-center gap-1 text-emerald-400">
-              <Swords className="h-3 w-3" />Bull signals ({asset.bullSignals.length}) — {asset.bullScore} pts
-            </span>
-            <span className="flex items-center gap-1 text-red-400">
-              Bear signals ({asset.bearSignals.length}) — {asset.bearScore} pts
-              <Shield className="h-3 w-3" />
-            </span>
-          </div>
-          <div className="flex h-2.5 rounded-full overflow-hidden gap-0.5">
-            <div
-              className="bg-emerald-400 rounded-l-full transition-all"
-              style={{ width: `${bullPct}%` }}
-            />
-            <div
-              className="bg-red-400 rounded-r-full transition-all"
-              style={{ width: `${bearPct}%` }}
-            />
-          </div>
-          <div className="flex justify-between text-[10px] text-muted-foreground">
-            <span>{bullPct}% bullish weight</span>
-            <span>{bearPct}% bearish weight</span>
-          </div>
+          {total === 0 ? (
+            <div className="flex items-center justify-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-amber-400 bg-amber-950/20 rounded-lg p-2">
+              <AlertTriangle className="h-3 w-3" />
+              Insufficient market data — waiting for first ensemble cycle
+            </div>
+          ) : (
+            <>
+              <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider">
+                <span className="flex items-center gap-1 text-emerald-400">
+                  <Swords className="h-3 w-3" />Bull signals ({asset.bullSignals.length}) — {asset.bullScore} pts
+                </span>
+                <span className="flex items-center gap-1 text-red-400">
+                  Bear signals ({asset.bearSignals.length}) — {asset.bearScore} pts
+                  <Shield className="h-3 w-3" />
+                </span>
+              </div>
+              <div className="flex h-2.5 rounded-full overflow-hidden gap-0.5">
+                <div
+                  className="bg-emerald-400 rounded-l-full transition-all"
+                  style={{ width: `${bullPct}%` }}
+                />
+                <div
+                  className="bg-red-400 rounded-r-full transition-all"
+                  style={{ width: `${bearPct}%` }}
+                />
+              </div>
+              <div className="flex justify-between text-[10px] text-muted-foreground">
+                <span>{bullPct}% bullish weight</span>
+                <span>{bearPct}% bearish weight</span>
+              </div>
+            </>
+          )}
         </div>
 
         {/* Verdict */}
@@ -766,7 +779,7 @@ function PredictionCard({ prediction, onArticleClick, allArticles }: {
   const triggerArticles = allArticles.filter((a) => prediction.triggerArticleIds.includes(a.id));
 
   return (
-    <Card className="border-border/60 bg-card overflow-hidden">
+    <Card className="bg-[#10131b] border-border/20 rounded-lg overflow-hidden">
       <div className={`h-1 w-full ${
         prediction.riskLevel === "critical" ? "bg-red-400" :
         prediction.riskLevel === "high"     ? "bg-orange-400" :
@@ -941,8 +954,8 @@ function PredictionCard({ prediction, onArticleClick, allArticles }: {
 
 function CommoditiesTicker() {
   const items = [
-    { symbol: "GOLD", name: "Gold", tone: "text-emerald-400", bg: "bg-emerald-400/10 border-emerald-400/20", note: "safe-haven" },
-    { symbol: "SILVER", name: "Silver", tone: "text-amber-400", bg: "bg-amber-400/10 border-amber-400/20", note: "risk + industry" },
+    { symbol: "GOLD", name: "Gold", tone: "text-emerald-400", bg: "bg-emerald-400/[0.04] border-emerald-400/15", note: "safe-haven" },
+    { symbol: "SILVER", name: "Silver", tone: "text-amber-400", bg: "bg-amber-400/[0.04] border-amber-400/15", note: "risk + industry" },
   ];
 
   return (
@@ -951,7 +964,7 @@ function CommoditiesTicker() {
         <div key={item.symbol} className={`rounded-lg border px-3 py-2 ${item.bg}`}>
           <div className="flex items-center justify-between gap-2">
             <span className="text-xs font-bold font-mono text-foreground/80">{item.symbol}</span>
-            <span className={`text-[10px] font-semibold uppercase tracking-wider ${item.tone}`}>{item.note}</span>
+            <span className={`text-[10px] font-semibold uppercase tracking-[0.1em] ${item.tone}`}>{item.note}</span>
           </div>
           <p className="text-sm font-medium text-foreground">{item.name}</p>
         </div>
@@ -984,7 +997,7 @@ function ClusterCard({ cluster, onArticleClick }: {
   );
 
   return (
-    <Card className="border-border/60 bg-card overflow-hidden">
+    <Card className="bg-[#10131b] border-border/20 rounded-lg overflow-hidden">
       <CardHeader className="pb-3 border-b border-border/40">
         <div className="space-y-1.5">
           <div className="flex items-center gap-2 flex-wrap">
@@ -1165,7 +1178,7 @@ function RelationshipGraph({ data }: {
   return (
     <div className="space-y-4">
       {/* Explainer banner */}
-      <div className="bg-primary/5 border border-primary/20 rounded-lg px-4 py-3 flex items-start gap-3">
+      <div className="bg-primary/[0.04] border border-primary/15 rounded-lg px-4 py-3 flex items-start gap-3">
         <Network className="h-4 w-4 text-primary shrink-0 mt-0.5" />
         <div className="space-y-0.5">
           <p className="text-xs font-semibold text-foreground">How to read this map</p>
@@ -1174,7 +1187,7 @@ function RelationshipGraph({ data }: {
       </div>
 
       {/* Graph canvas */}
-      <div className="relative w-full rounded-xl border border-border/50 bg-[#060d18] overflow-hidden">
+      <div className="relative w-full rounded-xl border border-border/20 bg-[#060d18] overflow-hidden">
         <svg
           ref={svgRef}
           viewBox={`0 0 ${W} ${H}`}
@@ -1557,9 +1570,9 @@ function TrackRecordPanel({ stats, entries, isLoading }: {
     return (
       <div className="space-y-3">
         <div className="grid grid-cols-4 gap-3">
-          {[...Array(4)].map((_, i) => <Skeleton key={i} className="h-24 rounded-lg" />)}
+          {[...Array(4)].map((_, i) => <Skeleton key={i} className="h-24 rounded-lg bg-muted/30" />)}
         </div>
-        <Skeleton className="h-48 rounded-lg" />
+        <Skeleton className="h-48 rounded-lg bg-muted/30" />
       </div>
     );
   }
@@ -1573,7 +1586,7 @@ function TrackRecordPanel({ stats, entries, isLoading }: {
   return (
     <div className="space-y-5">
       {/* Explainer */}
-      <div className="bg-primary/5 border border-primary/20 rounded-lg px-4 py-3 flex items-start gap-3">
+      <div className="bg-primary/[0.04] border border-primary/15 rounded-lg px-4 py-3 flex items-start gap-3">
         <Trophy className="h-4 w-4 text-primary shrink-0 mt-0.5" />
         <div className="space-y-0.5">
           <p className="text-xs font-semibold text-foreground">Self-validating accuracy tracker</p>
@@ -1582,8 +1595,8 @@ function TrackRecordPanel({ stats, entries, isLoading }: {
       </div>
 
       {entries.length === 0 ? (
-        <Card className="p-10 text-center border-dashed">
-          <Trophy className="h-10 w-10 mx-auto mb-3 opacity-20" />
+        <Card className="p-10 text-center bg-[#10131b] border-border/20 rounded-lg">
+          <Trophy className="h-10 w-10 mx-auto mb-3 text-muted-foreground/20" />
           <p className="font-medium text-foreground">No predictions logged yet</p>
           <p className="text-sm text-muted-foreground mt-1">Visit the Market Impact tab to log your first prediction snapshot. The track record will build automatically over time.</p>
         </Card>
@@ -1591,24 +1604,24 @@ function TrackRecordPanel({ stats, entries, isLoading }: {
         <>
           {/* Overall stats */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <Card className="p-4 flex flex-col items-center justify-center gap-2 text-center border-border/60">
+            <Card className="p-4 flex flex-col items-center justify-center gap-2 text-center bg-[#10131b] border-border/20 rounded-lg">
               <AccuracyDonut pct={stats?.accuracyPct ?? 0} />
               <div>
                 <p className="text-xs font-bold text-foreground">Overall Accuracy</p>
                 <p className="text-[10px] text-muted-foreground font-mono">{stats?.correct ?? 0}/{stats?.resolved ?? 0} resolved</p>
               </div>
             </Card>
-            <Card className="p-4 text-center border-amber-400/20 bg-amber-400/5">
+            <Card className="p-4 text-center border-amber-400/15 bg-amber-400/[0.04] rounded-lg">
               <p className="text-3xl font-bold font-mono text-amber-400">{pending}</p>
               <p className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground mt-1">Pending</p>
               <p className="text-[10px] text-muted-foreground font-mono">awaiting resolution</p>
             </Card>
-            <Card className="p-4 text-center border-emerald-400/20 bg-emerald-400/5">
+            <Card className="p-4 text-center border-emerald-400/15 bg-emerald-400/[0.04] rounded-lg">
               <p className="text-3xl font-bold font-mono text-emerald-400">{correct}</p>
               <p className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground mt-1">Correct</p>
               <p className="text-[10px] text-muted-foreground font-mono">direction matched</p>
             </Card>
-            <Card className="p-4 text-center border-red-400/20 bg-red-400/5">
+            <Card className="p-4 text-center border-red-400/15 bg-red-400/[0.04] rounded-lg">
               <p className="text-3xl font-bold font-mono text-red-400">{incorrect}</p>
               <p className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground mt-1">Incorrect</p>
               <p className="text-[10px] text-muted-foreground font-mono">direction flipped</p>
@@ -1617,7 +1630,7 @@ function TrackRecordPanel({ stats, entries, isLoading }: {
 
           {/* Per-asset breakdown */}
           {stats && Object.keys(stats.byAsset).length > 0 && (
-            <Card className="border-border/60">
+            <Card className="bg-[#10131b] border-border/20 rounded-lg">
               <CardHeader className="pb-2 border-b border-border/40">
                 <p className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Accuracy by Asset</p>
               </CardHeader>
@@ -1649,7 +1662,7 @@ function TrackRecordPanel({ stats, entries, isLoading }: {
                 const a = stats.byConfidence[conf];
                 const color = conf === "high" ? "text-emerald-400" : conf === "medium" ? "text-amber-400" : "text-slate-400";
                 return (
-                  <Card key={conf} className="p-3 text-center border-border/60 space-y-1">
+                  <Card key={conf} className="p-3 text-center bg-[#10131b] border-border/20 rounded-lg space-y-1">
                     <p className={`text-[10px] uppercase tracking-wider font-bold ${color}`}>{conf} confidence</p>
                     <p className="text-xl font-bold font-mono text-foreground">{a.accuracyPct}%</p>
                     <p className="text-[10px] text-muted-foreground font-mono">{a.correct}/{a.resolved} correct</p>
@@ -1822,12 +1835,14 @@ export default function Intelligence() {
         <PasswordGate onAccess={() => setHasAccess(true)} />
       ) : (
         <IntelligenceShell>
-          <div className="space-y-3 bg-card border border-border p-4 rounded-lg shadow-sm">
+          <div className="space-y-3 bg-[#10131b] border border-border/30 p-4 rounded-lg">
             <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2 min-w-0">
-                <SidebarTrigger className="h-8 w-8 shrink-0 sm:hidden rounded-md border border-border" />
-                <Brain className="h-5 w-5 text-primary shrink-0" />
-                <h1 className="text-lg sm:text-xl font-bold tracking-tight truncate">Intelligence Analysis</h1>
+              <div className="flex items-center gap-3 min-w-0">
+                <SidebarTrigger className="h-8 w-8 shrink-0 sm:hidden rounded-md border border-border/30" />
+                <div className="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+                  <Brain className="h-4 w-4 text-primary" />
+                </div>
+                <h1 className="text-lg sm:text-xl font-bold tracking-tight truncate" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>Intelligence Analysis</h1>
               </div>
               <div className="flex items-center gap-2 shrink-0">
                 {clusterData && (
@@ -1870,12 +1885,12 @@ export default function Intelligence() {
           </div>
 
           {/* Tab bar */}
-          <div className="flex border-b border-border gap-0.5 overflow-x-auto scrollbar-none">
+          <div className="flex border-b border-border/30 gap-1 overflow-x-auto scrollbar-none">
             {tabs.map((tab) => (
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
-                className={`flex items-center gap-1.5 px-3 sm:px-4 py-2.5 text-xs font-bold uppercase tracking-wider border-b-2 whitespace-nowrap transition-colors ${
+                className={`flex items-center gap-1.5 px-3 sm:px-4 py-2.5 text-[11px] font-bold uppercase tracking-[0.12em] border-b-2 whitespace-nowrap transition-colors ${
                   tab.mobileHidden ? "hidden sm:flex" : ""
                 } ${
                   activeTab === tab.id
@@ -1888,7 +1903,7 @@ export default function Intelligence() {
                 <span className="hidden sm:inline">{tab.label}</span>
                 {tab.count !== undefined && tab.count > 0 && (
                   <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded-full ${
-                    activeTab === tab.id ? "bg-primary/20 text-primary" : "bg-muted text-muted-foreground"
+                    activeTab === tab.id ? "bg-primary/20 text-primary" : "bg-muted/40 text-muted-foreground"
                   }`}>
                     {tab.count}
                   </span>
@@ -1900,45 +1915,71 @@ export default function Intelligence() {
           {/* ── Market Impact tab ── */}
           {activeTab === "markets" && (
             <div className="space-y-4">
+              {/* Market Closed banner */}
+              {marketData?.marketClosed && (
+                <div className="bg-red-400/10 border border-red-400/30 rounded-lg px-4 py-3 flex items-start gap-3">
+                  <ShieldAlert className="h-4 w-4 text-red-400 shrink-0 mt-0.5" />
+                  <div className="space-y-0.5">
+                    <p className="text-xs font-bold text-red-400">Market Closed</p>
+                    <p className="text-xs text-muted-foreground">{marketData.marketClosedReason ?? "Indian markets are closed today."} No predictions will be generated until the next trading day (Monday–Friday, 9:15 AM – 3:30 PM IST).</p>
+                  </div>
+                </div>
+              )}
+
               {/* Explainer strip */}
               <div className="bg-primary/5 border border-primary/20 rounded-lg px-4 py-3 flex items-start gap-3">
                 <Scale className="h-4 w-4 text-primary shrink-0 mt-0.5" />
                 <div className="space-y-0.5">
                   <p className="text-xs font-semibold text-foreground">Multi-angle agentic validation</p>
-                  <p className="text-xs text-muted-foreground">For each asset, the engine independently collects all bullish and bearish forces from current news signals, scores them by strength and article count, then weighs both sides to produce a directional verdict. Expand each card to see the full bull vs bear debate. Each signal shows a deadline date — the point at which the prediction is compared against the new analysis for accuracy scoring.</p>
+                  <p className="text-xs text-muted-foreground">For each asset, the engine independently collects all bullish and bearish forces from current news signals, scores them by strength and article count, then weighs both sides to produce a directional verdict. Expand each card to see the full bull vs bear debate. Each prediction is for the current trading day and resolves at 3:30 PM IST.</p>
                 </div>
               </div>
 
-              {/* Notification info strip */}
-              <div className="bg-amber-400/5 border border-amber-400/20 rounded-lg px-4 py-3 flex items-start gap-3">
-                <Bell className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
-                <div className="space-y-0.5">
-                  <p className="text-xs font-semibold text-foreground">When will you get a push notification?</p>
-                  <p className="text-xs text-muted-foreground">You receive an alert when: <span className="text-foreground font-medium">(1) the highest-scoring asset changes its direction</span> (e.g. was BULLISH, now BEARISH), or <span className="text-foreground font-medium">(2) more than 6 hours have passed</span> since the last notification for that asset. Neutral signals are never notified. Enable alerts with the bell button above.</p>
+              {/* Manual trigger button */}
+              {!marketData?.marketClosed && (
+                <div className="flex justify-end">
+                  <button
+                    onClick={async () => {
+                      try {
+                        const res = await fetch("/api/intelligence/market-signals/trigger", { method: "POST" });
+                        if (res.ok) {
+                          window.location.reload();
+                        } else {
+                          alert("Failed to trigger market signals");
+                        }
+                      } catch {
+                        alert("Failed to trigger market signals");
+                      }
+                    }}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
+                  >
+                    <BarChart3 className="h-3.5 w-3.5" />
+                    Trigger Now
+                  </button>
                 </div>
-              </div>
+              )}
 
               {isLoadingMarkets ? (
-                <div className="grid gap-4 grid-cols-1 lg:grid-cols-2">
+                <div className="grid gap-5 grid-cols-1 lg:grid-cols-2">
                   {[...Array(5)].map((_, i) => (
-                    <Card key={i} className="p-5 space-y-3">
+                    <Card key={i} className="p-5 space-y-3 bg-[#10131b] border-border/20 rounded-lg">
                       <div className="flex gap-3">
-                        <Skeleton className="h-12 w-12 rounded-lg" />
+                        <Skeleton className="h-12 w-12 rounded-lg bg-muted/30" />
                         <div className="flex-1 space-y-2">
-                          <Skeleton className="h-4 w-32" />
-                          <Skeleton className="h-3 w-full" />
+                          <Skeleton className="h-4 w-32 bg-muted/30" />
+                          <Skeleton className="h-3 w-full bg-muted/30" />
                         </div>
                       </div>
-                      <Skeleton className="h-2 w-full rounded-full" />
-                      <Skeleton className="h-16 w-full" />
+                      <Skeleton className="h-2 w-full rounded-full bg-muted/30" />
+                      <Skeleton className="h-16 w-full bg-muted/30" />
                     </Card>
                   ))}
                 </div>
               ) : assets.length === 0 ? (
-                <Card className="p-10 text-center text-muted-foreground border-dashed">
-                  <BarChart3 className="h-10 w-10 mx-auto mb-3 opacity-30" />
+                <Card className="p-10 text-center text-muted-foreground bg-[#10131b] border-border/20 rounded-lg">
+                  <BarChart3 className="h-10 w-10 mx-auto mb-3 text-muted-foreground/30" />
                   <p className="font-medium text-foreground">No market signals detected</p>
-                  <p className="text-sm mt-1">Not enough recent news signals to generate market analysis. Check back after the next news fetch.</p>
+                  <p className="text-sm mt-1 text-muted-foreground/60">Not enough recent news signals to generate market analysis. Check back after the next news fetch.</p>
                 </Card>
               ) : (
                 <>
@@ -1993,18 +2034,18 @@ export default function Intelligence() {
             <div className="space-y-4">
               {isLoadingPredictions ? (
                 [...Array(3)].map((_, i) => (
-                  <Card key={i} className="p-5 space-y-3">
-                    <Skeleton className="h-4 w-24" />
-                    <Skeleton className="h-6 w-3/4" />
-                    <Skeleton className="h-4 w-full" />
-                    <Skeleton className="h-2 w-full rounded-full" />
+                  <Card key={i} className="p-5 space-y-3 bg-[#10131b] border-border/20 rounded-lg">
+                    <Skeleton className="h-4 w-24 bg-muted/30" />
+                    <Skeleton className="h-6 w-3/4 bg-muted/30" />
+                    <Skeleton className="h-4 w-full bg-muted/30" />
+                    <Skeleton className="h-2 w-full rounded-full bg-muted/30" />
                   </Card>
                 ))
               ) : predictions.length === 0 ? (
-                <Card className="p-10 text-center text-muted-foreground border-dashed">
-                  <Telescope className="h-10 w-10 mx-auto mb-3 opacity-30" />
+                <Card className="p-10 text-center text-muted-foreground bg-[#10131b] border-border/20 rounded-lg">
+                  <Telescope className="h-10 w-10 mx-auto mb-3 text-muted-foreground/30" />
                   <p className="font-medium text-foreground">No event forecasts available yet</p>
-                  <p className="text-sm mt-1">Not enough signals to generate predictions. Check back after the next news fetch.</p>
+                  <p className="text-sm mt-1 text-muted-foreground/60">Not enough signals to generate predictions. Check back after the next news fetch.</p>
                 </Card>
               ) : (
                 <>
@@ -2050,15 +2091,15 @@ export default function Intelligence() {
             <div className="space-y-4">
               {isLoadingClusters ? (
                 [...Array(4)].map((_, i) => (
-                  <Card key={i} className="p-5 space-y-3">
-                    <Skeleton className="h-5 w-48" />
-                    <Skeleton className="h-4 w-full" />
-                    <Skeleton className="h-32 w-full" />
+                  <Card key={i} className="p-5 space-y-3 bg-[#10131b] border-border/20 rounded-lg">
+                    <Skeleton className="h-5 w-48 bg-muted/30" />
+                    <Skeleton className="h-4 w-full bg-muted/30" />
+                    <Skeleton className="h-32 w-full bg-muted/30" />
                   </Card>
                 ))
               ) : clusters.length === 0 ? (
-                <Card className="p-8 text-center text-muted-foreground border-dashed">
-                  <p>No story clusters detected yet.</p>
+                <Card className="p-8 text-center text-muted-foreground bg-[#10131b] border-border/20 rounded-lg">
+                  <p className="text-muted-foreground/60">No story clusters detected yet.</p>
                 </Card>
               ) : (
                 <div className="grid gap-4 grid-cols-1 lg:grid-cols-2">
@@ -2074,12 +2115,12 @@ export default function Intelligence() {
           {activeTab === "graph" && (
             <div className="space-y-3">
               {isLoadingClusters ? (
-                <Skeleton className="h-96 w-full rounded-lg" />
+                <Skeleton className="h-96 w-full rounded-lg bg-muted/30" />
               ) : graphData.nodes.length > 0 ? (
                 <RelationshipGraph data={graphData} />
               ) : (
-                <Card className="p-8 text-center text-muted-foreground border-dashed">
-                  <p>No relationship data available yet.</p>
+                <Card className="p-8 text-center text-muted-foreground bg-[#10131b] border-border/20 rounded-lg">
+                  <p className="text-muted-foreground/60">No relationship data available yet.</p>
                 </Card>
               )}
             </div>

@@ -1,9 +1,10 @@
 import { Router } from "express";
 import { GetIntelligenceClustersResponse, GetIntelligencePredictionsResponse, GetIntelligenceMarketSignalsResponse, GetIntelligenceTrackRecordResponse } from "@workspace/api-zod";
-import { db, marketSnapshotsTable, predictionSnapshotsTable, predictionV2Table } from "@workspace/db";
+import { db, marketSnapshotsTable, predictionSnapshotsTable, predictionV2Table, rawArticlesTable } from "@workspace/db";
 import { eq, lt, gt, isNull, and, desc } from "drizzle-orm";
 import { sendPushToAll } from "./push.js";
 import { chatComplete } from "@workspace/integrations-openai-ai-server";
+import { logger } from "../lib/logger.js";
 import { getActiveStories, isGraphAvailable } from "../services/graph/index.js";
 import { isChromaAvailable } from "../services/reasoning/index.js";
 import type { SituationReport } from "../services/reasoning/agent-analyst.js";
@@ -238,18 +239,13 @@ function buildCausalChain(articles: RawArticle[], template: ClusterTemplate): Ca
 // ─── Cluster summary ──────────────────────────────────────────────────────────
 
 function buildClusterSummary(template: ClusterTemplate, articles: RawArticle[]): string {
-  const catCount = articles.reduce(
-    (acc, a) => {
-      acc[a.category] = (acc[a.category] ?? 0) + 1;
-      return acc;
-    },
-    {} as Record<string, number>
-  );
-
-  const dominant = Object.entries(catCount).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "events";
+  const topArticles = [...articles]
+    .sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime())
+    .slice(0, 3);
+  const recentDevelopments = topArticles.map(a => a.title).join("; ");
   const topCountries = [...new Set(articles.flatMap((a) => a.countries))].slice(0, 3).join(", ");
 
-  return `${articles.length} articles tracking ${dominant} events involving ${topCountries || "global actors"}. This cluster follows how related events escalated or triggered subsequent developments.`;
+  return `${articles.length} articles. Recent developments: ${recentDevelopments.slice(0, 220)}${recentDevelopments.length > 220 ? "..." : ""} This cluster tracks how events involving ${topCountries || "global actors"} are escalating or triggering follow-on developments.`;
 }
 
 // ─── Relationship graph ───────────────────────────────────────────────────────
@@ -336,6 +332,35 @@ let _articlesCache: RawArticle[] = [];
 // Throttle push notifications: track last sent direction + timestamp per asset
 const _lastNotifiedAsset = new Map<string, { direction: string; sentAt: number }>();
 
+async function fetchArticlesFromDatabase(): Promise<RawArticle[]> {
+  try {
+    const rows = await db
+      .select()
+      .from(rawArticlesTable)
+      .orderBy(desc(rawArticlesTable.publishedAt))
+      .limit(200);
+    return rows.map((row) => {
+      const title = row.title ?? "";
+      const body = row.body ?? "";
+      return {
+        id: row.id,
+        title,
+        description: body,
+        url: row.url,
+        imageUrl: null,
+        source: row.feedId,
+        sourceName: row.feedId as RawArticle["sourceName"],
+        publishedAt: row.publishedAt.toISOString(),
+        category: "general" as const,
+        countries: [] as string[],
+        leaders: [] as string[],
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
 export function updateIntelligenceCache(articles: RawArticle[]) {
   _articlesCache = articles;
 }
@@ -347,25 +372,38 @@ router.get("/intelligence/clusters", async (req, res) => {
   if (graphAvailable) {
     try {
       const stories = await getActiveStories();
-      const clusters = stories.map((story) => ({
-        id: story.id,
-        title: story.label,
-        summary: `${story.eventCount} events tracked via knowledge graph.${
-          story.narrativeDriftScore > 0.25
-            ? ` Narrative drift detected: ${story.driftDescription ?? "story character changing."}`
-            : ""
-        }`,
-        category: "general" as const,
-        countries: story.countryIsos,
-        leaders: [] as string[],
-        articles: [] as RawArticle[],
-        causalChain: [] as { fromArticleId: string; toArticleId: string; relationship: string; strength: number }[],
-        articleCount: story.eventCount,
-        latestAt: story.latestEventDate
-          ? new Date(story.latestEventDate).toISOString()
-          : new Date().toISOString(),
-        earliestAt: new Date().toISOString(),
-      }));
+      const recentArticles = await fetchArticlesFromDatabase();
+      // Build story-specific summaries by finding the most relevant articles per story
+      const clusters = stories.map((story) => {
+        // Find articles most relevant to this story's countries
+        const storyArticles = recentArticles
+          .filter(a => a.countries.some(c => story.countryIsos.includes(c)))
+          .slice(0, 10);
+        const topTitles = storyArticles.slice(0, 3).map(a => a.title).join("; ");
+        const specificSummary = storyArticles.length > 0
+          ? `Latest developments: ${topTitles.slice(0, 200)}${topTitles.length > 200 ? "..." : ""}`
+          : `${story.eventCount} geopolitical events tracked involving ${story.countryIsos.join(", ") || "global actors"}.`;
+
+        return {
+          id: story.id,
+          title: story.label,
+          summary: `${specificSummary}${
+            story.narrativeDriftScore > 0.25
+              ? ` Narrative drift: ${story.driftDescription ?? "story dynamics are shifting."}`
+              : ""
+          }`,
+          category: "general" as const,
+          countries: story.countryIsos,
+          leaders: [] as string[],
+          articles: recentArticles.slice(0, 20) as RawArticle[],
+          causalChain: [] as { fromArticleId: string; toArticleId: string; relationship: string; strength: number }[],
+          articleCount: story.eventCount,
+          latestAt: story.latestEventDate
+            ? new Date(story.latestEventDate).toISOString()
+            : new Date().toISOString(),
+          earliestAt: new Date().toISOString(),
+        };
+      });
 
       const response = GetIntelligenceClustersResponse.parse({
         clusters,
@@ -463,7 +501,7 @@ router.get("/intelligence/clusters", async (req, res) => {
     generatedAt: new Date().toISOString(),
   });
 
-  res.json(response);
+  return res.json(response);
 });
 
 // ─── Prediction Engine ────────────────────────────────────────────────────────
@@ -765,16 +803,53 @@ function adaptPredictionV2(row: typeof predictionV2Table.$inferSelect) {
     const dominant = finalScenarios[forecaster.dominantScenario] ?? finalScenarios[0];
     if (!dominant) return null;
 
+    // Build explicit headline: prepend key actors so it always shows WHO is involved
+    const keyActors = analyst.primaryActors.slice(0, 3).map(a => a.actorLabel).join("-");
+    const probPct = Math.round(dominant.probability * 100);
+    const actorPrefix = keyActors ? `${keyActors}: ` : "";
+    const headline = `${actorPrefix}${dominant.label} (${probPct}% probability, ${dominant.timeframeDays}d horizon)`;
+
+    // Build rich, story-specific reasoning by weaving together all agent outputs
+    const actorDetails = analyst.primaryActors
+      .map(a => `${a.actorLabel}: ${a.perceivedGoal} (leverage: ${a.leverage.slice(0, 2).join(", ")}; constraints: ${a.constraints.slice(0, 2).join(", ")})`)
+      .join("; ");
+
+    const tensionDetails = analyst.tensionIndicators
+      .map(t => `${t.type.replace(/_/g, " ")} — ${t.intensity}: ${t.evidence.slice(0, 2).join("; ")}`)
+      .join("; ");
+
+    const keyUncertainties = analyst.keyUncertainties.join("; ");
+
+    const reasoningParts = [
+      `SITUATION: ${analyst.powerConfiguration.replace(/_/g, " ")}.`,
+      `KEY ACTORS: ${actorDetails}.`,
+      `ACTIVE TENSIONS: ${tensionDetails}.`,
+      `CRITICAL UNCERTAINTIES: ${keyUncertainties}.`,
+      ``,
+      `PREDICTION REASONING: ${dominant.narrative}`,
+      ``,
+      `CONFIRMATION INDICATORS: ${dominant.keyIndicators.join("; ")}.`,
+      ``,
+      `FALSIFICATION CONDITIONS: ${dominant.falsificationConditions.join("; ")}.`,
+      ``,
+      `HISTORICAL PATTERN: ${historian.historicalPattern}`,
+      `KEY DIFFERENTIATORS FROM PAST CASES: ${historian.keyDifferentiators.join("; ")}.`,
+    ];
+
+    const reasoning = reasoningParts.join("\n").slice(0, 3000);
+
     const precedent = historian.analogues[0]
-      ? `${historian.historicalPattern} Most relevant: ${historian.analogues[0].document.slice(0, 200)}`
+      ? `${historian.historicalPattern} Most relevant analogue: ${historian.analogues[0].document.slice(0, 300)}`
       : historian.historicalPattern;
+
+    const clusterTitle = (analyst as { storyLabel?: string }).storyLabel ?? `Story: ${row.storyId.slice(0, 8)}`;
 
     return {
       id: row.id,
       clusterId: row.storyId,
-      clusterTitle: `Story: ${row.storyId.slice(0, 8)}`,
-      headline: dominant.label,
-      reasoning: dominant.narrative,
+      clusterTitle,
+      headline,
+      reasoning,
       confidence: confidenceFromScore(forecaster.modelConfidence),
       riskLevel: riskFromTensions(analyst),
       timeframe: daysToTimeframe(dominant.timeframeDays),
@@ -782,9 +857,9 @@ function adaptPredictionV2(row: typeof predictionV2Table.$inferSelect) {
       countries: analyst.primaryActors.map(a => a.actorLabel),
       leaders: [] as string[],
       triggerArticleIds: [] as string[],
-      triggerSummary: historian.historicalPattern,
-      historicalPrecedent: precedent.slice(0, 500),
-      potentialOutcomes: finalScenarios.map(s => s.label),
+      triggerSummary: `Power configuration: ${analyst.powerConfiguration.replace(/_/g, " ")}. Market exposure: ${analyst.indianMarketExposure.severity} via ${analyst.indianMarketExposure.channels.join(", ")}.`,
+      historicalPrecedent: precedent.slice(0, 800),
+      potentialOutcomes: finalScenarios.map(s => `${s.label} (${Math.round(s.probability * 100)}%)`),
       generatedAt: new Date(row.generatedAt).toISOString(),
       resolveAfter: new Date(row.resolveAfter).toISOString(),
       snapshotId: row.id,
@@ -933,7 +1008,7 @@ router.get("/intelligence/predictions", async (req, res) => {
     generatedAt: now.toISOString(),
   });
 
-  res.json(response);
+  return res.json(response);
 });
 
 // ─── Market Signal Engine ─────────────────────────────────────────────────────
@@ -1377,6 +1452,19 @@ interface AIPrediction {
   bearScore: number;
   activeBullSignals: { template: MarketSignalTemplate; articleIds: string[] }[];
   activeBearSignals: { template: MarketSignalTemplate; articleIds: string[] }[];
+  // ── New Phase-5 fields (internal, not returned to API clients directly) ──
+  _priceScore?: number;
+  _flipConfirmed?: boolean;
+  _tier3Evidence?: Record<string, unknown>;
+  _candleTrustScore?: number;
+  _candleFlags?: string[];
+  _regimeAge?: number;
+  _channelDecaySummary?: Record<string, unknown>[];
+  _regime?: string;
+  _regimeProbabilities?: Record<string, number>;
+  _activeChannels?: string[];
+  _ensembleVotes?: Record<string, unknown>[];
+  _uncertaintyFlag?: boolean;
 }
 
 const _aiPredictionCache = new Map<string, { prediction: AIPrediction; fetchedAt: number }>();
@@ -1467,7 +1555,7 @@ ${bearCatalog}${lessonsSection}
   try {
     const response = await chatComplete({
       model: "gpt-5.1",
-      max_completion_tokens: 1200,
+      max_tokens: 1200,
       messages: [{ role: "user", content: prompt }],
     });
 
@@ -1682,12 +1770,13 @@ async function savePredictionSnapshot(
 
 function timeframeToMs(timeframe: string): number {
   switch (timeframe) {
+    case "today":        return 6.5 * 60 * 60 * 1000; // 9:00 AM → 3:30 PM IST
     case "intraday":     return 4    * 60 * 60 * 1000;
     case "next-session": return 18   * 60 * 60 * 1000;
     case "1-2 weeks":   return 10.5 * 24 * 60 * 60 * 1000;
     case "1 month":     return 30   * 24 * 60 * 60 * 1000;
     case "3 months":    return 90   * 24 * 60 * 60 * 1000;
-    default:             return 4    * 60 * 60 * 1000;
+    default:             return 6.5 * 60 * 60 * 1000; // default to "today"
   }
 }
 
@@ -1892,9 +1981,29 @@ async function detectEarlyFlipAndNotify(
 
 // ─── Resolve expired snapshots against real price ─────────────────────────────
 
+// ─── IST helpers ──────────────────────────────────────────────────────────────
+
+function getISTMinutes(): number {
+  const now = new Date();
+  return (now.getUTCHours() * 60 + now.getUTCMinutes() + 330) % (24 * 60);
+}
+
+function isWeekend(): boolean {
+  const now = new Date();
+  // IST day: UTC + 5:30, so Sunday IST starts Saturday 18:30 UTC
+  const istDay = new Date(now.getTime() + 330 * 60 * 1000).getUTCDay();
+  return istDay === 0 || istDay === 6; // Sunday or Saturday in IST
+}
+
+function isMarketOpen(): boolean {
+  return !isWeekend();
+}
+
+// ─── Resolve expired snapshots against real price movement ────────────────────
+
 async function resolvePendingSnapshots(
   assetId: string,
-  currentDirection: string,
+  _currentDirection: string, // kept for API compat, not used for scoring
   realPrice: number | null
 ): Promise<void> {
   try {
@@ -1911,40 +2020,54 @@ async function resolvePendingSnapshots(
       );
 
     for (const snapshot of pending) {
-      const isCorrect = snapshot.predictedDirection === currentDirection;
-
-      // Compute real price change if we have real prices
+      // Determine ACTUAL direction from real price movement, not AI prediction
+      let actualDirection = "neutral";
       let priceChangePct: string | undefined;
+
       if (realPrice !== null && snapshot.realPriceAtSnapshot !== null) {
-        const pctChange = ((realPrice - parseFloat(snapshot.realPriceAtSnapshot ?? "0")) / parseFloat(snapshot.realPriceAtSnapshot ?? "1")) * 100;
+        const snapPrice = parseFloat(snapshot.realPriceAtSnapshot ?? "0");
+        const pctChange = ((realPrice - snapPrice) / Math.max(snapPrice, 0.01)) * 100;
         priceChangePct = pctChange.toFixed(2);
+
+        // Significant threshold: 0.1% to avoid noise
+        if (pctChange > 0.1) actualDirection = "up";
+        else if (pctChange < -0.1) actualDirection = "down";
+        else actualDirection = "neutral";
+      } else {
+        // Fallback: if no price data, mark as unresolvable
+        actualDirection = "unknown";
       }
+
+      const isCorrect =
+        actualDirection === "unknown"
+          ? null
+          : snapshot.predictedDirection === actualDirection;
 
       let notes: string;
       let lessons: string | undefined;
 
-      if (isCorrect) {
-        notes = `Prediction CORRECT. Direction stayed ${currentDirection.toUpperCase()} through the ${snapshot.timeframe} window.`;
+      if (actualDirection === "unknown") {
+        notes = `Could not resolve — no price data available at resolution time.`;
+      } else if (isCorrect) {
+        notes = `Prediction CORRECT. Predicted ${snapshot.predictedDirection.toUpperCase()} and market moved ${actualDirection.toUpperCase()} (${priceChangePct}%).`;
         if (realPrice !== null && priceChangePct !== undefined) {
-          const dir = parseFloat(priceChangePct) >= 0 ? "+" : "";
-          notes += ` Real price moved ${dir}${priceChangePct}% (from ${snapshot.realPriceAtSnapshot} → ${realPrice.toFixed(2)}).`;
+          notes += ` Price: ${snapshot.realPriceAtSnapshot} → ${realPrice.toFixed(2)}.`;
         }
       } else {
-        notes = `Prediction INCORRECT. Signal flipped from ${snapshot.predictedDirection.toUpperCase()} to ${currentDirection.toUpperCase()} after the ${snapshot.timeframe} window.`;
+        notes = `Prediction INCORRECT. Predicted ${snapshot.predictedDirection.toUpperCase()} but market moved ${actualDirection.toUpperCase()} (${priceChangePct}%).`;
         if (realPrice !== null && priceChangePct !== undefined) {
-          const dir = parseFloat(priceChangePct) >= 0 ? "+" : "";
-          notes += ` Real price moved ${dir}${priceChangePct}% (from ${snapshot.realPriceAtSnapshot} → ${realPrice.toFixed(2)}).`;
+          notes += ` Price: ${snapshot.realPriceAtSnapshot} → ${realPrice.toFixed(2)}.`;
         }
         lessons = `Predicted ${snapshot.predictedDirection.toUpperCase()} based on: "${snapshot.dominantNarrative}". ` +
-          `Actual outcome: ${currentDirection.toUpperCase()}. ` +
-          `The dominant assumption was incorrect — next time consider that ${snapshot.dominantNarrative.slice(0, 100)} may not hold if counter-signals strengthen.`;
+          `Actual outcome: ${actualDirection.toUpperCase()}. ` +
+          `Next time weigh counter-signals more heavily when ${snapshot.dominantNarrative.slice(0, 100)} is mixed.`;
       }
 
       await db
         .update(marketSnapshotsTable)
         .set({
           resolvedAt: now,
-          resolutionDirection: currentDirection,
+          resolutionDirection: actualDirection,
           isCorrect,
           resolutionNotes: notes,
           ...(realPrice !== null ? { realPriceAtResolution: realPrice.toString() } : {}),
@@ -1974,10 +2097,29 @@ async function saveSnapshot(
   triggerNewsSummary: string,
   assumptions: string,
   triggerArticleIds: string[],
-  realPrice: number | null
+  realPrice: number | null,
+  // ── New Phase-5 fields ──
+  extra?: {
+    priceScore?: number;
+    flipConfirmed?: boolean;
+    tier3Evidence?: Record<string, unknown>;
+    candleTrustScore?: number;
+    candleFlags?: string[];
+    regimeAge?: number;
+    channelDecaySummary?: Record<string, unknown>[];
+    regime?: string;
+    regimeProbabilities?: Record<string, number>;
+    activeChannels?: string[];
+    ensembleVotes?: Record<string, unknown>[];
+    uncertaintyFlag?: boolean;
+  }
 ): Promise<void> {
   try {
-    // Throttle: only save one snapshot per asset per 6 hours
+    // Skip on weekends (Saturday/Sunday IST)
+    if (isWeekend()) return;
+
+    // Throttle: only save one snapshot per asset per 6 hours (4 per day max)
+    // This allows fresh signals during pre-market, open, and post-close windows.
     const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000);
     const recent = await db
       .select({ id: marketSnapshotsTable.id })
@@ -1989,10 +2131,29 @@ async function saveSnapshot(
         )
       );
 
-    if (recent.length > 0) return; // already snapshotted recently
+    if (recent.length > 0) return; // already snapshotted in last 6h
 
     const id = `${assetId}-${Date.now()}`;
-    const resolveAfter = new Date(Date.now() + timeframeToMs(timeframe));
+    // If timeframe is "today", set resolveAfter to 3:30 PM IST today
+    let resolveAfter: Date;
+    if (timeframe === "today") {
+      const now = new Date();
+      const istMs = now.getTime() + 330 * 60 * 1000;
+      const istDate = new Date(istMs);
+      // Set to 3:30 PM IST = 10:00 UTC
+      istDate.setUTCHours(10, 0, 0, 0);
+      resolveAfter = new Date(istDate.getTime() - 330 * 60 * 1000);
+      // If it's already past 3:30 PM IST, push to next market day
+      if (resolveAfter <= now) {
+        resolveAfter = new Date(resolveAfter.getTime() + 24 * 60 * 60 * 1000);
+        // Skip to Monday if next day is weekend
+        while (isWeekendForDate(resolveAfter)) {
+          resolveAfter = new Date(resolveAfter.getTime() + 24 * 60 * 60 * 1000);
+        }
+      }
+    } else {
+      resolveAfter = new Date(Date.now() + timeframeToMs(timeframe));
+    }
 
     await db.insert(marketSnapshotsTable).values({
       id,
@@ -2013,10 +2174,24 @@ async function saveSnapshot(
       triggerArticleIds: JSON.stringify(triggerArticleIds),
       resolveAfter,
       ...(realPrice !== null ? { realPriceAtSnapshot: realPrice.toString() } : {}),
+      // ── New Phase-5 fields ──
+      ...(extra?.priceScore !== undefined ? { priceScore: extra.priceScore } : {}),
+      ...(extra?.flipConfirmed !== undefined ? { flipConfirmed: extra.flipConfirmed } : {}),
+      ...(extra?.tier3Evidence ? { tier3Evidence: JSON.stringify(extra.tier3Evidence) } : {}),
+      ...(extra?.candleTrustScore !== undefined ? { candleTrustScore: extra.candleTrustScore } : {}),
+      ...(extra?.candleFlags ? { candleFlags: JSON.stringify(extra.candleFlags) } : {}),
+      ...(extra?.regimeAge !== undefined ? { regimeAge: extra.regimeAge } : {}),
+      ...(extra?.channelDecaySummary ? { channelDecaySummary: JSON.stringify(extra.channelDecaySummary) } : {}),
     });
   } catch {
     // Non-fatal
   }
+}
+
+function isWeekendForDate(date: Date): boolean {
+  const istMs = date.getTime() + 330 * 60 * 1000;
+  const istDay = new Date(istMs).getUTCDay();
+  return istDay === 0 || istDay === 6;
 }
 
 router.get("/intelligence/market-signals", async (req, res) => {
@@ -2115,9 +2290,21 @@ router.get("/intelligence/market-signals", async (req, res) => {
               storedRegime.crisisProbability,
             ),
             sequenceSummary: storedRegime.sequenceSummary ?? "stored",
+            avgLogLikelihood: 0,
+            driftAlert: false,
           };
 
-          const signal = await runMarketAgent(asset.id, asset.name, asset.symbol, regimeState, candleSummary, marketStats, lessons);
+          const signal = await runMarketAgent(asset.id, asset.name, asset.symbol, regimeState, candleSummary, marketStats, lessons, {
+            ohlcvCandles: historical?.candles.map(c => ({
+              date: new Date().toISOString().slice(0, 10), // approximate
+              open: c.open,
+              high: c.high,
+              low: c.low,
+              close: c.close,
+              volume: c.volume,
+              changePct: c.changePct,
+            })),
+          });
           // Adapt MarketSignal → AIPrediction shape
           return {
             direction: signal.direction,
@@ -2133,6 +2320,18 @@ router.get("/intelligence/market-signals", async (req, res) => {
             bearScore: signal.bearScore,
             activeBullSignals: [] as { template: MarketSignalTemplate; articleIds: string[] }[],
             activeBearSignals: [] as { template: MarketSignalTemplate; articleIds: string[] }[],
+            _priceScore: signal.priceScore,
+            _flipConfirmed: signal.flipConfirmed,
+            _tier3Evidence: signal.tier3Evidence as Record<string, unknown>,
+            _candleTrustScore: signal.candleTrustScore,
+            _candleFlags: signal.candleFlags,
+            _regimeAge: signal.regimeAge,
+            _channelDecaySummary: signal.channelDecaySummary as Record<string, unknown>[],
+            _regime: signal.regime,
+            _regimeProbabilities: signal.regimeProbabilities,
+            _activeChannels: signal.activeChannels,
+            _ensembleVotes: signal.ensembleVotes as unknown as Record<string, unknown>[],
+            _uncertaintyFlag: signal.uncertaintyFlag,
           };
         } catch {
           // fall through to legacy path
@@ -2146,9 +2345,12 @@ router.get("/intelligence/market-signals", async (req, res) => {
 
   const assets = ASSET_TEMPLATES.map((asset, idx) => {
     const ai = aiPredictions[idx]!;
-    const { direction, magnitude, confidence, timeframe, priceImpactEstimate,
+    const { direction, magnitude, confidence, timeframe: _aiTimeframe, priceImpactEstimate,
             verdict, dominantNarrative, assumptions, triggerNewsSummary,
             bullScore, bearScore, activeBullSignals, activeBearSignals } = ai;
+
+    // Force all market signals to be "today" (9:00 AM → 3:30 PM IST)
+    const timeframe = "today";
 
     const realPrice = realPrices[idx] ?? null;
     const history = assetHistories[idx] ?? [];
@@ -2159,17 +2361,49 @@ router.get("/intelligence/market-signals", async (req, res) => {
     ])].slice(0, 10);
 
     // Fire-and-forget: early flip detection, resolve expired snapshots, save new snapshot
-    void detectEarlyFlipAndNotify(asset.id, asset.symbol, direction, verdict, activeBullSignals ?? [], activeBearSignals ?? []);
-    void resolvePendingSnapshots(asset.id, direction, realPrice);
+    const safeDirection: AssetDirection = direction === "uncertain" ? "neutral" : direction;
+    void detectEarlyFlipAndNotify(asset.id, asset.symbol, safeDirection, verdict, activeBullSignals ?? [], activeBearSignals ?? []);
+    void resolvePendingSnapshots(asset.id, safeDirection, realPrice);
     void saveSnapshot(
       asset.id, asset.name, asset.symbol,
-      direction, magnitude, confidence,
+      safeDirection, magnitude, confidence,
       priceImpactEstimate, timeframe,
       bullScore, bearScore, dominantNarrative, verdict,
-      triggerNewsSummary, assumptions, triggerArticleIds, realPrice
+      triggerNewsSummary, assumptions, triggerArticleIds, realPrice,
+      {
+        priceScore: ai._priceScore,
+        flipConfirmed: ai._flipConfirmed,
+        tier3Evidence: ai._tier3Evidence,
+        candleTrustScore: ai._candleTrustScore,
+        candleFlags: ai._candleFlags,
+        regimeAge: ai._regimeAge,
+        channelDecaySummary: ai._channelDecaySummary,
+        regime: ai._regime,
+        regimeProbabilities: ai._regimeProbabilities,
+        activeChannels: ai._activeChannels,
+        ensembleVotes: ai._ensembleVotes,
+        uncertaintyFlag: ai._uncertaintyFlag,
+      }
     );
 
-    const resolveAfter = new Date(Date.now() + timeframeToMs(timeframe)).toISOString();
+    // Resolve at 3:30 PM IST today (or next market day if already past)
+    let resolveAfter: string;
+    if (timeframe === "today") {
+      const now = new Date();
+      const istMs = now.getTime() + 330 * 60 * 1000;
+      const istDate = new Date(istMs);
+      istDate.setUTCHours(10, 0, 0, 0); // 15:30 IST = 10:00 UTC
+      let targetMs = istDate.getTime() - 330 * 60 * 1000;
+      if (targetMs <= now.getTime()) {
+        targetMs += 24 * 60 * 60 * 1000;
+        while (isWeekendForDate(new Date(targetMs))) {
+          targetMs += 24 * 60 * 60 * 1000;
+        }
+      }
+      resolveAfter = new Date(targetMs).toISOString();
+    } else {
+      resolveAfter = new Date(Date.now() + timeframeToMs(timeframe)).toISOString();
+    }
 
     // Build recentHistory entries for the UI
     const recentHistory = history.map((r) => {
@@ -2207,11 +2441,14 @@ router.get("/intelligence/market-signals", async (req, res) => {
       };
     });
 
+    // Normalize direction for API contract (schema rejects "uncertain")
+    const apiDirection: "up" | "down" | "neutral" = direction === "uncertain" ? "neutral" : direction;
+
     return {
       id: asset.id,
       name: asset.name,
       symbol: asset.symbol,
-      direction,
+      direction: apiDirection,
       magnitude,
       confidence,
       timeframe,
@@ -2247,6 +2484,8 @@ router.get("/intelligence/market-signals", async (req, res) => {
     assets,
     totalArticlesAnalyzed: articles.length,
     generatedAt: new Date().toISOString(),
+    marketClosed: isWeekend(),
+    marketClosedReason: isWeekend() ? "Indian markets are closed on weekends (Saturday & Sunday)" : undefined,
   });
 
   // Fire-and-forget: push notification — throttled per asset
@@ -2279,6 +2518,135 @@ router.get("/intelligence/market-signals", async (req, res) => {
   }
 
   res.json(response);
+});
+
+// ─── Manual trigger for market signals ──────────────────────────────────────
+
+router.post("/intelligence/market-signals/trigger", async (req, res) => {
+  if (isWeekend()) {
+    res.status(400).json({ error: "Market is closed on weekends" });
+    return;
+  }
+
+  try {
+    // Re-run the same logic as GET but force a new snapshot by clearing the 24h throttle
+    // We do this by calling the market signal generation directly
+    const baseUrl = `http://localhost:${process.env["PORT"] ?? 8080}`;
+    const newsRes = await fetch(`${baseUrl}/api/news?pageSize=200`);
+    let articles: RawArticle[] = [];
+    if (newsRes.ok) {
+      const data = (await newsRes.json()) as { articles?: RawArticle[] };
+      articles = data.articles ?? [];
+    }
+
+    // Fetch prices
+    const realPrices = await Promise.all(ASSET_TEMPLATES.map((a) => fetchRealPrice(a.id)));
+
+    // For each asset, force a new snapshot by bypassing the daily throttle
+    for (let idx = 0; idx < ASSET_TEMPLATES.length; idx++) {
+      const asset = ASSET_TEMPLATES[idx]!;
+      const realPrice = realPrices[idx] ?? null;
+
+      // Use regime agent if available, otherwise legacy
+      let ai;
+      try {
+        const recentRegimeCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const sharedRegime = await db
+          .select()
+          .from(marketRegimesTable)
+          .where(and(eq(marketRegimesTable.assetId, "nse_market"), gt(marketRegimesTable.detectedAt, recentRegimeCutoff)))
+          .orderBy(desc(marketRegimesTable.detectedAt))
+          .limit(1)
+          .then((r) => r[0] ?? null)
+          .catch(() => null);
+
+        const assetRegime = await db
+          .select()
+          .from(marketRegimesTable)
+          .where(and(eq(marketRegimesTable.assetId, asset.id), gt(marketRegimesTable.detectedAt, recentRegimeCutoff)))
+          .orderBy(desc(marketRegimesTable.detectedAt))
+          .limit(1)
+          .then((r) => r[0] ?? sharedRegime)
+          .catch(() => sharedRegime);
+
+        if (assetRegime) {
+          const regimeState = {
+            regime: assetRegime.regime as "RISK_ON" | "RISK_OFF" | "CRISIS",
+            probabilities: {
+              RISK_ON: assetRegime.riskOnProbability,
+              RISK_OFF: assetRegime.riskOffProbability,
+              CRISIS: assetRegime.crisisProbability,
+            },
+            confidence: Math.max(assetRegime.riskOnProbability, assetRegime.riskOffProbability, assetRegime.crisisProbability),
+            sequenceSummary: assetRegime.sequenceSummary ?? "stored",
+            avgLogLikelihood: 0,
+            driftAlert: false,
+          };
+          const signal = await runMarketAgent(asset.id, asset.name, asset.symbol, regimeState, "OHLCV unavailable", "", null, { force: true });
+          const safeDir = signal.direction === "uncertain" ? "neutral" : signal.direction;
+          ai = {
+            direction: safeDir,
+            magnitude: signal.magnitude,
+            confidence: signal.confidence,
+            timeframe: "today",
+            priceImpactEstimate: signal.priceImpactEstimate,
+            verdict: signal.verdict,
+            dominantNarrative: signal.dominantNarrative,
+            assumptions: signal.assumptions,
+            triggerNewsSummary: signal.triggerNewsSummary,
+            bullScore: signal.bullScore,
+            bearScore: signal.bearScore,
+            activeBullSignals: [] as { template: MarketSignalTemplate; articleIds: string[] }[],
+            activeBearSignals: [] as { template: MarketSignalTemplate; articleIds: string[] }[],
+            _priceScore: signal.priceScore,
+            _flipConfirmed: signal.flipConfirmed,
+            _tier3Evidence: signal.tier3Evidence as Record<string, unknown>,
+            _candleTrustScore: signal.candleTrustScore,
+            _candleFlags: signal.candleFlags,
+            _regimeAge: signal.regimeAge,
+            _channelDecaySummary: signal.channelDecaySummary as Record<string, unknown>[],
+            _regime: signal.regime,
+            _regimeProbabilities: signal.regimeProbabilities,
+            _activeChannels: signal.activeChannels,
+            _ensembleVotes: signal.ensembleVotes as unknown as Record<string, unknown>[],
+            _uncertaintyFlag: signal.uncertaintyFlag,
+          };
+        } else {
+          throw new Error("no regime");
+        }
+      } catch {
+        ai = await aiPredictAsset(asset, articles, null, null);
+      }
+
+      const triggerArticleIds: string[] = [];
+      void saveSnapshot(
+        asset.id, asset.name, asset.symbol,
+        ai.direction, ai.magnitude, ai.confidence,
+        ai.priceImpactEstimate, "today",
+        ai.bullScore, ai.bearScore, ai.dominantNarrative, ai.verdict,
+        ai.triggerNewsSummary, ai.assumptions, triggerArticleIds, realPrice,
+        {
+          priceScore: ai._priceScore,
+          flipConfirmed: ai._flipConfirmed,
+          tier3Evidence: ai._tier3Evidence,
+          candleTrustScore: ai._candleTrustScore,
+          candleFlags: ai._candleFlags,
+          regimeAge: ai._regimeAge,
+          channelDecaySummary: ai._channelDecaySummary,
+          regime: ai._regime,
+          regimeProbabilities: ai._regimeProbabilities,
+          activeChannels: ai._activeChannels,
+          ensembleVotes: ai._ensembleVotes,
+          uncertaintyFlag: ai._uncertaintyFlag,
+        }
+      );
+    }
+
+    res.json({ success: true, message: "Market signals triggered manually", assets: ASSET_TEMPLATES.length });
+  } catch (err) {
+    logger.error({ err }, "market-signals/trigger failed");
+    res.status(500).json({ error: "Failed to trigger market signals" });
+  }
 });
 
 // ─── Track Record ─────────────────────────────────────────────────────────────

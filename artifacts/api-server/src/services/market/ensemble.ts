@@ -19,45 +19,32 @@ export interface EnsembleResult {
   final: MarketCall;
   votes: EnsembleVote[];
   unanimous: boolean;
-  uncertaintyFlag: boolean; // true if 3-way split or CRISIS regime override
+  uncertaintyFlag: boolean; // true if genuinely ambiguous or CRISIS regime override
+  score: number;            // confidence-weighted directional score in [-1, +1]
+  reason: string;           // why the final call was chosen (audit trail)
 }
 
-// ── Per-window system prompt ───────────────────────────────────────────────────
-
-function buildWindowPrompt(window: "6h" | "24h" | "72h"): string {
-  const horizon = { "6h": "intraday (next 6 hours)", "24h": "next 24 hours", "72h": "next 72 hours" }[window];
-  return `You are a quantitative analyst assessing Indian equity market direction for the ${horizon} horizon.
-You receive: (1) current market regime state, (2) active geopolitical transmission channels, (3) recent news summary.
-
-Return only valid JSON:
-{
-  "call": "BULLISH" | "BEARISH" | "NEUTRAL" | "UNCERTAIN",
-  "confidence": number (0.0–1.0),
-  "rationale": string (1–2 sentences, specific to the ${window} window)
+export interface GeopoliticalSignal {
+  dominantChannel: string | null;        // e.g. "fii_risk_off", "crude_spike", etc.
+  sentiment: "bullish" | "bearish" | "neutral";
+  decayedWeight: number;                 // 0-1 — how live the signal still is after decay
 }
 
-Rules:
-- UNCERTAIN only if signals are genuinely contradictory or regime is CRISIS with >0.6 crisis probability
-- Confidence < 0.5 should map to NEUTRAL or UNCERTAIN, not a directional call
-- Weight channel severity by recency — channels active < 12h count double
-- ${window === "6h" ? "Focus on momentum and intraday flow data." : ""}
-- ${window === "72h" ? "Focus on structural regime shift probability and macro channel accumulation." : ""}`;
-}
+// ── Per-window system prompts (Change 4) ─────────────────────────────────────
+
+const systemPrompt6h = `You are a quantitative analyst assessing Indian equity market direction for the INTRADAY (6 hour) horizon. You specialise in reading live market microstructure: candle quality, options flow, and breadth. You do not extrapolate multi-day trends. You assess only what the next 6 hours look like based on the data given. If candle trust score is below 0.5, heavily discount the price signal and rely on put/call ratio and advance/decline instead. CRITICAL: If put/call ratio and advance/decline are marked unavailable, base your call ENTIRELY on candle quality, price momentum, and geopolitical channels. Do NOT default to NEUTRAL just because some data is missing. Return only valid JSON with fields: call, confidence, rationale.`;
+
+const systemPrompt24h = `You are a quantitative analyst assessing Indian equity market direction for the NEXT SESSION (24 hour) horizon. Your primary inputs are institutional conviction signals: FII/DII flows, delivery percentage, and open interest change. Price action from yesterday is context only — not your primary signal. If FII net is positive and delivery % exceeds 38%, this is strong bullish conviction even if yesterday's price was flat or down. If regime says RISK_OFF but institutional signals are bullish, explicitly flag the contradiction and lean toward the institutional data. CRITICAL: If FII/DII flow or delivery data is marked unavailable, weight macro signals (INR trend, crude oil, bond yields) at 70% of your reasoning. Do NOT default to NEUTRAL just because institutional data is missing. Return only valid JSON with fields: call, confidence, rationale.`;
+
+const systemPrompt72h = `You are a macro analyst assessing Indian equity market direction for the 72 HOUR (3 session) horizon. You must not use recent price action in your reasoning. Your inputs are structural: crude oil trend, INR direction, bond yield direction, VIX trend, options structure, and geopolitical scenario probabilities. A falling VIX + stable INR + flat crude = structurally supportive regardless of recent price. Weight macro signals at 70% and the HMM regime label at 30%. CRITICAL: If options structure data is marked unavailable, base your call entirely on macro structural signals and geopolitical scenarios. Do NOT default to NEUTRAL just because options data is missing. Return only valid JSON with fields: call, confidence, rationale.`;
 
 // ── Single window inference ───────────────────────────────────────────────────
 
 async function runWindowInference(
   window: "6h" | "24h" | "72h",
-  regime: Regime,
-  regimeProbabilities: Record<string, number>,
-  activeChannels: string[],
+  systemPrompt: string,
   contextSummary: string,
 ): Promise<EnsembleVote> {
-  const userContent = `REGIME: ${regime} (probabilities: ${JSON.stringify(regimeProbabilities)})
-ACTIVE TRANSMISSION CHANNELS: ${activeChannels.length > 0 ? activeChannels.join(", ") : "none detected"}
-CONTEXT (${window} window):
-${contextSummary}`;
-
   try {
     const response = await chatComplete({
       model: "gpt-4o",
@@ -65,8 +52,8 @@ ${contextSummary}`;
       max_tokens: 300,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: buildWindowPrompt(window) },
-        { role: "user", content: userContent },
+        { role: "system", content: systemPrompt },
+        { role: "user", content: contextSummary },
       ],
     });
 
@@ -85,53 +72,78 @@ ${contextSummary}`;
   }
 }
 
-// ── Majority vote logic ───────────────────────────────────────────────────────
+// ── Confidence-weighted vote with geopolitical tiebreak ──────────────────────
+// Replaces majorityVote(). In a sideways market the three windows commonly
+// disagree, so majority vote over-triggered UNCERTAIN. Confidence-weighted
+// scoring lets a strong-conviction window outweigh weak disagreement, and
+// only flags UNCERTAIN when at least two HIGH-confidence votes disagree.
 
-function majorityVote(votes: EnsembleVote[], regime: Regime, crisisProbability: number): EnsembleResult {
-  // CRISIS override: if crisis probability > 0.6, force UNCERTAIN
+const WINDOW_WEIGHTS: Record<EnsembleVote["window"], number> = {
+  "6h": 0.35,
+  "24h": 0.40,
+  "72h": 0.25,
+};
+
+function confidenceWeightedVote(
+  votes: EnsembleVote[],
+  regime: Regime,
+  crisisProbability: number,
+  geopoliticalSignal?: GeopoliticalSignal,
+): EnsembleResult {
+  // CRISIS override stays — legitimate.
   if (regime === "CRISIS" && crisisProbability > 0.6) {
     return {
       final: "UNCERTAIN",
       votes,
       unanimous: false,
       uncertaintyFlag: true,
+      score: 0,
+      reason: "crisis_regime",
     };
   }
 
-  const callCounts: Record<string, number> = {};
+  let weightedScore = 0;
+  let totalWeight = 0;
   for (const vote of votes) {
-    callCounts[vote.call] = (callCounts[vote.call] ?? 0) + 1;
+    const dirScore = vote.call === "BULLISH" ? 1 : vote.call === "BEARISH" ? -1 : 0;
+    const weight = WINDOW_WEIGHTS[vote.window] * vote.confidence;
+    weightedScore += dirScore * weight;
+    totalWeight += weight;
+  }
+  let normalizedScore = totalWeight > 0 ? weightedScore / totalWeight : 0;
+
+  // Geopolitical channel as a tiebreaker bias (not a dominator).
+  if (
+    geopoliticalSignal &&
+    geopoliticalSignal.dominantChannel === "fii_risk_off" &&
+    geopoliticalSignal.decayedWeight > 0.3
+  ) {
+    normalizedScore += geopoliticalSignal.sentiment === "bearish" ? -0.15 : 0.15;
   }
 
-  // 3-way split (all different) → UNCERTAIN
-  const uniqueCalls = Object.keys(callCounts);
-  if (uniqueCalls.length === 3) {
-    return { final: "UNCERTAIN", votes, unanimous: false, uncertaintyFlag: true };
+  const unanimous = new Set(votes.map(v => v.call)).size === 1;
+
+  if (normalizedScore > 0.20) {
+    return { final: "BULLISH", votes, unanimous, uncertaintyFlag: false, score: normalizedScore, reason: "weighted_score" };
+  }
+  if (normalizedScore < -0.20) {
+    return { final: "BEARISH", votes, unanimous, uncertaintyFlag: false, score: normalizedScore, reason: "weighted_score" };
   }
 
-  // Find call with max votes; ties → UNCERTAIN
-  let bestCall: MarketCall = "UNCERTAIN";
-  let bestCount = 0;
-  let tied = false;
-  for (const [call, count] of Object.entries(callCounts)) {
-    if (count > bestCount) {
-      bestCount = count;
-      bestCall = call as MarketCall;
-      tied = false;
-    } else if (count === bestCount) {
-      tied = true;
-    }
+  // Only genuinely ambiguous when ≥2 HIGH-confidence votes point in different directions.
+  const highConfidenceVotes = votes.filter(v => v.confidence > 0.5);
+  const highConfDirections = new Set(highConfidenceVotes.map(v => v.call));
+  if (highConfidenceVotes.length >= 2 && highConfDirections.size >= 2) {
+    return { final: "UNCERTAIN", votes, unanimous: false, uncertaintyFlag: true, score: normalizedScore, reason: "genuine_ambiguity" };
   }
 
-  if (tied) bestCall = "UNCERTAIN";
+  // Low confidence across the board — defer to geopolitical signal if it's still live.
+  if (geopoliticalSignal && geopoliticalSignal.decayedWeight > 0.2 && geopoliticalSignal.sentiment !== "neutral") {
+    const finalCall: MarketCall = geopoliticalSignal.sentiment === "bearish" ? "BEARISH" : "BULLISH";
+    return { final: finalCall, votes, unanimous: false, uncertaintyFlag: false, score: normalizedScore, reason: "geo_signal_tiebreak" };
+  }
 
-  const unanimous = uniqueCalls.length === 1;
-  return {
-    final: bestCall,
-    votes,
-    unanimous,
-    uncertaintyFlag: bestCall === "UNCERTAIN",
-  };
+  return { final: "NEUTRAL", votes, unanimous, uncertaintyFlag: false, score: normalizedScore, reason: "neutral_default" };
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────────
@@ -144,22 +156,34 @@ export async function runEnsembleInference(params: {
   context6h: string;
   context24h: string;
   context72h: string;
+  geopoliticalSignal?: GeopoliticalSignal;
 }): Promise<EnsembleResult> {
   logger.info({ assetId: params.assetId, regime: params.regime }, "ensemble: running 3-window inference");
 
   const crisisProbability = params.regimeProbabilities["CRISIS"] ?? 0;
 
-  // Run all 3 windows in parallel — independent calls
   const [vote6h, vote24h, vote72h] = await Promise.all([
-    runWindowInference("6h",  params.regime, params.regimeProbabilities, params.activeChannels, params.context6h),
-    runWindowInference("24h", params.regime, params.regimeProbabilities, params.activeChannels, params.context24h),
-    runWindowInference("72h", params.regime, params.regimeProbabilities, params.activeChannels, params.context72h),
+    runWindowInference("6h",  systemPrompt6h, params.context6h),
+    runWindowInference("24h", systemPrompt24h, params.context24h),
+    runWindowInference("72h", systemPrompt72h, params.context72h),
   ]);
 
-  const result = majorityVote([vote6h, vote24h, vote72h], params.regime, crisisProbability);
+  const result = confidenceWeightedVote(
+    [vote6h, vote24h, vote72h],
+    params.regime,
+    crisisProbability,
+    params.geopoliticalSignal,
+  );
 
   logger.info(
-    { assetId: params.assetId, final: result.final, uncertain: result.uncertaintyFlag, votes: result.votes.map(v => v.call) },
+    {
+      assetId: params.assetId,
+      final: result.final,
+      score: result.score.toFixed(3),
+      reason: result.reason,
+      uncertain: result.uncertaintyFlag,
+      votes: result.votes.map((v: EnsembleVote) => `${v.window}:${v.call}@${v.confidence.toFixed(2)}`),
+    },
     "ensemble: complete"
   );
 

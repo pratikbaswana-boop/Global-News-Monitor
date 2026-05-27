@@ -30,3 +30,5 @@ export * from "./stories";
 export * from "./prediction-v2";
 // Phase 4 — Market Regime Detection
 export * from "./market-regimes";
+// Phase 5 — Prediction System Hardening
+export * from "./flip-guards";

@@ -41,7 +41,7 @@ HistorianReport schema:
   "analogueConfidence": number
 }
 
-Base rates must sum to 1.0. If analogues are weak (low similarity), set noHistoricalAnalogue=true and base rates should reflect maximum uncertainty (roughly equal probabilities). Focus on structural similarities, not surface-level label matching.`;
+Base rates must sum to 1.0. If ChromaDB analogues are weak or empty, set noHistoricalAnalogue=true but STILL use your general historical knowledge to produce differentiated base rates — do NOT default to equal probabilities. A proxy-war story with Russia and Iran involved should have very different base rates than a trade-dispute story between the US and China. Focus on structural similarities, not surface-level label matching.`;
 
 export async function runHistorianAgent(
   storyId: string,
@@ -76,7 +76,7 @@ export async function runHistorianAgent(
     : "";
 
   const userContent = noHistoricalAnalogue
-    ? `No strong historical analogues found (best similarity: ${analogues[0]?.similarityScore?.toFixed(3) ?? "none"}). Generate base rates reflecting maximum uncertainty.\n\nSituation:\n${situationText}${feedbackSection}`
+    ? `No strong historical analogues found in vector database (best similarity: ${analogues[0]?.similarityScore?.toFixed(3) ?? "none"}). Use your general historical knowledge to generate DIFFERENTIATED base rates — do NOT default to equal probabilities. Consider the actual actors, power configuration, and tension indicators.\n\nSituation:\n${situationText}${feedbackSection}`
     : `Historical analogues found:\n\n${analogueSummaries}\n\nCurrent situation:\n${situationText}${feedbackSection}\n\nExtract base rates from these analogues.`;
 
   const response = await chatComplete({

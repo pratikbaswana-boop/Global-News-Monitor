@@ -41,7 +41,7 @@ export const GetNewsResponse = zod.object({
       url: zod.string(),
       imageUrl: zod.string().nullish(),
       source: zod.string(),
-      sourceName: zod.enum(["NewsAPI", "GNews", "Guardian"]),
+      sourceName: zod.string(),
       publishedAt: zod.coerce.date(),
       category: zod.enum([
         "politics",
@@ -57,11 +57,7 @@ export const GetNewsResponse = zod.object({
   totalResults: zod.number(),
   page: zod.number(),
   pageSize: zod.number(),
-  sources: zod.object({
-    newsapi: zod.number(),
-    gnews: zod.number(),
-    guardian: zod.number(),
-  }),
+  sources: zod.record(zod.string(), zod.number()),
 });
 
 /**
@@ -77,11 +73,7 @@ export const GetNewsSummaryResponse = zod.object({
     tensions: zod.number(),
     general: zod.number(),
   }),
-  bySource: zod.object({
-    newsapi: zod.number(),
-    gnews: zod.number(),
-    guardian: zod.number(),
-  }),
+  bySource: zod.record(zod.string(), zod.number()),
   lastUpdated: zod.coerce.date(),
 });
 
@@ -226,6 +218,7 @@ export const GetIntelligenceMarketSignalsResponse = zod.object({
       magnitude: zod.enum(["strong", "moderate", "mild"]),
       confidence: zod.enum(["high", "medium", "low"]),
       timeframe: zod.enum([
+        "today",
         "intraday",
         "next-session",
         "1-2 weeks",
@@ -365,6 +358,8 @@ export const GetIntelligenceMarketSignalsResponse = zod.object({
   ),
   totalArticlesAnalyzed: zod.number(),
   generatedAt: zod.coerce.date(),
+  marketClosed: zod.boolean().optional().describe("True when Indian markets are closed (Saturday/Sunday IST)"),
+  marketClosedReason: zod.string().optional().describe("Explanation for why the market is closed"),
 });
 
 /**
@@ -470,7 +465,7 @@ export const GetIntelligenceClustersResponse = zod.object({
           url: zod.string(),
           imageUrl: zod.string().nullish(),
           source: zod.string(),
-          sourceName: zod.enum(["NewsAPI", "GNews", "Guardian"]),
+          sourceName: zod.string(),
           publishedAt: zod.coerce.date(),
           category: zod.enum([
             "politics",

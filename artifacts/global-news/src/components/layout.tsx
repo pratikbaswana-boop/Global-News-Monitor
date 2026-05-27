@@ -12,6 +12,7 @@ import {
   SidebarHeader
 } from "@/components/ui/sidebar";
 import { LayoutDashboard, TrendingUp, Database, Globe, Brain } from "lucide-react";
+import React from "react";
 const basePath = import.meta.env.BASE_URL;
 
 export function AppLayout({ children }: { children: React.ReactNode }) {
@@ -20,20 +21,22 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   return (
     <SidebarProvider defaultOpen>
       <div className="flex min-h-screen w-full bg-background">
-        <Sidebar className="border-r border-border bg-sidebar">
-          <SidebarHeader className="p-4 border-b border-border">
-            <div className="flex items-center gap-2 px-2 text-sidebar-primary">
-              <Globe className="h-6 w-6" />
-              <span className="font-bold text-lg tracking-tight uppercase">Intel<span className="text-muted-foreground font-medium">Dash</span></span>
+        <Sidebar className="border-r border-border/40 bg-[#0c0e14]">
+          <SidebarHeader className="p-4 border-b border-border/40">
+            <div className="flex items-center gap-2.5 px-2">
+              <div className="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center">
+                <Globe className="h-5 w-5 text-primary" />
+              </div>
+              <span className="font-bold text-base tracking-tight" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>Intel<span className="text-muted-foreground font-medium">Dash</span></span>
             </div>
           </SidebarHeader>
           <SidebarContent>
             <SidebarGroup>
-              <SidebarGroupLabel className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Navigation</SidebarGroupLabel>
+              <SidebarGroupLabel className="text-[10px] font-bold text-muted-foreground uppercase tracking-[0.12em] px-2 py-3">Navigation</SidebarGroupLabel>
               <SidebarGroupContent>
                 <SidebarMenu>
                   <SidebarMenuItem>
-                    <SidebarMenuButton asChild isActive={location === "/"}>
+                    <SidebarMenuButton asChild isActive={location === "/"} className="data-[active=true]:bg-primary/10 data-[active=true]:text-primary data-[active=true]:border-l-2 data-[active=true]:border-primary rounded-md px-3 py-2.5 text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-all">
                       <Link href={`${basePath}`}>
                         <LayoutDashboard className="h-4 w-4" />
                         <span>Terminal</span>
@@ -41,7 +44,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                   <SidebarMenuItem>
-                    <SidebarMenuButton asChild isActive={location === "/trending"}>
+                    <SidebarMenuButton asChild isActive={location === "/trending"} className="data-[active=true]:bg-primary/10 data-[active=true]:text-primary data-[active=true]:border-l-2 data-[active=true]:border-primary rounded-md px-3 py-2.5 text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-all">
                       <Link href={`${basePath}trending`}>
                         <TrendingUp className="h-4 w-4" />
                         <span>Trending Vectors</span>
@@ -49,7 +52,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                   <SidebarMenuItem>
-                    <SidebarMenuButton asChild isActive={location === "/sources"}>
+                    <SidebarMenuButton asChild isActive={location === "/sources"} className="data-[active=true]:bg-primary/10 data-[active=true]:text-primary data-[active=true]:border-l-2 data-[active=true]:border-primary rounded-md px-3 py-2.5 text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-all">
                       <Link href={`${basePath}sources`}>
                         <Database className="h-4 w-4" />
                         <span>Data Sources</span>
@@ -57,7 +60,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                   <SidebarMenuItem>
-                    <SidebarMenuButton asChild isActive={location === "/intelligence"}>
+                    <SidebarMenuButton asChild isActive={location === "/intelligence"} className="data-[active=true]:bg-primary/10 data-[active=true]:text-primary data-[active=true]:border-l-2 data-[active=true]:border-primary rounded-md px-3 py-2.5 text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-all">
                       <Link href={`${basePath}intelligence`}>
                         <Brain className="h-4 w-4" />
                         <span>Intelligence</span>

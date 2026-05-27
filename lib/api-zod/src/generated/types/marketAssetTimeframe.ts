@@ -10,6 +10,7 @@ export type MarketAssetTimeframe =
   (typeof MarketAssetTimeframe)[keyof typeof MarketAssetTimeframe];
 
 export const MarketAssetTimeframe = {
+  today: "today",
   intraday: "intraday",
   "next-session": "next-session",
   "1-2_weeks": "1-2 weeks",

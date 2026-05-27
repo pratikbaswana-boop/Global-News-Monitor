@@ -12,9 +12,10 @@
 import { randomUUID } from "crypto";
 import { db, marketRegimesTable } from "@workspace/db";
 import { logger } from "../../lib/logger.js";
-import { fetchRegimeFeatures } from "./nse-direct-scraper.js";
+import { fetchRegimeFeatures, fetchNSEPriceData } from "./nse-direct-scraper.js";
 import { detectRegime } from "./hmm-regime.js";
 import { runMarketAgent } from "./market-agent.js";
+import { fetchSessionPriors, setSessionPriors, getSessionPriors } from "./tier3-fetcher.js";
 
 const ASSET_ID = "nse_market";
 const FIRST_RUN_DELAY_MS = 2 * 60 * 1000; // 2 min after startup
@@ -76,18 +77,30 @@ async function detectAndStoreRegime(): Promise<boolean> {
       crisisProbability: regime.probabilities.CRISIS,
       vixLevel: latest.vixLevel,
       vixChange5d: latest.vixChange5d,
-      fiiNetFlow5d: latest.fiiNetFlow5d,
+      // The DB column is named fiiNetFlow5d for legacy reasons; we now store
+      // pcrIntraday in it (PCR replaced FII 5d in the HMM feature vector).
+      fiiNetFlow5d: latest.pcrIntraday,
       niftyRealVol10d: latest.niftyRealVol10d,
       inrUsdChange5d: latest.inrUsdChange5d,
       featuresJson: JSON.stringify(features.slice(-30)),
       sequenceSummary: regime.sequenceSummary,
     });
 
+    if (regime.driftAlert) {
+      logger.warn({
+        avgLogLikelihood: regime.avgLogLikelihood.toFixed(2),
+        recommendation: "Review and recalibrate MU/SIGMA constants in hmm-regime.ts",
+      }, "market-scheduler: HMM drift alert — model parameters may no longer describe current market");
+    }
+
     logger.info({
       regime: regime.regime,
       confidence: regime.confidence.toFixed(2),
       sequence: regime.sequenceSummary,
       vix: latest.vixLevel,
+      pcr: latest.pcrIntraday.toFixed(2),
+      avgLL: regime.avgLogLikelihood.toFixed(2),
+      drift: regime.driftAlert,
     }, "market-scheduler: regime stored");
     return true;
   } catch (err) {
@@ -122,15 +135,69 @@ async function runEnsembleForAllAssets(window: Window): Promise<void> {
   let failed = 0;
   for (const asset of FORECAST_ASSETS) {
     try {
+      // Fetch real OHLCV from Yahoo Finance for this asset
+      let candleSummary = "Historical price data unavailable";
+      let marketStats = "";
+      let ohlcvCandles: Array<{
+        date: string;
+        open: number;
+        high: number;
+        low: number;
+        close: number;
+        volume: number;
+        changePct: number;
+      }> = [];
+
+      try {
+        const yahooSymbol = asset.symbol === "NIFTY" ? "^NSEI" :
+                            asset.symbol === "SENSEX" ? "^BSESN" :
+                            asset.symbol === "GOLD" ? "GC=F" :
+                            asset.symbol === "SILVER" ? "SI=F" :
+                            `${asset.symbol}.NS`;
+        const priceData = await fetchNSEPriceData(yahooSymbol, 7);
+        if (priceData.length >= 2) {
+          const latest = priceData[priceData.length - 1]!;
+          const prev = priceData[priceData.length - 2]!;
+          const sevenDayChange = ((latest.close - priceData[0]!.close) / priceData[0]!.close) * 100;
+          const avgRange = priceData.slice(1).reduce((s, d) => s + Math.abs(d.returnPct), 0) / (priceData.length - 1);
+          const trend = latest.close > prev.close ? "up" : "down";
+
+          candleSummary = priceData.map((d, i) => {
+            if (i === 0) return `${d.date}: C=${d.close.toFixed(2)}`;
+            return `${d.date}: C=${d.close.toFixed(2)} Chg=${d.returnPct > 0 ? "+" : ""}${d.returnPct.toFixed(2)}%`;
+          }).join("\n");
+
+          marketStats = `7-day change: ${sevenDayChange > 0 ? "+" : ""}${sevenDayChange.toFixed(2)}% | Trend: ${trend} | Avg daily range: ${avgRange.toFixed(2)}%`;
+
+          // Build OHLCV candles from close data (Yahoo daily close only)
+          // Use close as proxy for open/high/low when full OHLCV unavailable
+          ohlcvCandles = priceData.map((d, i) => {
+            const prevClose = i > 0 ? priceData[i - 1]!.close : d.close;
+            const change = ((d.close - prevClose) / prevClose) * 100;
+            return {
+              date: d.date,
+              open: prevClose,
+              high: Math.max(d.close, prevClose),
+              low: Math.min(d.close, prevClose),
+              close: d.close,
+              volume: 0, // volume not available from daily close endpoint
+              changePct: i === 0 ? 0 : change,
+            };
+          });
+        }
+      } catch (err) {
+        logger.warn({ asset: asset.id, err: err instanceof Error ? err.message : err }, "market-scheduler: price fetch failed, using fallback");
+      }
+
       await runMarketAgent(
         asset.id,
         asset.name,
         asset.symbol,
         regimeState as never,
-        "OHLCV unavailable in scheduler context",
-        "",
+        candleSummary,
+        marketStats,
         null,
-        { force: true },
+        { force: true, ohlcvCandles },
       );
       ok++;
     } catch (err) {
@@ -143,9 +210,52 @@ async function runEnsembleForAllAssets(window: Window): Promise<void> {
   void cutoff;
 }
 
+// ── Session priors lifecycle ──────────────────────────────────────────────────
+// Load EOD data from previous session once at market open and hold constant all
+// day. Track the trading date in memory so the 5-minute cycle never re-fetches.
+
+let _priorsLoadedFor: string | null = null;
+
+function todayIstDateKey(): string {
+  const now = new Date();
+  const istMin = now.getUTCMinutes() + now.getUTCHours() * 60 + 330;
+  const istDate = new Date(now.getTime());
+  istDate.setUTCMinutes(istMin);
+  return istDate.toISOString().slice(0, 10);
+}
+
+async function onMarketOpen(): Promise<void> {
+  const today = todayIstDateKey();
+  if (_priorsLoadedFor === today) return; // already loaded for this session
+  try {
+    const priors = await fetchSessionPriors();
+    setSessionPriors(priors);
+    _priorsLoadedFor = today;
+    logger.info({
+      fiiNet: priors.fiiNetFlowCrore,
+      diiNet: priors.diiNetFlowCrore,
+      deliveryPct: priors.deliveryPct,
+      fiiParticipantOINet: priors.fiiParticipantOINet,
+      tradingDate: priors.tradingDate,
+    }, "market-scheduler: session priors loaded at market open — frozen for today");
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : err }, "market-scheduler: session prior load failed");
+  }
+}
+
 async function runCycle(): Promise<void> {
   const window = currentWindow();
   logger.info({ window }, "market-scheduler: cycle starting");
+
+  // Session priors: load once per session at first open cycle (or pre-market).
+  // The 5-minute live cycle never re-fetches these EOD signals.
+  if ((window === "open" || window === "pre-market") && _priorsLoadedFor !== todayIstDateKey()) {
+    await onMarketOpen();
+  }
+  // Ensure priors exist on cold start mid-day so live cycles can compose them.
+  if (!getSessionPriors()) {
+    await onMarketOpen();
+  }
 
   // Try regime detection only when Yahoo data is likely fresh (pre-market through post-close)
   if (window !== "off-hours") {

@@ -126,6 +126,15 @@ services:
       VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
       ADMIN_SECRET: ${ADMIN_SECRET:?set in .env.production}
       NOTIFICATION_WEBHOOK_URL: ${NOTIFICATION_WEBHOOK_URL:-}
+
+      # NSE direct API toggle (set false on EC2/cloud where NSE blocks IPs)
+      USE_NSE_DIRECT: ${USE_NSE_DIRECT:-true}
+
+      # AWS Bedrock credentials (used when LLM_PROVIDER=bedrock)
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
     networks: [gnm]
 
   frontend:

@@ -11,6 +11,7 @@ import type { RegimeFeatures } from "./hmm-regime.js";
 
 let nseSessionCookie = "";
 let sessionExpiresAt = 0;
+const USE_NSE_DIRECT = process.env["USE_NSE_DIRECT"] !== "false"; // default true locally, set false on EC2
 
 const NSE_HEADERS: Record<string, string> = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -24,6 +25,7 @@ const NSE_HEADERS: Record<string, string> = {
 };
 
 async function ensureNseSession(): Promise<void> {
+  if (!USE_NSE_DIRECT) throw new Error("NSE direct API disabled (USE_NSE_DIRECT=false)");
   if (Date.now() < sessionExpiresAt) return;
 
   try {
@@ -162,6 +164,67 @@ export async function fetchSectoralIndices(): Promise<SectoralClose[]> {
     }));
 }
 
+// ── Sectoral deltas vs NIFTY 50 (live, every 5min) ────────────────────────────
+
+export interface SectorDeltas {
+  nifty50PctChange: number;
+  bankPctChange: number;
+  itPctChange: number;
+  pharmaPctChange: number;
+  autoPctChange: number;
+  // deltas vs NIFTY 50
+  bank: number;
+  it: number;
+  pharma: number;
+  auto: number;
+}
+
+export async function fetchSectoralDeltas(): Promise<SectorDeltas> {
+  const raw = await nseGet<NseVixData>("/api/allIndices");
+  const find = (sym: string): number => {
+    const row = raw.data.find(d => d.indexSymbol === sym);
+    if (!row || row.previousClose <= 0) return 0;
+    return ((row.last - row.previousClose) / row.previousClose) * 100;
+  };
+  const nifty50 = find("NIFTY 50");
+  const bank = find("NIFTY BANK");
+  const it = find("NIFTY IT");
+  const pharma = find("NIFTY PHARMA");
+  const auto = find("NIFTY AUTO");
+  return {
+    nifty50PctChange: nifty50,
+    bankPctChange: bank,
+    itPctChange: it,
+    pharmaPctChange: pharma,
+    autoPctChange: auto,
+    bank: bank - nifty50,
+    it: it - nifty50,
+    pharma: pharma - nifty50,
+    auto: auto - nifty50,
+  };
+}
+
+// ── Advance/Decline ratio (live, every 5min) ──────────────────────────────────
+
+export interface AdvanceDeclineSnapshot {
+  advance: number;
+  decline: number;
+  ratio: number; // adv / dec
+}
+
+interface NseAdvDecResponse {
+  data?: Array<{ advance?: number; decline?: number }>;
+}
+
+export async function fetchADRatio(): Promise<AdvanceDeclineSnapshot> {
+  const raw = await nseGet<NseAdvDecResponse>("/api/live-analysis-variations?index=nse500");
+  const entry = raw.data?.[0] ?? {};
+  const advance = entry.advance ?? 0;
+  const decline = entry.decline ?? 0;
+  const ratio = decline > 0 ? advance / decline : 0;
+  return { advance, decline, ratio };
+}
+
 // ── INR/USD from Yahoo Finance (NSE doesn't expose FX directly) ───────────────
 
 interface YahooQuote {
@@ -212,15 +275,15 @@ export async function fetchRegimeFeatures(lookbackDays = 20): Promise<RegimeFeat
     return FEATURES_CACHE.data;
   }
 
-  const [vix, fii, inrUsd, niftyVol] = await Promise.allSettled([
+  const [vix, pcr, inrUsd, niftyVol] = await Promise.allSettled([
     fetchIndiaVix(),
-    fetchFiiDiiFlow(),
+    fetchPutCallRatio(),
     fetchInrUsd(),
     fetchNiftyRealVol(),
   ]);
 
   const vixData   = vix.status   === "fulfilled" ? vix.value   : { current: 16, change: 0, previousClose: 16 };
-  const fiiData   = fii.status   === "fulfilled" ? fii.value   : { fiiNetFlow5d: 0, fiiNetToday: 0, diiNetToday: 0, latestDate: "" };
+  const pcrData   = pcr.status   === "fulfilled" ? pcr.value   : { pcr: 1.0 };
   const fxData    = inrUsd.status === "fulfilled" ? inrUsd.value : { current: 83.5, change5dPct: 0 };
   const volData   = niftyVol.status === "fulfilled" ? niftyVol.value : { vol10d: 14.0, closes: [] };
 
@@ -228,7 +291,7 @@ export async function fetchRegimeFeatures(lookbackDays = 20): Promise<RegimeFeat
   const todayFeature: RegimeFeatures = {
     vixLevel: vixData.current,
     vixChange5d: vixData.change,
-    fiiNetFlow5d: fiiData.fiiNetFlow5d,
+    pcrIntraday: pcrData.pcr,
     niftyRealVol10d: volData.vol10d,
     inrUsdChange5d: fxData.change5dPct,
   };

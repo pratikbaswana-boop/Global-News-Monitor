@@ -78,7 +78,7 @@ SituationReport schema:
   "assessmentConfidence": number
 }
 
-Focus on structural factors, not event recitation. Assess what actors want vs. what they say. Identify leverage asymmetries. For Indian market exposure, consider: crude oil import dependency, USD/INR sensitivity, FII risk appetite, trade route disruption, sanctions spillover.`;
+Focus on structural factors, not event recitation. Assess what actors want vs. what they say. Identify leverage asymmetries. For Indian market exposure, consider: crude oil import dependency, USD/INR sensitivity, FII risk appetite, trade route disruption, sanctions spillover. List channels in order of relevance to THIS story — do NOT always put fii_risk_off or global_risk_off first.`;
 
 export async function runAnalystAgent(
   storyId: string,

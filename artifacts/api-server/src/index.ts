@@ -5,6 +5,8 @@ import { startGraphScheduler } from "./services/graph/index.js";
 import { startReasoningScheduler } from "./services/reasoning/index.js";
 import { startSelfCalibrationScheduler } from "./services/reasoning/self-calibration.js";
 import { startMarketScheduler } from "./services/market/index.js";
+import { startMarketSignalScheduler } from "./services/market/signal-scheduler.js";
+import { startMarketResolutionScheduler } from "./services/market/resolution-scheduler.js";
 import { startResolutionScheduler } from "./services/resolution/index.js";
 import { startMarketCloseSummaryScheduler } from "./services/notifications/push-notifications.js";
 import { startChannelRecalibrationScheduler } from "./services/graph/channel-recalibration.js";
@@ -48,6 +50,12 @@ app.listen(port, (err) => {
 
   // Phase 4: Start HMM market regime detection (runs hourly during IST market hours).
   startMarketScheduler();
+
+  // Phase 4a: Daily market signal snapshot at 09:00 IST.
+  startMarketSignalScheduler();
+
+  // Phase 4b: Daily market resolution at 15:30 IST.
+  startMarketResolutionScheduler();
 
   // Phase 5: Start automated resolution watcher (runs every 6h).
   startResolutionScheduler();

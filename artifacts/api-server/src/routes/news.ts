@@ -5,6 +5,8 @@ import {
   GetNewsSummaryResponse,
   GetTrendingTopicsResponse,
 } from "@workspace/api-zod";
+import { db, rawArticlesTable } from "@workspace/db";
+import { desc } from "drizzle-orm";
 
 const router = Router();
 
@@ -17,7 +19,7 @@ interface RawArticle {
   url: string;
   imageUrl: string | null;
   source: string;
-  sourceName: "NewsAPI" | "GNews" | "Guardian";
+  sourceName: string;
   publishedAt: string;
   category: "politics" | "deals" | "sanctions" | "tensions" | "general";
   countries: string[];
@@ -420,43 +422,78 @@ let lastFetched: Date | null = null;
 const FETCH_INTERVAL_HOURS = parseFloat(process.env["NEWS_FETCH_INTERVAL_HOURS"] ?? "6");
 const CACHE_TTL_MS = FETCH_INTERVAL_HOURS * 60 * 60 * 1000;
 
+async function fetchArticlesFromDatabase(): Promise<RawArticle[]> {
+  try {
+    const rows = await db
+      .select()
+      .from(rawArticlesTable)
+      .orderBy(desc(rawArticlesTable.publishedAt))
+      .limit(500);
+
+    return rows.map((row) => {
+      const title = row.title ?? "";
+      const body = row.body ?? "";
+      return {
+        id: row.id,
+        title,
+        description: body,
+        url: row.url,
+        imageUrl: null,
+        source: row.feedId,
+        sourceName: row.feedId,
+        publishedAt: row.publishedAt.toISOString(),
+        category: classifyArticle(title, body),
+        countries: extractCountries(title, body),
+        leaders: extractLeaders(title, body),
+      };
+    });
+  } catch (err) {
+    console.error("Failed to fetch articles from database:", err);
+    return [];
+  }
+}
+
 async function getAllArticles(): Promise<{
   articles: RawArticle[];
-  counts: { newsapi: number; gnews: number; guardian: number };
+  counts: Record<string, number>;
 }> {
   const now = new Date();
   if (lastFetched && now.getTime() - lastFetched.getTime() < CACHE_TTL_MS) {
-    const newsapi = cachedArticles.filter(
-      (a) => a.sourceName === "NewsAPI"
-    ).length;
-    const gnews = cachedArticles.filter((a) => a.sourceName === "GNews").length;
-    const guardian = cachedArticles.filter(
-      (a) => a.sourceName === "Guardian"
-    ).length;
-    return { articles: cachedArticles, counts: { newsapi, gnews, guardian } };
+    const counts: Record<string, number> = {};
+    for (const a of cachedArticles) {
+      counts[a.sourceName] = (counts[a.sourceName] ?? 0) + 1;
+    }
+    return { articles: cachedArticles, counts };
   }
 
+  // Primary: fetch from database (RSS ingestion pipeline)
+  const dbArticles = await fetchArticlesFromDatabase();
+  if (dbArticles.length > 0) {
+    cachedArticles = dbArticles;
+    lastFetched = now;
+    const counts: Record<string, number> = {};
+    for (const a of dbArticles) {
+      counts[a.sourceName] = (counts[a.sourceName] ?? 0) + 1;
+    }
+    return { articles: dbArticles, counts };
+  }
+
+  // Fallback: external news APIs
   const [newsapiArticles, gnewsArticles, guardianArticles] = await Promise.all([
     fetchFromNewsAPI(),
     fetchFromGNews(),
     fetchFromGuardian(),
   ]);
 
-  // Deduplicate by id
   const seenIds = new Set<string>();
   const all: RawArticle[] = [];
-  for (const a of [
-    ...newsapiArticles,
-    ...gnewsArticles,
-    ...guardianArticles,
-  ]) {
+  for (const a of [...newsapiArticles, ...gnewsArticles, ...guardianArticles]) {
     if (!seenIds.has(a.id)) {
       seenIds.add(a.id);
       all.push(a);
     }
   }
 
-  // Sort by date descending
   all.sort(
     (a, b) =>
       new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime()
@@ -465,14 +502,11 @@ async function getAllArticles(): Promise<{
   cachedArticles = all;
   lastFetched = now;
 
-  return {
-    articles: all,
-    counts: {
-      newsapi: newsapiArticles.length,
-      gnews: gnewsArticles.length,
-      guardian: guardianArticles.length,
-    },
-  };
+  const counts: Record<string, number> = {};
+  for (const a of all) {
+    counts[a.sourceName] = (counts[a.sourceName] ?? 0) + 1;
+  }
+  return { articles: all, counts };
 }
 
 // ─── Routes ───────────────────────────────────────────────────────────────────

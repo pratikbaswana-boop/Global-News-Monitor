@@ -138,8 +138,9 @@ export async function runPipeline(storyId: string): Promise<void> {
     const devilCritique = await runDevilAgent(storyId, forecasterTree);
 
     // Detect active contradiction flag (from subgraph)
-    const subgraph = JSON.parse(subgraphJson) as { contradictions: unknown[] };
-    if (subgraph.contradictions?.length > 0) {
+    const subgraph = JSON.parse(subgraphJson) as { contradictions: Array<{ eventIdA?: string | null; eventIdB?: string | null }> };
+    const realContradictions = subgraph.contradictions?.filter(c => c?.eventIdA && c?.eventIdB) ?? [];
+    if (realContradictions.length > 0) {
       state.flags.push("active_contradiction");
     }
 
@@ -148,16 +149,38 @@ export async function runPipeline(storyId: string): Promise<void> {
       state.flags.push("narrative_drifting");
     }
 
-    // ── Stage 6: Write to DB ──────────────────────────────────────────────────
+    // ── Stage 6: Write to DB + Neo4j ──────────────────────────────────────────
     state.stage = "writing";
 
     const minTimeframeDays = Math.min(...forecasterTree.scenarios.map(s => s.timeframeDays));
     const resolveAfter = new Date(Date.now() + minTimeframeDays * 24 * 60 * 60 * 1000);
 
+    // Enrich analyst report with the story label for downstream display
+    const enrichedAnalystReport = { ...situationReport, storyLabel: (JSON.parse(subgraphJson) as { storyLabel?: string }).storyLabel ?? "Unknown Story" };
+
+    // Write TRANSMITS_TO relationship with triggerDate (Change 6)
+    const dominantChannelWeight = forecasterTree.scenarios[forecasterTree.dominantScenario]?.probability ?? 0.5;
+    try {
+      await runCypher(
+        `MATCH (s:Story {id: $storyId})
+         MATCH (c:Channel {id: $channelId})
+         MERGE (s)-[r:TRANSMITS_TO]->(c)
+         SET r.triggerDate = $triggerDate, r.rawWeight = $weight`,
+        {
+          storyId,
+          channelId: dominantChannel,
+          triggerDate: new Date().toISOString(),
+          weight: dominantChannelWeight,
+        }
+      );
+    } catch (err) {
+      logger.warn({ storyId, dominantChannel, err }, "pipeline: TRANSMITS_TO write failed");
+    }
+
     await db.insert(predictionV2Table).values({
       id: randomUUID(),
       storyId,
-      analystReport: JSON.stringify(situationReport),
+      analystReport: JSON.stringify(enrichedAnalystReport),
       historianPrecedents: JSON.stringify(historianReport),
       forecasterTree: JSON.stringify(forecasterTree),
       devilCritique: JSON.stringify(devilCritique),

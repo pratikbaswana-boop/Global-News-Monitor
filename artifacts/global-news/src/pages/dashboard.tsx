@@ -32,23 +32,25 @@ export default function Dashboard() {
       <div className="flex-1 overflow-y-auto">
         <div className="p-6 max-w-screen-2xl mx-auto space-y-6">
           {/* Top Status Bar */}
-          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-card border border-border p-4 rounded-lg shadow-sm">
-            <div className="flex items-center gap-2">
-              <Activity className="h-5 w-5 text-primary" />
-              <h1 className="text-xl font-bold tracking-tight">Global Intelligence Terminal</h1>
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-[#10131b] border border-border/30 p-4 rounded-lg">
+            <div className="flex items-center gap-3">
+              <div className="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center">
+                <Activity className="h-4 w-4 text-primary" />
+              </div>
+              <h1 className="text-xl font-bold tracking-tight" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>Global Intelligence Terminal</h1>
             </div>
 
             <div className="flex items-center gap-6 text-sm font-mono text-muted-foreground">
               {isLoadingSummary ? (
-                <Skeleton className="h-4 w-48" />
+                <Skeleton className="h-4 w-48 bg-muted/40" />
               ) : summaryData ? (
                 <>
                   <div className="flex items-center gap-2">
-                    <Database className="h-4 w-4" />
+                    <Database className="h-4 w-4 text-muted-foreground/60" />
                     <span>{(summaryData.totalArticles ?? 0).toLocaleString()} Signals</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <Clock className="h-4 w-4" />
+                    <Clock className="h-4 w-4 text-muted-foreground/60" />
                     <span>Updated: {summaryData.lastUpdated ? new Date(summaryData.lastUpdated).toLocaleTimeString() : "—"}</span>
                   </div>
                 </>
@@ -59,22 +61,22 @@ export default function Dashboard() {
           <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
             {/* Main Feed */}
             <div className="lg:col-span-3 space-y-4">
-              <div className="flex items-center justify-between border-b border-border pb-2">
+              <div className="flex items-center justify-between border-b border-border/30 pb-2">
                 <Tabs value={category} onValueChange={(v) => setCategory(v as GetNewsCategory)} className="w-full">
-                  <TabsList className="bg-transparent border-none p-0 h-auto gap-4 justify-start w-full overflow-x-auto">
-                    <TabsTrigger value="all" className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none px-1 pb-2 pt-0 uppercase tracking-wider text-xs font-bold">
+                  <TabsList className="bg-transparent border-none p-0 h-auto gap-6 justify-start w-full overflow-x-auto">
+                    <TabsTrigger value="all" className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none px-1 pb-2 pt-0 uppercase tracking-[0.12em] text-[11px] font-bold text-muted-foreground data-[state=active]:text-primary">
                       All Signals
                     </TabsTrigger>
-                    <TabsTrigger value="politics" className="rounded-none border-b-2 border-transparent data-[state=active]:border-slate-500 data-[state=active]:bg-transparent data-[state=active]:shadow-none px-1 pb-2 pt-0 uppercase tracking-wider text-xs font-bold">
+                    <TabsTrigger value="politics" className="rounded-none border-b-2 border-transparent data-[state=active]:border-slate-400 data-[state=active]:bg-transparent data-[state=active]:shadow-none px-1 pb-2 pt-0 uppercase tracking-[0.12em] text-[11px] font-bold text-muted-foreground data-[state=active]:text-slate-400">
                       Politics
                     </TabsTrigger>
-                    <TabsTrigger value="deals" className="rounded-none border-b-2 border-transparent data-[state=active]:border-blue-500 data-[state=active]:bg-transparent data-[state=active]:shadow-none px-1 pb-2 pt-0 uppercase tracking-wider text-xs font-bold">
+                    <TabsTrigger value="deals" className="rounded-none border-b-2 border-transparent data-[state=active]:border-blue-400 data-[state=active]:bg-transparent data-[state=active]:shadow-none px-1 pb-2 pt-0 uppercase tracking-[0.12em] text-[11px] font-bold text-muted-foreground data-[state=active]:text-blue-400">
                       Deals
                     </TabsTrigger>
-                    <TabsTrigger value="sanctions" className="rounded-none border-b-2 border-transparent data-[state=active]:border-amber-500 data-[state=active]:bg-transparent data-[state=active]:shadow-none px-1 pb-2 pt-0 uppercase tracking-wider text-xs font-bold">
+                    <TabsTrigger value="sanctions" className="rounded-none border-b-2 border-transparent data-[state=active]:border-amber-400 data-[state=active]:bg-transparent data-[state=active]:shadow-none px-1 pb-2 pt-0 uppercase tracking-[0.12em] text-[11px] font-bold text-muted-foreground data-[state=active]:text-amber-400">
                       Sanctions
                     </TabsTrigger>
-                    <TabsTrigger value="tensions" className="rounded-none border-b-2 border-transparent data-[state=active]:border-destructive data-[state=active]:bg-transparent data-[state=active]:shadow-none px-1 pb-2 pt-0 uppercase tracking-wider text-xs font-bold">
+                    <TabsTrigger value="tensions" className="rounded-none border-b-2 border-transparent data-[state=active]:border-red-400 data-[state=active]:bg-transparent data-[state=active]:shadow-none px-1 pb-2 pt-0 uppercase tracking-[0.12em] text-[11px] font-bold text-muted-foreground data-[state=active]:text-red-400">
                       Tensions
                     </TabsTrigger>
                   </TabsList>
@@ -82,44 +84,44 @@ export default function Dashboard() {
               </div>
 
               {isLoadingNews ? (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                   {[...Array(6)].map((_, i) => (
-                    <Card key={i} className="overflow-hidden">
-                      <Skeleton className="h-48 w-full rounded-none" />
+                    <Card key={i} className="overflow-hidden rounded-lg bg-[#10131b] border border-border/20">
+                      <Skeleton className="h-48 w-full rounded-none bg-muted/30" />
                       <CardContent className="p-5 space-y-3">
                         <div className="flex justify-between">
-                          <Skeleton className="h-4 w-16" />
-                          <Skeleton className="h-4 w-20" />
+                          <Skeleton className="h-4 w-16 bg-muted/30" />
+                          <Skeleton className="h-4 w-20 bg-muted/30" />
                         </div>
-                        <Skeleton className="h-6 w-full" />
-                        <Skeleton className="h-6 w-3/4" />
-                        <Skeleton className="h-4 w-full mt-4" />
-                        <Skeleton className="h-4 w-2/3" />
+                        <Skeleton className="h-6 w-full bg-muted/30" />
+                        <Skeleton className="h-6 w-3/4 bg-muted/30" />
+                        <Skeleton className="h-4 w-full mt-4 bg-muted/30" />
+                        <Skeleton className="h-4 w-2/3 bg-muted/30" />
                       </CardContent>
                     </Card>
                   ))}
                 </div>
               ) : newsData?.articles && newsData.articles.length > 0 ? (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                   {newsData.articles.map(article => (
                     <ArticleCard key={article.id} article={article} onClick={() => setSelectedArticle(article)} />
                   ))}
                 </div>
               ) : (
-                <div className="flex flex-col items-center justify-center py-20 text-center text-muted-foreground bg-card border border-border rounded-lg border-dashed">
-                  <SearchX className="h-12 w-12 mb-4 text-muted" />
+                <div className="flex flex-col items-center justify-center py-20 text-center text-muted-foreground bg-[#10131b] border border-border/20 rounded-lg">
+                  <SearchX className="h-12 w-12 mb-4 text-muted-foreground/30" />
                   <p className="text-lg font-medium text-foreground">No signals detected</p>
-                  <p className="text-sm">Try adjusting your filters or checking back later.</p>
+                  <p className="text-sm text-muted-foreground/60">Try adjusting your filters or checking back later.</p>
                 </div>
               )}
             </div>
 
             {/* Sidebar */}
-            <div className="space-y-6">
-              <Card className="bg-card/50 border-border shadow-none">
-                <CardHeader className="pb-3 border-b border-border/50">
-                  <CardTitle className="text-sm font-bold uppercase tracking-wider flex items-center gap-2">
-                    <TrendingUp className="h-4 w-4" />
+            <div className="space-y-5">
+              <Card className="bg-[#10131b] border-border/20 shadow-none rounded-lg">
+                <CardHeader className="pb-3 border-b border-border/20">
+                  <CardTitle className="text-[11px] font-bold uppercase tracking-[0.12em] flex items-center gap-2 text-muted-foreground">
+                    <TrendingUp className="h-4 w-4 text-primary" />
                     Hot Vectors
                   </CardTitle>
                 </CardHeader>
@@ -129,25 +131,27 @@ export default function Dashboard() {
                       {[...Array(5)].map((_, i) => (
                         <div key={i} className="space-y-2">
                           <div className="flex justify-between">
-                            <Skeleton className="h-4 w-24" />
-                            <Skeleton className="h-4 w-8" />
+                            <Skeleton className="h-4 w-24 bg-muted/30" />
+                            <Skeleton className="h-4 w-8 bg-muted/30" />
                           </div>
-                          <Skeleton className="h-1.5 w-full" />
+                          <Skeleton className="h-1 w-full bg-muted/30" />
                         </div>
                       ))}
                     </div>
                   ) : trendingData?.countries && trendingData.countries.length > 0 ? (
-                    <div className="p-4 space-y-5">
+                    <div className="p-4 space-y-4">
                       {trendingData.countries.slice(0, 8).map((country) => {
                         const maxCount = trendingData.countries[0]?.count || 1;
                         const percentage = (country.count / maxCount) * 100;
                         return (
-                          <div key={country.name} className="space-y-1.5 group">
+                          <div key={country.name} className="space-y-1.5 group cursor-default">
                             <div className="flex justify-between items-end text-sm">
                               <span className="font-medium group-hover:text-primary transition-colors">{country.name}</span>
-                              <span className="text-xs font-mono text-muted-foreground">{country.count}</span>
+                              <span className="text-[11px] font-mono text-muted-foreground">{country.count}</span>
                             </div>
-                            <Progress value={percentage} className="h-1.5" />
+                            <div className="h-1 w-full bg-muted/30 rounded-full overflow-hidden">
+                              <div className="h-full bg-primary/70 rounded-full transition-all" style={{ width: `${percentage}%` }} />
+                            </div>
                           </div>
                         );
                       })}
@@ -157,33 +161,39 @@ export default function Dashboard() {
               </Card>
 
               {summaryData && (
-                <Card className="bg-card/50 border-border shadow-none">
-                  <CardHeader className="pb-3 border-b border-border/50">
-                    <CardTitle className="text-sm font-bold uppercase tracking-wider">
+                <Card className="bg-[#10131b] border-border/20 shadow-none rounded-lg">
+                  <CardHeader className="pb-3 border-b border-border/20">
+                    <CardTitle className="text-[11px] font-bold uppercase tracking-[0.12em] text-muted-foreground">
                       Source Distribution
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="p-4 space-y-4">
                     <div className="space-y-1.5">
                       <div className="flex justify-between text-sm">
-                        <span className="text-emerald-400 font-medium">NewsAPI</span>
-                        <span className="text-xs font-mono">{summaryData.bySource?.newsapi ?? 0}</span>
+                        <span className="text-emerald-400 font-medium text-xs">NewsAPI</span>
+                        <span className="text-[11px] font-mono text-muted-foreground">{summaryData.bySource?.newsapi ?? 0}</span>
                       </div>
-                      <Progress value={((summaryData.bySource?.newsapi ?? 0) / (summaryData.totalArticles || 1)) * 100} className="h-1 bg-muted [&>div]:bg-emerald-400" />
+                      <div className="h-1 w-full bg-muted/30 rounded-full overflow-hidden">
+                        <div className="h-full bg-emerald-400/70 rounded-full" style={{ width: `${((summaryData.bySource?.newsapi ?? 0) / (summaryData.totalArticles || 1)) * 100}%` }} />
+                      </div>
                     </div>
                     <div className="space-y-1.5">
                       <div className="flex justify-between text-sm">
-                        <span className="text-violet-400 font-medium">GNews</span>
-                        <span className="text-xs font-mono">{summaryData.bySource?.gnews ?? 0}</span>
+                        <span className="text-violet-400 font-medium text-xs">GNews</span>
+                        <span className="text-[11px] font-mono text-muted-foreground">{summaryData.bySource?.gnews ?? 0}</span>
                       </div>
-                      <Progress value={((summaryData.bySource?.gnews ?? 0) / (summaryData.totalArticles || 1)) * 100} className="h-1 bg-muted [&>div]:bg-violet-400" />
+                      <div className="h-1 w-full bg-muted/30 rounded-full overflow-hidden">
+                        <div className="h-full bg-violet-400/70 rounded-full" style={{ width: `${((summaryData.bySource?.gnews ?? 0) / (summaryData.totalArticles || 1)) * 100}%` }} />
+                      </div>
                     </div>
                     <div className="space-y-1.5">
                       <div className="flex justify-between text-sm">
-                        <span className="text-rose-400 font-medium">The Guardian</span>
-                        <span className="text-xs font-mono">{summaryData.bySource?.guardian ?? 0}</span>
+                        <span className="text-rose-400 font-medium text-xs">The Guardian</span>
+                        <span className="text-[11px] font-mono text-muted-foreground">{summaryData.bySource?.guardian ?? 0}</span>
                       </div>
-                      <Progress value={((summaryData.bySource?.guardian ?? 0) / (summaryData.totalArticles || 1)) * 100} className="h-1 bg-muted [&>div]:bg-rose-400" />
+                      <div className="h-1 w-full bg-muted/30 rounded-full overflow-hidden">
+                        <div className="h-full bg-rose-400/70 rounded-full" style={{ width: `${((summaryData.bySource?.guardian ?? 0) / (summaryData.totalArticles || 1)) * 100}%` }} />
+                      </div>
                     </div>
                   </CardContent>
                 </Card>

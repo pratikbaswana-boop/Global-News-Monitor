@@ -56,3 +56,12 @@ Thumbs.db
 
 # Docker volumes
 .docker-data/
+artifacts/api-server/server.log
+gnm-key.pem
+*.pem
+.env.production
+.env.production.example
+# Local deploy scripts with hardcoded creds — never commit
+EC2_DEPLOY_COMMANDS.sh
+deploy-bedrock.sh
+deploy-bedrock-v2.sh
