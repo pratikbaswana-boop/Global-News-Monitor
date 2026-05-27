@@ -69,31 +69,29 @@ function cadenceForWindow(w: Window): number {
   }
 }
 
-// Compute the next 09:15 IST trading-day timestamp (skips Sat/Sun)
+// Compute the next 09:15 IST trading-day timestamp (skips Sat/Sun).
+// 09:15 IST = 03:45 UTC. Set UTC hours directly — no +offset/-offset dance.
 export function nextSessionOpenAt(from: Date = new Date()): Date {
   const offsetMs = 330 * 60 * 1000;
-  // Next open = today 09:15 IST if we haven't reached it; else next day; skip weekends
-  let candidate = new Date(from.getTime() + offsetMs);
-  candidate.setUTCHours(3, 45, 0, 0); // 03:45 UTC = 09:15 IST
-  candidate = new Date(candidate.getTime() - offsetMs);
+  let candidate = new Date(from);
+  candidate.setUTCHours(3, 45, 0, 0); // 03:45 UTC = 09:15 IST today
   if (candidate <= from) {
     candidate = new Date(candidate.getTime() + 24 * 60 * 60 * 1000);
   }
   // Skip weekend
   for (let i = 0; i < 7; i++) {
-    const day = (new Date(candidate.getTime() + offsetMs)).getUTCDay();
-    if (day !== 0 && day !== 6) break;
+    const istDay = (new Date(candidate.getTime() + offsetMs)).getUTCDay();
+    if (istDay !== 0 && istDay !== 6) break;
     candidate = new Date(candidate.getTime() + 24 * 60 * 60 * 1000);
   }
   return candidate;
 }
 
-// Compute today's 15:30 IST close timestamp
+// Compute today's 15:30 IST close timestamp (10:00 UTC).
 export function currentSessionClosesAt(from: Date = new Date()): Date {
-  const offsetMs = 330 * 60 * 1000;
-  let candidate = new Date(from.getTime() + offsetMs);
+  const candidate = new Date(from);
   candidate.setUTCHours(10, 0, 0, 0); // 10:00 UTC = 15:30 IST
-  return new Date(candidate.getTime() - offsetMs);
+  return candidate;
 }
 
 export function getMarketStatus(now: Date = new Date()): {
