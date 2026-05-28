@@ -2197,7 +2197,154 @@ function isWeekendForDate(date: Date): boolean {
   return istDay === 0 || istDay === 6;
 }
 
+// Adapt a DB market_snapshots row into the response asset shape so the UI
+// renders exactly what's persisted. Used by the read-from-DB fast path below.
+async function adaptSnapshotToAsset(
+  asset: typeof ASSET_TEMPLATES[number],
+  snapshot: typeof marketSnapshotsTable.$inferSelect,
+  realPrice: number | null,
+  recentHistory: Array<typeof marketSnapshotsTable.$inferSelect>,
+  lessons: string | null,
+): Promise<{
+  id: string; name: string; symbol: string;
+  direction: "up" | "down" | "neutral";
+  magnitude: "strong" | "moderate" | "mild";
+  confidence: "high" | "medium" | "low";
+  timeframe: string;
+  priceImpactEstimate: string;
+  bullScore: number; bearScore: number;
+  bullSignals: Array<unknown>; bearSignals: Array<unknown>;
+  verdict: string; dominantNarrative: string;
+  resolveAfter: string;
+  currentRealPrice: number | null;
+  lessonsFromPastFailures: string | null;
+  recentHistory: Array<unknown>;
+}> {
+  const history = recentHistory.map((r) => {
+    const status: "pending" | "correct" | "incorrect" = r.resolvedAt !== null
+      ? (r.isCorrect ? "correct" : "incorrect")
+      : "pending";
+    return {
+      id: r.id,
+      assetId: r.assetId,
+      assetName: r.assetName,
+      assetSymbol: r.assetSymbol,
+      predictedDirection: r.predictedDirection as "up" | "down" | "neutral",
+      predictedMagnitude: r.predictedMagnitude as "strong" | "moderate" | "mild",
+      predictedConfidence: r.predictedConfidence as "high" | "medium" | "low",
+      priceImpactEstimate: r.priceImpactEstimate,
+      timeframe: r.timeframe,
+      bullScore: parseFloat(r.bullScore ?? "0"),
+      bearScore: parseFloat(r.bearScore ?? "0"),
+      dominantNarrative: r.dominantNarrative,
+      verdict: r.verdict,
+      triggerNewsSummary: r.triggerNewsSummary,
+      assumptions: r.assumptions,
+      snapshotAt: r.snapshotAt.toISOString(),
+      resolveAfter: r.resolveAfter.toISOString(),
+      resolvedAt: r.resolvedAt?.toISOString() ?? null,
+      resolutionDirection: r.resolutionDirection ?? null,
+      realPriceAtSnapshot: r.realPriceAtSnapshot !== null ? parseFloat(r.realPriceAtSnapshot) : null,
+      realPriceAtResolution: r.realPriceAtResolution !== null ? parseFloat(r.realPriceAtResolution) : null,
+      priceChangePct: r.priceChangePct !== null ? parseFloat(r.priceChangePct) : null,
+      isCorrect: r.isCorrect ?? null,
+      resolutionNotes: r.resolutionNotes ?? null,
+      flipReason: r.flipReason ?? null,
+      lessonsLearned: r.lessonsLearned ?? null,
+      status,
+    };
+  });
+
+  return {
+    id: asset.id,
+    name: asset.name,
+    symbol: asset.symbol,
+    direction: snapshot.predictedDirection as "up" | "down" | "neutral",
+    magnitude: snapshot.predictedMagnitude as "strong" | "moderate" | "mild",
+    confidence: snapshot.predictedConfidence as "high" | "medium" | "low",
+    timeframe: snapshot.timeframe,
+    priceImpactEstimate: snapshot.priceImpactEstimate,
+    bullScore: parseFloat(snapshot.bullScore ?? "0"),
+    bearScore: parseFloat(snapshot.bearScore ?? "0"),
+    bullSignals: [],
+    bearSignals: [],
+    verdict: snapshot.verdict,
+    dominantNarrative: snapshot.dominantNarrative,
+    resolveAfter: snapshot.resolveAfter.toISOString(),
+    currentRealPrice: realPrice,
+    lessonsFromPastFailures: lessons,
+    recentHistory: history,
+  };
+}
+
 router.get("/intelligence/market-signals", async (req, res) => {
+  // ── Fast path: serve latest DB snapshots when available ─────────────────────
+  // UI must always reflect what's actually persisted in market_snapshots — no
+  // inline agent calls returning values that drift from the saved row. Inline
+  // agent only runs when DB has nothing for an asset (cold start). The
+  // POST /intelligence/market-signals/trigger endpoint + schedulers are the
+  // sole writers in the steady state.
+  try {
+    const latestPerAsset = await Promise.all(
+      ASSET_TEMPLATES.map((a) =>
+        db.select().from(marketSnapshotsTable)
+          .where(eq(marketSnapshotsTable.assetId, a.id))
+          .orderBy(desc(marketSnapshotsTable.snapshotAt))
+          .limit(1)
+          .then((r) => r[0] ?? null)
+          .catch(() => null),
+      ),
+    );
+    const allHaveData = latestPerAsset.every((s) => s !== null);
+    if (allHaveData) {
+      const [realPrices, histories, lessons] = await Promise.all([
+        Promise.all(ASSET_TEMPLATES.map((a) => fetchRealPrice(a.id))),
+        Promise.all(ASSET_TEMPLATES.map((a) =>
+          db.select().from(marketSnapshotsTable)
+            .where(eq(marketSnapshotsTable.assetId, a.id))
+            .orderBy(desc(marketSnapshotsTable.snapshotAt))
+            .limit(5)
+            .catch(() => []),
+        )),
+        Promise.all(ASSET_TEMPLATES.map((a) => getLessonsFromFailures(a.id))),
+      ]);
+      const assetsFromDb = await Promise.all(
+        ASSET_TEMPLATES.map((asset, idx) =>
+          adaptSnapshotToAsset(
+            asset,
+            latestPerAsset[idx]!,
+            realPrices[idx] ?? null,
+            histories[idx] ?? [],
+            lessons[idx] ?? null,
+          ),
+        ),
+      );
+      const marketStatusInfo = getMarketStatus();
+      const reasonByStatus: Record<typeof marketStatusInfo.status, string | undefined> = {
+        "open": undefined,
+        "pre-market": "Market is in pre-open session (08:45–09:15 IST)",
+        "closed": isWeekend()
+          ? "Indian markets are closed for the weekend"
+          : "Indian markets are closed — next session opens at 9:15 AM IST",
+      };
+      const response = GetIntelligenceMarketSignalsResponse.parse({
+        assets: assetsFromDb,
+        totalArticlesAnalyzed: _articlesCache.length,
+        generatedAt: new Date().toISOString(),
+        marketClosed: marketStatusInfo.status === "closed",
+        marketClosedReason: reasonByStatus[marketStatusInfo.status],
+        marketStatus: marketStatusInfo.status,
+        nextSessionOpenAt: marketStatusInfo.nextOpen,
+        currentSessionClosesAt: marketStatusInfo.currentClose,
+      });
+      return res.json(response);
+    }
+  } catch (err) {
+    logger.warn({ err }, "market-signals: DB read fast-path failed, falling back to agent path");
+  }
+
+  // ── Cold-start path: no DB snapshot for at least one asset — run agents ─────
+
   // Pull articles from cache or fetch
   if (_articlesCache.length === 0) {
     try {

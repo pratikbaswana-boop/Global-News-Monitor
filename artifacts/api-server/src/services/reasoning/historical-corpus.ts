@@ -4,7 +4,7 @@
 //
 // Run via: POST /api/intelligence/corpus/ingest (admin only, idempotent)
 
-import { openai, chatComplete } from "@workspace/integrations-openai-ai-server";
+import { chatComplete, embedText as embedTextProvider } from "@workspace/integrations-openai-ai-server";
 import { getOrCreateCollection, COLLECTION_ICB, COLLECTION_ACLED } from "./chromadb-client.js";
 import { logger } from "../../lib/logger.js";
 
@@ -51,11 +51,7 @@ Context: ${crisis.summary}`,
 }
 
 async function embedText(text: string): Promise<number[]> {
-  const response = await openai.embeddings.create({
-    model: "text-embedding-3-small",
-    input: text.slice(0, 8192),
-  });
-  return response.data[0].embedding;
+  return embedTextProvider(text);
 }
 
 // Ingest ICB crises into ChromaDB collection

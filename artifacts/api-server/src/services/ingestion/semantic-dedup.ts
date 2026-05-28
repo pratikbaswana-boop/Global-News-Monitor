@@ -1,10 +1,9 @@
-import { openai } from "@workspace/integrations-openai-ai-server";
+import { embedText as embedTextProvider } from "@workspace/integrations-openai-ai-server";
 import { db, rawArticlesTable, articleCorroborationsTable } from "@workspace/db";
 import { and, gte, eq, or, sql } from "drizzle-orm";
 import { logger } from "../../lib/logger.js";
 import { randomUUID } from "crypto";
 
-const EMBEDDING_MODEL = "text-embedding-3-small";
 const DEDUP_WINDOW_HOURS = 6;
 const DUPLICATE_THRESHOLD = 0.88;
 const CORROBORATION_THRESHOLD = 0.70;
@@ -31,11 +30,7 @@ function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 export async function embedText(text: string): Promise<number[]> {
-  const response = await openai.embeddings.create({
-    model: EMBEDDING_MODEL,
-    input: text.slice(0, 8192),
-  });
-  return response.data[0].embedding;
+  return embedTextProvider(text);
 }
 
 export async function deduplicateArticle(
