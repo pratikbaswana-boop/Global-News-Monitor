@@ -355,9 +355,19 @@ async function fetchOptionChainFull(): Promise<{
       filtered?: { CE?: { totOI?: number }; PE?: { totOI?: number }; data?: OptionChainRecord[] };
     }
 
-    const raw = await nseGet<OptionChainResponse>("/api/option-chain-indices?symbol=NIFTY");
-    const ceTotOi = raw.filtered?.CE?.totOI ?? 1;
-    const peTotOi = raw.filtered?.PE?.totOI ?? 1;
+    // NSE retired /api/option-chain-indices (returns 404). /api/option-chain-v3
+    // is the replacement and exposes the same records.data shape.
+    const raw = await nseGet<OptionChainResponse>("/api/option-chain-v3?symbol=NIFTY");
+    let ceTotOi = raw.filtered?.CE?.totOI ?? 0;
+    let peTotOi = raw.filtered?.PE?.totOI ?? 0;
+    // v3 doesn't always populate filtered.totOI — fall back to summing records.
+    if (ceTotOi === 0 || peTotOi === 0) {
+      for (const rec of raw.records?.data ?? []) {
+        ceTotOi += rec.CE?.openInterest ?? 0;
+        peTotOi += rec.PE?.openInterest ?? 0;
+      }
+    }
+    if (ceTotOi === 0) throw new Error("option-chain-v3: no CE openInterest");
     const pcr = peTotOi / ceTotOi;
 
     const underlying = raw.records?.underlyingValue ?? 0;

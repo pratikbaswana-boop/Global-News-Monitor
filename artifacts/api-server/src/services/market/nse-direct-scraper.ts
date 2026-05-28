@@ -135,19 +135,31 @@ export async function fetchFiiDiiFlow(): Promise<FiiSnapshot> {
 
 // ── F&O Put-Call Ratio ────────────────────────────────────────────────────────
 
-interface NsePcrResponse {
-  totCE: { totOI: number };
-  totPE: { totOI: number };
-}
-
 export interface PcrSnapshot {
   pcr: number; // put-call ratio by OI; > 1.2 = bearish hedge, < 0.8 = complacency
 }
 
 export async function fetchPutCallRatio(): Promise<PcrSnapshot> {
-  const raw = await nseGet<NsePcrResponse>("/api/option-chain-indices?symbol=NIFTY");
-  const ceOI = raw.totCE?.totOI ?? 1;
-  const peOI = raw.totPE?.totOI ?? 1;
+  // NSE retired /api/option-chain-indices (returns 404). The replacement is
+  // /api/option-chain-v3, same data shape. We aggregate totalOI ourselves
+  // since v3 doesn't expose totCE/totPE top-level either — fall back to
+  // summing per-strike CE/PE openInterest from records.data.
+  const raw = await nseGet<{
+    records?: { data?: Array<{ CE?: { openInterest?: number }; PE?: { openInterest?: number } }> };
+    totCE?: { totOI?: number };
+    totPE?: { totOI?: number };
+  }>("/api/option-chain-v3?symbol=NIFTY");
+
+  if (raw.totCE?.totOI && raw.totPE?.totOI) {
+    return { pcr: raw.totPE.totOI / raw.totCE.totOI };
+  }
+  let ceOI = 0;
+  let peOI = 0;
+  for (const row of raw.records?.data ?? []) {
+    ceOI += row.CE?.openInterest ?? 0;
+    peOI += row.PE?.openInterest ?? 0;
+  }
+  if (ceOI === 0) throw new Error("option-chain-v3: no CE openInterest in response");
   return { pcr: peOI / ceOI };
 }
 
@@ -223,15 +235,28 @@ export interface AdvanceDeclineSnapshot {
   ratio: number; // adv / dec
 }
 
-interface NseAdvDecResponse {
-  data?: Array<{ advance?: number; decline?: number }>;
-}
-
 export async function fetchADRatio(): Promise<AdvanceDeclineSnapshot> {
-  const raw = await nseGet<NseAdvDecResponse>("/api/live-analysis-variations?index=nse500");
-  const entry = raw.data?.[0] ?? {};
-  const advance = entry.advance ?? 0;
-  const decline = entry.decline ?? 0;
+  // /api/live-analysis-variations now returns "Missing index or key." regardless
+  // of the index parameter. /api/market-data-pre-open?key=NIFTY exposes raw
+  // declines + unchanged counts per index constituent, from which advances are
+  // derivable. Data is intraday-fresh during market hours and freezes at close.
+  const raw = await nseGet<{
+    declines?: number;
+    advances?: number;
+    unchanged?: number;
+    data?: Array<{ metadata?: { pChange?: number } }>;
+  }>("/api/market-data-pre-open?key=NIFTY");
+
+  let advance = raw.advances ?? 0;
+  let decline = raw.declines ?? 0;
+  // Some response shapes only return declines + unchanged + total stock rows
+  // and we have to compute advances from per-row pChange.
+  if (advance === 0 && Array.isArray(raw.data)) {
+    advance = raw.data.filter((r) => (r.metadata?.pChange ?? 0) > 0).length;
+    if (decline === 0) {
+      decline = raw.data.filter((r) => (r.metadata?.pChange ?? 0) < 0).length;
+    }
+  }
   const ratio = decline > 0 ? advance / decline : 0;
   return { advance, decline, ratio };
 }
