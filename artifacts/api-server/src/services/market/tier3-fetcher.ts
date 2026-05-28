@@ -136,19 +136,35 @@ const NSE_HEADERS: Record<string, string> = {
 };
 
 async function ensureNseSession(): Promise<void> {
-  if (Date.now() < sessionExpiresAt) return;
+  if (Date.now() < sessionExpiresAt && nseSessionCookie) return;
+  // NSE blocks GET / on cloud IPs (403). The anti-bot cookies (bm_sz, akamai)
+  // are also set by /api/marketStatus — which returns 200 from EC2/other clouds.
+  // Use that path instead of the homepage so the cookie handshake actually
+  // succeeds, unlocking option-chain (PCR), allIndices (VIX, sectoral) and
+  // live-analysis-variations (ADR) on cloud deployments.
   try {
-    const res = await fetch("https://www.nseindia.com/", {
+    const res = await fetch("https://www.nseindia.com/api/marketStatus", {
       headers: {
         "User-Agent": NSE_HEADERS["User-Agent"]!,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.nseindia.com/",
       },
     });
     const cookies = res.headers.get("set-cookie");
-    if (cookies) {
-      nseSessionCookie = cookies.split(";")[0] ?? "";
+    if (cookies && res.ok) {
+      // Keep ALL set-cookie pairs, not just the first one — NSE sends multiple
+      // (bm_sz, ak_bmsc, _abck, nsit) and the API needs them together.
+      nseSessionCookie = cookies
+        .split(/,(?=[^,]+=)/)
+        .map((c) => c.split(";")[0]!.trim())
+        .filter(Boolean)
+        .join("; ");
+      sessionExpiresAt = Date.now() + 25 * 60 * 1000;
+      logger.debug({ status: res.status }, "tier3-fetcher: NSE session refreshed via /api/marketStatus");
+    } else {
+      logger.warn({ status: res.status }, "tier3-fetcher: NSE marketStatus did not set cookies");
     }
-    sessionExpiresAt = Date.now() + 25 * 60 * 1000;
   } catch (err) {
     logger.warn({ err }, "tier3-fetcher: NSE session handshake failed");
   }

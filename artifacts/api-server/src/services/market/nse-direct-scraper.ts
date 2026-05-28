@@ -26,21 +26,32 @@ const NSE_HEADERS: Record<string, string> = {
 
 async function ensureNseSession(): Promise<void> {
   if (!USE_NSE_DIRECT) throw new Error("NSE direct API disabled (USE_NSE_DIRECT=false)");
-  if (Date.now() < sessionExpiresAt) return;
+  if (Date.now() < sessionExpiresAt && nseSessionCookie) return;
 
+  // GET / returns 403 from cloud IPs but /api/marketStatus returns 200 and
+  // sets the same anti-bot cookies. See tier3-fetcher.ts:ensureNseSession for
+  // the full rationale.
   try {
-    const res = await fetch("https://www.nseindia.com/", {
+    const res = await fetch("https://www.nseindia.com/api/marketStatus", {
       headers: {
         "User-Agent": NSE_HEADERS["User-Agent"]!,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.nseindia.com/",
       },
     });
     const cookies = res.headers.get("set-cookie");
-    if (cookies) {
-      nseSessionCookie = cookies.split(";")[0] ?? "";
+    if (cookies && res.ok) {
+      nseSessionCookie = cookies
+        .split(/,(?=[^,]+=)/)
+        .map((c) => c.split(";")[0]!.trim())
+        .filter(Boolean)
+        .join("; ");
+      sessionExpiresAt = Date.now() + 25 * 60 * 1000;
+      logger.debug({ status: res.status }, "NSE session refreshed via /api/marketStatus");
+    } else {
+      logger.warn({ status: res.status }, "NSE marketStatus did not set cookies");
     }
-    sessionExpiresAt = Date.now() + 25 * 60 * 1000; // 25-min session
-    logger.debug("NSE session cookie refreshed");
   } catch (err) {
     logger.warn({ err }, "NSE session handshake failed — proceeding without cookie");
   }
