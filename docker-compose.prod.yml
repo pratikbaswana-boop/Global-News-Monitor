@@ -130,6 +130,10 @@ services:
       # NSE direct API toggle (set false on EC2/cloud where NSE blocks IPs)
       USE_NSE_DIRECT: ${USE_NSE_DIRECT:-true}
 
+      # Emergency kill-switch — when set to "true", api-server boots the HTTP
+      # server only and skips ingestion / reasoning / market schedulers.
+      DISABLE_BG_SCHEDULERS: ${DISABLE_BG_SCHEDULERS:-}
+
       # AWS Bedrock credentials (used when LLM_PROVIDER=bedrock)
       AWS_REGION: ${AWS_REGION:-us-east-1}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
