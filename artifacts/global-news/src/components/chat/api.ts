@@ -19,10 +19,25 @@ function trimItem(item: unknown, allow: string[]): Record<string, unknown> {
   return out;
 }
 
+// Field names match the api-zod schemas in lib/api-zod/src/generated/api.ts.
+// Keeping the wrong key name (e.g. "title" on predictions, where the field is
+// actually "headline") silently drops the most important data.
 const ARTICLE_KEYS = ["id", "title", "source", "sourceName", "publishedAt", "category", "countries", "leaders", "description"];
-const CLUSTER_KEYS = ["id", "title", "countries", "leaders", "keywords", "category", "articleCount", "summary"];
-const PREDICTION_KEYS = ["id", "title", "confidence", "direction", "timeframe", "verdict", "status", "createdAt"];
-const SIGNAL_KEYS = ["assetId", "asset", "direction", "verdict", "confidence", "impact", "timeframe", "votes", "reason"];
+const CLUSTER_KEYS = ["id", "title", "summary", "category", "countries", "leaders", "articleCount"];
+const PREDICTION_KEYS = [
+  "id", "clusterId", "clusterTitle",
+  "headline", "reasoning", "triggerSummary", "historicalPrecedent",
+  "confidence", "riskLevel", "timeframe", "category",
+  "countries", "leaders", "potentialOutcomes",
+  "resolveAfter", "generatedAt",
+];
+const SIGNAL_KEYS = [
+  "assetId", "assetName", "assetSymbol",
+  "predictedDirection", "predictedMagnitude", "predictedConfidence",
+  "priceImpactEstimate", "timeframe",
+  "bullScore", "bearScore",
+  "dominantNarrative", "verdict",
+];
 
 function compactContext(tab: ChatTab, ctx: TabContext): TabContext {
   const out: TabContext = {};
@@ -57,48 +72,99 @@ export async function postChat(req: ChatRequest, signal?: AbortSignal): Promise<
   return (await res.json()) as ChatResponse;
 }
 
-async function getJson<T>(path: string, signal?: AbortSignal): Promise<T | null> {
+async function getJson<T>(path: string, signal?: AbortSignal, timeoutMs = 25000): Promise<T | null> {
+  // Combine the caller's signal with an internal timeout
+  const ctrl = new AbortController();
+  const onAbort = () => ctrl.abort();
+  signal?.addEventListener("abort", onAbort);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(api(path), { signal });
+    const res = await fetch(api(path), { signal: ctrl.signal });
     if (!res.ok) return null;
     return (await res.json()) as T;
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
   }
 }
 
+const arr = <T,>(v: unknown, key: string): T[] => {
+  if (Array.isArray(v)) return v as T[];
+  if (v && typeof v === "object" && Array.isArray((v as Record<string, unknown>)[key])) {
+    return (v as Record<string, unknown>)[key] as T[];
+  }
+  return [];
+};
+
+// Per-tab cache of the last successful fetch. Some intelligence endpoints
+// (predictions, clusters) can be slow under Bedrock throttling and time out
+// for the chat module while the page itself already has cached data via
+// React Query. If a fresh fetch returns empty, we fall back to the most
+// recent non-empty snapshot so the LLM still has the context the user sees.
+const lastGoodContext: Partial<Record<ChatTab, TabContext>> = {};
+
+function mergeWithCached(tab: ChatTab, fresh: TabContext): TabContext {
+  const cached = lastGoodContext[tab];
+  if (!cached) return fresh;
+  // For each field, prefer fresh if it has content; else fall back to cached.
+  const out: TabContext = { ...fresh };
+  for (const key of Object.keys(cached) as (keyof TabContext)[]) {
+    const f = fresh[key];
+    const c = cached[key];
+    const freshEmpty =
+      f === undefined ||
+      (Array.isArray(f) && f.length === 0);
+    if (freshEmpty && c !== undefined) {
+      (out as Record<string, unknown>)[key] = c;
+    }
+  }
+  return out;
+}
+
+function isContextRich(tab: ChatTab, ctx: TabContext): boolean {
+  if (tab === "dashboard") return Array.isArray(ctx.articles) && ctx.articles.length > 0;
+  if (tab === "trending") return ctx.trending !== undefined;
+  if (tab === "sources") return ctx.sources !== undefined;
+  // intelligence: at least one of these should have items
+  return (
+    (Array.isArray(ctx.clusters) && ctx.clusters.length > 0) ||
+    (Array.isArray(ctx.predictions) && ctx.predictions.length > 0) ||
+    (Array.isArray(ctx.marketSignals) && ctx.marketSignals.length > 0)
+  );
+}
+
 export async function fetchTabContext(tab: ChatTab, signal?: AbortSignal): Promise<TabContext> {
+  let fresh: TabContext;
   if (tab === "dashboard") {
     const articles = await getJson<{ articles?: unknown[] } | unknown[]>("/news?limit=30", signal);
     const list = Array.isArray(articles) ? articles : (articles?.articles ?? []);
-    return { articles: list };
-  }
-  if (tab === "trending") {
+    fresh = { articles: list };
+  } else if (tab === "trending") {
     const trending = await getJson<unknown>("/news/trending", signal);
-    return { trending: trending ?? undefined };
-  }
-  if (tab === "sources") {
+    fresh = { trending: trending ?? undefined };
+  } else if (tab === "sources") {
     const sources = await getJson<unknown>("/news/summary", signal);
-    return { sources: sources ?? undefined };
+    fresh = { sources: sources ?? undefined };
+  } else {
+    const [clusters, predictions, marketSignals, trackRecord] = await Promise.all([
+      getJson<unknown[] | { clusters?: unknown[] }>("/intelligence/clusters", signal),
+      getJson<unknown[] | { predictions?: unknown[] }>("/intelligence/predictions", signal, 40000),
+      getJson<unknown[] | { signals?: unknown[] }>("/intelligence/market-signals", signal),
+      getJson<unknown>("/intelligence/track-record", signal),
+    ]);
+    fresh = {
+      clusters: arr(clusters, "clusters"),
+      predictions: arr(predictions, "predictions"),
+      marketSignals: arr(marketSignals, "signals"),
+      trackRecord: trackRecord ?? undefined,
+    };
   }
-  // intelligence
-  const [clusters, predictions, marketSignals, trackRecord] = await Promise.all([
-    getJson<unknown[] | { clusters?: unknown[] }>("/intelligence/clusters", signal),
-    getJson<unknown[] | { predictions?: unknown[] }>("/intelligence/predictions", signal),
-    getJson<unknown[] | { signals?: unknown[] }>("/intelligence/market-signals", signal),
-    getJson<unknown>("/intelligence/track-record", signal),
-  ]);
-  const arr = <T,>(v: unknown, key: string): T[] => {
-    if (Array.isArray(v)) return v as T[];
-    if (v && typeof v === "object" && Array.isArray((v as Record<string, unknown>)[key])) {
-      return (v as Record<string, unknown>)[key] as T[];
-    }
-    return [];
-  };
-  return {
-    clusters: arr(clusters, "clusters"),
-    predictions: arr(predictions, "predictions"),
-    marketSignals: arr(marketSignals, "signals"),
-    trackRecord: trackRecord ?? undefined,
-  };
+
+  const merged = mergeWithCached(tab, fresh);
+  if (isContextRich(tab, merged)) {
+    lastGoodContext[tab] = merged;
+  }
+  return merged;
 }
