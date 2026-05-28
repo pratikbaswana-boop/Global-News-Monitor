@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client";
 import App from "./App";
+import { ChatModule } from "@/components/chat/chat-module";
 import "./index.css";
 
 const log = (event: string, detail?: unknown) => {
@@ -45,5 +46,9 @@ const root = document.getElementById("root");
 if (!root) {
   log("root-missing");
 } else {
-  createRoot(root).render(<App />);
+  createRoot(root).render(
+    <ChatModule>
+      <App />
+    </ChatModule>,
+  );
 }
