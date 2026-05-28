@@ -2116,8 +2116,10 @@ async function saveSnapshot(
   }
 ): Promise<void> {
   try {
-    // Skip on weekends (Saturday/Sunday IST)
-    if (isWeekend()) return;
+    // Only persist snapshots when the NSE market is actively open or in pre-market.
+    // Skips overnight + weekend writes so the UI never inherits stale "live" data.
+    const status = getMarketStatus().status;
+    if (status === "closed") return;
 
     // Throttle: only save one snapshot per asset per 6 hours (4 per day max)
     // This allows fresh signals during pre-market, open, and post-close windows.
