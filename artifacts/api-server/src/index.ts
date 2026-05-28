@@ -33,39 +33,48 @@ app.listen(port, (err) => {
 
   logger.info({ port }, "Server listening");
 
-  // Phase 1: Start the AI-native ingestion pipeline in the background.
-  startIngestionScheduler().catch((e) => {
-    logger.error({ err: e }, "Ingestion scheduler failed to start");
-  });
+  // Emergency kill-switch — when the OpenAI key is invalid or Bedrock quota
+  // is exhausted, the embedding-heavy background jobs spin the event loop and
+  // make the HTTP API unresponsive. Setting DISABLE_BG_SCHEDULERS=true lets
+  // the server serve cached data from the DB while we sort the upstream auth
+  // out, without rebuilding the image.
+  if (process.env["DISABLE_BG_SCHEDULERS"] === "true") {
+    logger.warn("DISABLE_BG_SCHEDULERS=true — background schedulers will not start");
+  } else {
+    // Phase 1: Start the AI-native ingestion pipeline in the background.
+    startIngestionScheduler().catch((e) => {
+      logger.error({ err: e }, "Ingestion scheduler failed to start");
+    });
 
-  // Phase 2: Start the knowledge graph pipeline (requires NEO4J_URI env var).
-  // Degrades gracefully if Neo4j is not connected.
-  startGraphScheduler().catch((e) => {
-    logger.error({ err: e }, "Graph scheduler failed to start");
-  });
+    // Phase 2: Start the knowledge graph pipeline (requires NEO4J_URI env var).
+    // Degrades gracefully if Neo4j is not connected.
+    startGraphScheduler().catch((e) => {
+      logger.error({ err: e }, "Graph scheduler failed to start");
+    });
 
-  // Phase 3: Start the 4-agent reasoning pipeline (requires Neo4j + ChromaDB).
-  // Degrades gracefully if either is not connected.
-  startReasoningScheduler();
+    // Phase 3: Start the 4-agent reasoning pipeline (requires Neo4j + ChromaDB).
+    // Degrades gracefully if either is not connected.
+    startReasoningScheduler();
 
-  // Phase 4: Start HMM market regime detection (runs hourly during IST market hours).
-  startMarketScheduler();
+    // Phase 4: Start HMM market regime detection (runs hourly during IST market hours).
+    startMarketScheduler();
 
-  // Phase 4a: Daily market signal snapshot at 09:00 IST.
-  startMarketSignalScheduler();
+    // Phase 4a: Daily market signal snapshot at 09:00 IST.
+    startMarketSignalScheduler();
 
-  // Phase 4b: Daily market resolution at 15:30 IST.
-  startMarketResolutionScheduler();
+    // Phase 4b: Daily market resolution at 15:30 IST.
+    startMarketResolutionScheduler();
 
-  // Phase 5: Start automated resolution watcher (runs every 6h).
-  startResolutionScheduler();
+    // Phase 5: Start automated resolution watcher (runs every 6h).
+    startResolutionScheduler();
 
-  // Phase 5+: Self-calibration job (runs daily — injects Brier penalty when rolling score > 0.22).
-  startSelfCalibrationScheduler();
+    // Phase 5+: Self-calibration job (runs daily — injects Brier penalty when rolling score > 0.22).
+    startSelfCalibrationScheduler();
 
-  // Notifications: Market close summary (fires at 15:30 IST = 10:00 UTC daily).
-  startMarketCloseSummaryScheduler();
+    // Notifications: Market close summary (fires at 15:30 IST = 10:00 UTC daily).
+    startMarketCloseSummaryScheduler();
 
-  // Quarterly: Pearson recalibration of transmission channel correlations.
-  startChannelRecalibrationScheduler();
+    // Quarterly: Pearson recalibration of transmission channel correlations.
+    startChannelRecalibrationScheduler();
+  }
 });
