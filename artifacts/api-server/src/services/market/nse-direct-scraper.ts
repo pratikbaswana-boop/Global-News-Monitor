@@ -94,16 +94,17 @@ export async function fetchIndiaVix(): Promise<VixSnapshot> {
 
 // ── FII / DII flow ────────────────────────────────────────────────────────────
 
+// NSE returns three things that didn't match the original parser:
+//   (1) The response is a BARE ARRAY, not `{data: [...]}`.
+//   (2) FII category string is "FII/FPI", not "FII".
+//   (3) netValue / buyValue / sellValue are strings ("3821"), not numbers.
+// All three silently produced 0 + fiiIsStale=true in the DB.
 interface NseFiiEntry {
   date: string;
-  buyValue: number;
-  sellValue: number;
-  netValue: number;
-  category: "FII" | "DII";
-}
-
-interface NseFiiResponse {
-  data: NseFiiEntry[];
+  buyValue: string;
+  sellValue: string;
+  netValue: string;
+  category: string;
 }
 
 export interface FiiSnapshot {
@@ -114,20 +115,27 @@ export interface FiiSnapshot {
 }
 
 export async function fetchFiiDiiFlow(): Promise<FiiSnapshot> {
-  const raw = await nseGet<NseFiiResponse>("/api/fiidiiTradeReact");
-  const entries = raw.data ?? [];
+  const raw = await nseGet<NseFiiEntry[] | { data: NseFiiEntry[] }>(
+    "/api/fiidiiTradeReact",
+  );
+  const entries: NseFiiEntry[] = Array.isArray(raw) ? raw : (raw.data ?? []);
+
+  const isFii = (cat: string) => /^FII/i.test(cat); // matches "FII" or "FII/FPI"
+  const isDii = (cat: string) => /^DII/i.test(cat);
 
   const fiiEntries = entries
-    .filter(e => e.category === "FII")
+    .filter((e) => isFii(e.category))
     .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
   const diiEntries = entries
-    .filter(e => e.category === "DII")
+    .filter((e) => isDii(e.category))
     .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
-  const fiiNetToday = fiiEntries[0]?.netValue ?? 0;
-  const diiNetToday = diiEntries[0]?.netValue ?? 0;
-  const fiiNetFlow5d = fiiEntries.slice(0, 5).reduce((s, e) => s + e.netValue, 0);
+  const num = (s: string | undefined) => (s ? parseFloat(s) || 0 : 0);
+
+  const fiiNetToday = num(fiiEntries[0]?.netValue);
+  const diiNetToday = num(diiEntries[0]?.netValue);
+  const fiiNetFlow5d = fiiEntries.slice(0, 5).reduce((s, e) => s + num(e.netValue), 0);
   const latestDate = fiiEntries[0]?.date ?? "";
 
   return { latestDate, fiiNetToday, fiiNetFlow5d, diiNetToday };
