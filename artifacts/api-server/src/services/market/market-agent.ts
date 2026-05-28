@@ -660,11 +660,27 @@ Return JSON: { "call": "BULLISH" | "BEARISH" | "NEUTRAL", "confidence": 0.0-1.0,
   const finalCall: "BULLISH" | "BEARISH" | "NEUTRAL" | "UNCERTAIN" =
     finalDirection === "up" ? "BULLISH" : finalDirection === "down" ? "BEARISH" : finalDirection === "uncertain" ? "UNCERTAIN" : "NEUTRAL";
 
-  // Deprecated scores — kept for backward-compat logging only
+  // bull/bear scores must align with the final verdict, otherwise the UI
+  // shows e.g. "100% bullish weight" while the direction badge says NEUTRAL
+  // (because the ensemble landed UNCERTAIN with 2 BULLISH + 1 NEUTRAL votes).
+  // Score reflects the verdict + magnitude rather than raw window-vote counts.
   const bullVotes = ensemble.votes.filter(v => v.call === "BULLISH").length;
   const bearVotes = ensemble.votes.filter(v => v.call === "BEARISH").length;
-  const bullScore = bullVotes * 3 + (finalCall === "BULLISH" ? 1 : 0);
-  const bearScore = bearVotes * 3 + (finalCall === "BEARISH" ? 1 : 0);
+  let bullScore = 0;
+  let bearScore = 0;
+  if (finalCall === "BULLISH") {
+    bullScore = bullVotes * 3 + 1;
+    bearScore = bearVotes * 3;
+  } else if (finalCall === "BEARISH") {
+    bearScore = bearVotes * 3 + 1;
+    bullScore = bullVotes * 3;
+  } else {
+    // NEUTRAL or UNCERTAIN — verdict is "no directional edge". Show equal
+    // (zero) on both sides so the bar / "100% bullish weight" label can't
+    // claim a side that the verdict didn't pick.
+    bullScore = 0;
+    bearScore = 0;
+  }
 
   const primaryRationale = ensemble.votes.find(v => v.call === finalCall)?.rationale
     ?? ensemble.votes.find(v => v.call === ensemble.final)?.rationale

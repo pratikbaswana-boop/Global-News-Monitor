@@ -376,6 +376,44 @@ function MarketAssetCard({ asset, allArticles, onArticleClick, marketClosed }: {
   const bullPct = total > 0 ? Math.round((asset.bullScore / total) * 100) : 50;
   const bearPct = 100 - bullPct;
 
+  // When markets are closed, the prediction data we have is from the last
+  // session and resolves at 3:30 PM IST — already past. Showing the full
+  // ensemble breakdown (verdict, bull/bear bars, signals, lessons) makes it
+  // look like an active call. Render a minimal "closed" card instead.
+  if (marketClosed) {
+    return (
+      <Card className="bg-[#10131b] border-border/20 rounded-lg overflow-hidden">
+        <div className="h-1 w-full bg-slate-600" />
+        <CardHeader className="pb-3">
+          <div className="flex items-start gap-4">
+            <div className="flex-1 space-y-1">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold font-mono text-muted-foreground bg-muted px-2 py-0.5 rounded">{asset.symbol}</span>
+                <h3 className="text-base font-bold">{asset.name}</h3>
+              </div>
+            </div>
+            <div className="shrink-0 flex flex-col items-center gap-1 px-3 py-2 rounded-lg border bg-slate-500/10 border-slate-500/30">
+              <Lock className="h-4 w-4 text-slate-400" />
+              <span className="text-[10px] font-bold tracking-wider text-slate-400">CLOSED</span>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="px-4 pb-4">
+          <div className="rounded-lg border border-slate-500/30 bg-slate-500/5 p-4 flex flex-col items-center gap-1 text-center">
+            <Clock className="h-5 w-5 text-slate-400 mb-1" />
+            <p className="text-sm font-semibold text-foreground">Market closed</p>
+            <p className="text-[11px] text-muted-foreground">
+              Last session closed at 3:30 PM IST. Next session opens at 9:15 AM IST.
+            </p>
+            <p className="text-[10px] text-muted-foreground mt-1 font-mono">
+              New predictions will appear when the market reopens.
+            </p>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
   return (
     <Card className="bg-[#10131b] border-border/20 rounded-lg overflow-hidden">
       {/* Direction stripe */}
@@ -1994,6 +2032,19 @@ export default function Intelligence() {
                   {/* Quick overview bar */}
                   <div className="grid grid-cols-5 gap-2">
                     {assets.map((asset) => {
+                      if (marketData?.marketClosed) {
+                        return (
+                          <button
+                            key={asset.id}
+                            onClick={() => setActiveTab("markets")}
+                            className="rounded-lg border p-2.5 text-center space-y-0.5 transition-colors border-slate-500/30 bg-slate-500/10"
+                          >
+                            <div className="flex justify-center"><Lock className="h-4 w-4 text-slate-400" /></div>
+                            <div className="text-[10px] font-bold font-mono text-foreground/80">{asset.symbol}</div>
+                            <div className="text-[10px] font-mono font-semibold text-slate-400">CLOSED</div>
+                          </button>
+                        );
+                      }
                       const dirConfig = {
                         up:      { arrow: "↑", color: "text-emerald-400", bg: "bg-emerald-400/10 border-emerald-400/30" },
                         down:    { arrow: "↓", color: "text-red-400",     bg: "bg-red-400/10 border-red-400/30" },
