@@ -1926,6 +1926,72 @@ function synthesizeV2Signals(
   const bull: { template: MarketSignalTemplate; articleIds: string[] }[] = [];
   const bear: { template: MarketSignalTemplate; articleIds: string[] }[] = [];
 
+  // ── Catalog-matched signals: per-asset business reasons for the call ──
+  // Each asset's ASSET_TEMPLATES entry has 4 bull + 4 bear signal templates
+  // with professionally written titles/reasoning (e.g. "nifty-bull-fii-inflow",
+  // "reliance-bull-oil", "tcs-bull-ai-demand"). We match these to live Tier-3
+  // flags and active channels so each asset shows WHY this specific stock
+  // would move — not just "6h window: bullish". When no flag matches but the
+  // ensemble has a directional consensus, we surface the asset's top-weight
+  // template so every call has at least one asset-specific narrative.
+  const assetCatalog = ASSET_TEMPLATES.find((a) => a.symbol === assetSymbol);
+  if (assetCatalog) {
+    const t3 = signal.tier3Evidence;
+    const channelIds = (signal.channelDecaySummary ?? [])
+      .filter((c) => c.decayedWeight >= 0.3)
+      .map((c) => c.channelId.toLowerCase());
+
+    const flags = new Set<string>();
+    if (t3) {
+      if (!t3.fiiIsStale && t3.fiiNetCrore > 1000) flags.add("fii");
+      if (!t3.fiiIsStale && t3.fiiNetCrore < -1000) flags.add("fii-outflow");
+      if (t3.indiaVix5dChange != null && t3.indiaVix5dChange < -1) flags.add("global-cues");
+      if (t3.indiaVix5dChange != null && t3.indiaVix5dChange > 1) flags.add("us-recession");
+      if (t3.advanceDeclineRatio != null && t3.advanceDeclineRatio > 1.5) flags.add("banking");
+      if (t3.advanceDeclineRatio != null && t3.advanceDeclineRatio < 0.7) flags.add("npa");
+    }
+    for (const ch of channelIds) {
+      if (ch.includes("crude") && ch.includes("spike")) flags.add("crude-spike");
+      if (ch.includes("crude") && (ch.includes("fall") || ch.includes("decline"))) flags.add("crude-fall");
+      if (ch.includes("rupee") || ch.includes("inr_weak")) flags.add("rupee");
+      if (ch.includes("india") && ch.includes("pak")) flags.add("india-pak");
+      if (ch.includes("sanctions")) flags.add("sanctions");
+      if (ch.includes("ai")) flags.add("ai-demand");
+      if (ch.includes("rate") && ch.includes("cut")) flags.add("rate-cut");
+      if (ch.includes("rate") && ch.includes("hike")) flags.add("rate-hike");
+      if (ch.includes("oil") || ch.includes("crude")) flags.add("oil");
+    }
+
+    const matchByFlags = (templates: MarketSignalTemplate[]): MarketSignalTemplate[] => {
+      if (flags.size === 0) return [];
+      return templates.filter((t) => {
+        const tail = t.id.replace(/^[a-z]+-(bull|bear)-/, "");
+        for (const flag of flags) {
+          if (tail === flag || tail.includes(flag) || flag.includes(tail)) return true;
+        }
+        return false;
+      });
+    };
+
+    const surfaceCatalogFor = (
+      direction: "up" | "down",
+      templates: MarketSignalTemplate[],
+      target: typeof bull,
+    ): void => {
+      if (signal.direction !== direction) return;
+      const matched = matchByFlags(templates);
+      if (matched.length > 0) {
+        for (const tmpl of matched.slice(0, 2)) target.push({ template: tmpl, articleIds: [] });
+      } else {
+        const top = templates.find((s) => s.weight === "strong") ?? templates[0];
+        if (top) target.push({ template: top, articleIds: [] });
+      }
+    };
+
+    surfaceCatalogFor("up", assetCatalog.bullSignals, bull);
+    surfaceCatalogFor("down", assetCatalog.bearSignals, bear);
+  }
+
   // EnsembleVote.confidence is a 0-1 number; bucket into the UI's weight tiers.
   const weightFromConf = (c: number): SignalWeight =>
     c >= 0.7 ? "strong" : c >= 0.4 ? "moderate" : "weak";
