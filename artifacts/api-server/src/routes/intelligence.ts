@@ -2390,6 +2390,12 @@ async function saveSnapshot(
       ...(extra?.candleFlags ? { candleFlags: JSON.stringify(extra.candleFlags) } : {}),
       ...(extra?.regimeAge !== undefined ? { regimeAge: extra.regimeAge } : {}),
       ...(extra?.channelDecaySummary ? { channelDecaySummary: JSON.stringify(extra.channelDecaySummary) } : {}),
+      // Persist ensemble votes + regime context so the read-from-DB path can
+      // re-synthesize bull/bear signal items without re-running the agent.
+      ...(extra?.ensembleVotes ? { ensembleVotes: JSON.stringify(extra.ensembleVotes) } : {}),
+      ...(extra?.regime ? { regimeAtSnapshot: extra.regime } : {}),
+      ...(extra?.activeChannels ? { activeChannels: JSON.stringify(extra.activeChannels) } : {}),
+      ...(extra?.uncertaintyFlag !== undefined ? { uncertaintyFlag: extra.uncertaintyFlag } : {}),
     });
   } catch {
     // Non-fatal
@@ -2460,6 +2466,51 @@ async function adaptSnapshotToAsset(
     };
   });
 
+  // Re-synthesize bull/bear signal items from the persisted ensemble votes so
+  // the UI's "BULL SIGNALS (n) — m pts" row shows the agent's actual reasoning,
+  // not always "(0)". Falls back to empty if ensemble_votes wasn't stored
+  // (older rows before this column was wired into saveSnapshot).
+  let cachedBull: { template: MarketSignalTemplate; articleIds: string[] }[] = [];
+  let cachedBear: { template: MarketSignalTemplate; articleIds: string[] }[] = [];
+  if (snapshot.ensembleVotes) {
+    try {
+      const votes = JSON.parse(snapshot.ensembleVotes) as Array<{
+        window: "6h" | "24h" | "72h"; call: string; confidence: number; rationale?: string;
+      }>;
+      const fakeSignal: MarketSignal = {
+        direction: snapshot.predictedDirection as "up" | "down" | "neutral",
+        magnitude: snapshot.predictedMagnitude as "strong" | "moderate" | "mild",
+        confidence: snapshot.predictedConfidence as "high" | "medium" | "low",
+        timeframe: "intraday",
+        priceImpactEstimate: snapshot.priceImpactEstimate,
+        verdict: snapshot.verdict,
+        dominantNarrative: snapshot.dominantNarrative,
+        assumptions: snapshot.assumptions,
+        triggerNewsSummary: snapshot.triggerNewsSummary,
+        bullScore: parseFloat(snapshot.bullScore ?? "0"),
+        bearScore: parseFloat(snapshot.bearScore ?? "0"),
+        regime: snapshot.regimeAtSnapshot ?? "",
+        regimeProbabilities: {},
+        activeGeopoliticalScenarios: [],
+        activeChannels: snapshot.activeChannels ? JSON.parse(snapshot.activeChannels) : [],
+        ensembleVotes: votes as MarketSignal["ensembleVotes"],
+        uncertaintyFlag: snapshot.uncertaintyFlag ?? false,
+        priceScore: snapshot.priceScore ?? 0,
+        flipConfirmed: snapshot.flipConfirmed ?? false,
+        tier3Evidence: { fiiNetCrore: 0, fiiIsStale: true, putCallRatio: null, advanceDeclineRatio: null, deliveryPct: null, indiaVix5dChange: null, tier3Score: 0 },
+        candleTrustScore: snapshot.candleTrustScore ?? 0,
+        candleFlags: snapshot.candleFlags ? JSON.parse(snapshot.candleFlags) : [],
+        regimeAge: snapshot.regimeAge ?? 0,
+        channelDecaySummary: [],
+      };
+      const synth = synthesizeV2Signals(fakeSignal, asset.symbol);
+      cachedBull = synth.activeBullSignals;
+      cachedBear = synth.activeBearSignals;
+    } catch {
+      // malformed JSON — fall back to empty
+    }
+  }
+
   return {
     id: asset.id,
     name: asset.name,
@@ -2471,8 +2522,16 @@ async function adaptSnapshotToAsset(
     priceImpactEstimate: snapshot.priceImpactEstimate,
     bullScore: parseFloat(snapshot.bullScore ?? "0"),
     bearScore: parseFloat(snapshot.bearScore ?? "0"),
-    bullSignals: [],
-    bearSignals: [],
+    bullSignals: cachedBull.map(s => ({
+      id: s.template.id, title: s.template.title, reasoning: s.template.reasoning,
+      weight: s.template.weight, sourceArticleIds: s.articleIds,
+      geopoliticalEvent: s.template.geopoliticalEvent,
+    })),
+    bearSignals: cachedBear.map(s => ({
+      id: s.template.id, title: s.template.title, reasoning: s.template.reasoning,
+      weight: s.template.weight, sourceArticleIds: s.articleIds,
+      geopoliticalEvent: s.template.geopoliticalEvent,
+    })),
     verdict: snapshot.verdict,
     dominantNarrative: snapshot.dominantNarrative,
     resolveAfter: snapshot.resolveAfter.toISOString(),
