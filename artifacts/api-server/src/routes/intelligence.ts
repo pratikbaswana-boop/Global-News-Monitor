@@ -11,7 +11,7 @@ import type { SituationReport } from "../services/reasoning/agent-analyst.js";
 import type { HistorianReport } from "../services/reasoning/agent-historian.js";
 import type { ForecasterTree } from "../services/reasoning/agent-forecaster.js";
 import type { Scenario } from "../services/reasoning/agent-forecaster.js";
-import { detectRegime, fetchNSEPriceData, runMarketAgent } from "../services/market/index.js";
+import { detectRegime, fetchNSEPriceData, runMarketAgent, type MarketSignal } from "../services/market/index.js";
 import { getMarketStatus } from "../services/market/scheduler.js";
 import { marketRegimesTable } from "@workspace/db";
 
@@ -1907,6 +1907,211 @@ function buildTriggerNewsSummary(
   return headlines.length > 0 ? headlines.join("\n") : "No specific news articles matched this prediction's signals.";
 }
 
+// ─── V2 agent signal synthesis ────────────────────────────────────────────────
+// The v2 market agent (market-agent.ts) emits a verdict + a bullScore/bearScore
+// derived from ensemble window votes and Tier-3 evidence, but does NOT emit
+// per-template signal items the way the legacy LLM path does. Without this
+// conversion the UI shows "BULL SIGNALS (0) — 4 PTS" — a score with no
+// underlying breakdown. This translates the agent's internal reasoning
+// (ensemble votes, Tier-3 microstructure, active geopolitical channels) into
+// the signal-item shape the UI expects, so the score and the breakdown stay
+// honest.
+function synthesizeV2Signals(
+  signal: MarketSignal,
+  assetSymbol: string,
+): {
+  activeBullSignals: { template: MarketSignalTemplate; articleIds: string[] }[];
+  activeBearSignals: { template: MarketSignalTemplate; articleIds: string[] }[];
+} {
+  const bull: { template: MarketSignalTemplate; articleIds: string[] }[] = [];
+  const bear: { template: MarketSignalTemplate; articleIds: string[] }[] = [];
+
+  // EnsembleVote.confidence is a 0-1 number; bucket into the UI's weight tiers.
+  const weightFromConf = (c: number): SignalWeight =>
+    c >= 0.7 ? "strong" : c >= 0.4 ? "moderate" : "weak";
+
+  // Ensemble window votes → one signal per directional window
+  for (const v of signal.ensembleVotes ?? []) {
+    if (v.call === "BULLISH") {
+      bull.push({
+        template: {
+          id: `v2-vote-${v.window}`,
+          title: `${v.window} window: bullish read on ${assetSymbol}`,
+          reasoning: v.rationale && v.rationale.length > 0
+            ? v.rationale
+            : `${v.window} ensemble window voted BULLISH (confidence ${v.confidence.toFixed(2)}).`,
+          weight: weightFromConf(v.confidence),
+          keywords: [],
+          geopoliticalEvent: `Regime: ${signal.regime}`,
+        },
+        articleIds: [],
+      });
+    } else if (v.call === "BEARISH") {
+      bear.push({
+        template: {
+          id: `v2-vote-${v.window}`,
+          title: `${v.window} window: bearish read on ${assetSymbol}`,
+          reasoning: v.rationale && v.rationale.length > 0
+            ? v.rationale
+            : `${v.window} ensemble window voted BEARISH (confidence ${v.confidence.toFixed(2)}).`,
+          weight: weightFromConf(v.confidence),
+          keywords: [],
+          geopoliticalEvent: `Regime: ${signal.regime}`,
+        },
+        articleIds: [],
+      });
+    }
+  }
+
+  // Tier-3 microstructure evidence
+  const t3 = signal.tier3Evidence;
+  if (t3) {
+    if (t3.advanceDeclineRatio != null) {
+      if (t3.advanceDeclineRatio >= 1.5) {
+        bull.push({
+          template: {
+            id: "v2-tier3-breadth-bull",
+            title: `Market breadth strongly positive (A/D = ${t3.advanceDeclineRatio.toFixed(2)})`,
+            reasoning: `Advancing issues outnumber decliners ${t3.advanceDeclineRatio.toFixed(2)}-to-1 on NSE — a textbook risk-on tape.`,
+            weight: t3.advanceDeclineRatio >= 2 ? "strong" : "moderate",
+            keywords: [],
+            geopoliticalEvent: "Market microstructure",
+          },
+          articleIds: [],
+        });
+      } else if (t3.advanceDeclineRatio <= 0.67) {
+        bear.push({
+          template: {
+            id: "v2-tier3-breadth-bear",
+            title: `Market breadth negative (A/D = ${t3.advanceDeclineRatio.toFixed(2)})`,
+            reasoning: `Decliners dominate advances ${(1 / t3.advanceDeclineRatio).toFixed(2)}-to-1 on NSE — weak internal tape despite index level.`,
+            weight: t3.advanceDeclineRatio <= 0.5 ? "strong" : "moderate",
+            keywords: [],
+            geopoliticalEvent: "Market microstructure",
+          },
+          articleIds: [],
+        });
+      }
+    }
+
+    if (!t3.fiiIsStale && Math.abs(t3.fiiNetCrore) >= 500) {
+      const isBull = t3.fiiNetCrore > 0;
+      const target = isBull ? bull : bear;
+      target.push({
+        template: {
+          id: `v2-tier3-fii-${isBull ? "bull" : "bear"}`,
+          title: `FII flow ${isBull ? "positive" : "negative"} (₹${Math.abs(t3.fiiNetCrore).toFixed(0)} cr ${isBull ? "buy" : "sell"})`,
+          reasoning: `FIIs net-${isBull ? "bought" : "sold"} ₹${Math.abs(t3.fiiNetCrore).toFixed(0)} cr of Indian equities. FII flow is the dominant intraday price-setter for NIFTY-correlated names.`,
+          weight: Math.abs(t3.fiiNetCrore) >= 2000 ? "strong" : "moderate",
+          keywords: [],
+          geopoliticalEvent: "Foreign institutional flow",
+        },
+        articleIds: [],
+      });
+    }
+
+    if (t3.putCallRatio != null) {
+      if (t3.putCallRatio <= 0.7) {
+        bull.push({
+          template: {
+            id: "v2-tier3-pcr-bull",
+            title: `Options skewed bullish (PCR = ${t3.putCallRatio.toFixed(2)})`,
+            reasoning: `Put-Call ratio of ${t3.putCallRatio.toFixed(2)} shows traders buying far more calls than puts — bullish positioning.`,
+            weight: "moderate",
+            keywords: [],
+            geopoliticalEvent: "Options positioning",
+          },
+          articleIds: [],
+        });
+      } else if (t3.putCallRatio >= 1.3) {
+        bear.push({
+          template: {
+            id: "v2-tier3-pcr-bear",
+            title: `Options skewed bearish (PCR = ${t3.putCallRatio.toFixed(2)})`,
+            reasoning: `Put-Call ratio of ${t3.putCallRatio.toFixed(2)} shows heavy put protection — hedged/bearish positioning.`,
+            weight: "moderate",
+            keywords: [],
+            geopoliticalEvent: "Options positioning",
+          },
+          articleIds: [],
+        });
+      }
+    }
+
+    if (t3.indiaVix5dChange != null) {
+      if (t3.indiaVix5dChange <= -10) {
+        bull.push({
+          template: {
+            id: "v2-tier3-vix-bull",
+            title: `India VIX collapsing (${t3.indiaVix5dChange.toFixed(1)}% over 5d)`,
+            reasoning: `Volatility has fallen ${Math.abs(t3.indiaVix5dChange).toFixed(1)}% over 5 sessions — fear draining out of the market.`,
+            weight: "moderate",
+            keywords: [],
+            geopoliticalEvent: "Volatility regime",
+          },
+          articleIds: [],
+        });
+      } else if (t3.indiaVix5dChange >= 20) {
+        bear.push({
+          template: {
+            id: "v2-tier3-vix-bear",
+            title: `India VIX spiking (+${t3.indiaVix5dChange.toFixed(1)}% over 5d)`,
+            reasoning: `Volatility surged +${t3.indiaVix5dChange.toFixed(1)}% over 5 sessions — risk-off positioning building.`,
+            weight: t3.indiaVix5dChange >= 40 ? "strong" : "moderate",
+            keywords: [],
+            geopoliticalEvent: "Volatility regime",
+          },
+          articleIds: [],
+        });
+      }
+    }
+  }
+
+  // Active geopolitical channels — direction inferred from regime
+  const regimeIsBull = signal.regime === "RISK_ON";
+  for (const ch of (signal.channelDecaySummary ?? []).slice(0, 3)) {
+    if (ch.decayedWeight < 0.3) continue;
+    const target = regimeIsBull ? bull : bear;
+    target.push({
+      template: {
+        id: `v2-channel-${ch.channelId}`,
+        title: `Geopolitical channel active: ${ch.channelId}`,
+        reasoning: `Channel "${ch.channelId}" carries decayed weight ${ch.decayedWeight.toFixed(2)} (triggered ${ch.daysSinceTrigger}d ago) under ${signal.regime} regime.`,
+        weight: ch.decayedWeight >= 0.7 ? "strong" : "moderate",
+        keywords: [],
+        geopoliticalEvent: ch.channelId,
+      },
+      articleIds: [],
+    });
+  }
+
+  return { activeBullSignals: bull, activeBearSignals: bear };
+}
+
+// ─── Per-asset price impact ───────────────────────────────────────────────────
+// Replaces the hardcoded "+0.5% to +1.2%" string from market-agent.ts so each
+// asset's impact estimate reflects its own typical daily range and the call's
+// magnitude. Falls back to the original constants when history isn't available.
+function computePerAssetPriceImpact(
+  direction: "up" | "down" | "neutral" | "uncertain",
+  magnitude: "strong" | "moderate" | "mild",
+  avgDailyRangePct: number | null,
+): string {
+  if (!avgDailyRangePct || avgDailyRangePct <= 0) {
+    return direction === "up" ? "+0.5% to +1.2%"
+         : direction === "down" ? "-0.5% to -1.2%"
+         : "±0.3%";
+  }
+  const loMul = magnitude === "strong" ? 0.4 : magnitude === "moderate" ? 0.2 : 0.05;
+  const hiMul = magnitude === "strong" ? 1.0 : magnitude === "moderate" ? 0.6 : 0.3;
+  const lo = avgDailyRangePct * loMul;
+  const hi = avgDailyRangePct * hiMul;
+  const fmt = (n: number) => n.toFixed(1);
+  if (direction === "up") return `+${fmt(lo)}% to +${fmt(hi)}%`;
+  if (direction === "down") return `-${fmt(lo)}% to -${fmt(hi)}%`;
+  return `±${fmt(hi)}%`;
+}
+
 // ─── Early flip detection ─────────────────────────────────────────────────────
 
 async function detectEarlyFlipAndNotify(
@@ -2455,21 +2660,33 @@ router.get("/intelligence/market-signals", async (req, res) => {
               changePct: c.changePct,
             })),
           });
-          // Adapt MarketSignal → AIPrediction shape
+          // Adapt MarketSignal → AIPrediction shape.
+          // Synthesize signal items from the agent's internal reasoning so the
+          // UI's "BULL SIGNALS (n) — m pts" row reflects real evidence rather
+          // than always showing "(0)". And override the agent's hardcoded
+          // priceImpactEstimate constant with a per-asset estimate derived
+          // from the asset's own avg daily range.
+          const { activeBullSignals: synthBull, activeBearSignals: synthBear } =
+            synthesizeV2Signals(signal, asset.symbol);
+          const perAssetImpact = computePerAssetPriceImpact(
+            signal.direction,
+            signal.magnitude,
+            historical?.avgDailyRangePct ?? null,
+          );
           return {
             direction: signal.direction,
             magnitude: signal.magnitude,
             confidence: signal.confidence,
             timeframe: signal.timeframe,
-            priceImpactEstimate: signal.priceImpactEstimate,
+            priceImpactEstimate: perAssetImpact,
             verdict: signal.verdict,
             dominantNarrative: signal.dominantNarrative,
             assumptions: signal.assumptions,
             triggerNewsSummary: signal.triggerNewsSummary,
             bullScore: signal.bullScore,
             bearScore: signal.bearScore,
-            activeBullSignals: [] as { template: MarketSignalTemplate; articleIds: string[] }[],
-            activeBearSignals: [] as { template: MarketSignalTemplate; articleIds: string[] }[],
+            activeBullSignals: synthBull,
+            activeBearSignals: synthBear,
             _priceScore: signal.priceScore,
             _flipConfirmed: signal.flipConfirmed,
             _tier3Evidence: signal.tier3Evidence as Record<string, unknown>,
@@ -2746,20 +2963,30 @@ router.post("/intelligence/market-signals/trigger", async (req, res) => {
           };
           const signal = await runMarketAgent(asset.id, asset.name, asset.symbol, regimeState, "OHLCV unavailable", "", null, { force: true });
           const safeDir = signal.direction === "uncertain" ? "neutral" : signal.direction;
+          // Manual trigger path: pull asset's historical range so price impact
+          // is per-asset, and synthesize signal items from agent reasoning.
+          const triggerHistorical = await fetchHistoricalPrices(asset.id).catch(() => null);
+          const { activeBullSignals: synthBull, activeBearSignals: synthBear } =
+            synthesizeV2Signals(signal, asset.symbol);
+          const perAssetImpact = computePerAssetPriceImpact(
+            signal.direction,
+            signal.magnitude,
+            triggerHistorical?.avgDailyRangePct ?? null,
+          );
           ai = {
             direction: safeDir,
             magnitude: signal.magnitude,
             confidence: signal.confidence,
             timeframe: "today",
-            priceImpactEstimate: signal.priceImpactEstimate,
+            priceImpactEstimate: perAssetImpact,
             verdict: signal.verdict,
             dominantNarrative: signal.dominantNarrative,
             assumptions: signal.assumptions,
             triggerNewsSummary: signal.triggerNewsSummary,
             bullScore: signal.bullScore,
             bearScore: signal.bearScore,
-            activeBullSignals: [] as { template: MarketSignalTemplate; articleIds: string[] }[],
-            activeBearSignals: [] as { template: MarketSignalTemplate; articleIds: string[] }[],
+            activeBullSignals: synthBull,
+            activeBearSignals: synthBear,
             _priceScore: signal.priceScore,
             _flipConfirmed: signal.flipConfirmed,
             _tier3Evidence: signal.tier3Evidence as Record<string, unknown>,
