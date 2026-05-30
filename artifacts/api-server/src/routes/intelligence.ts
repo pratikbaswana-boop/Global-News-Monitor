@@ -3027,7 +3027,14 @@ router.get("/intelligence/market-signals", async (req, res) => {
 // ─── Manual trigger for market signals ──────────────────────────────────────
 
 router.post("/intelligence/market-signals/trigger", async (req, res) => {
-  if (isWeekend()) {
+  // Debug flag for diagnostic runs (e.g. simulating "what would Friday's
+  // prediction have looked like with channels working"). When force=true is
+  // passed, weekend / market-closed gating is bypassed. The result is still
+  // not persisted via saveSnapshot (the inner status="closed" check there
+  // still blocks writes during closed hours), so this is a non-destructive
+  // dry-run that exercises the full read path.
+  const force = req.query["force"] === "true";
+  if (!force && isWeekend()) {
     res.status(400).json({ error: "Market is closed on weekends" });
     return;
   }
