@@ -2389,8 +2389,13 @@ async function saveSnapshot(
   try {
     // Only persist snapshots when the NSE market is actively open or in pre-market.
     // Skips overnight + weekend writes so the UI never inherits stale "live" data.
+    // Override: ALLOW_CLOSED_WRITES env var (for diagnostic dry-runs like
+    // simulating "what would Friday's prediction have looked like with the
+    // channels pipeline working"). Set to "true" temporarily, restart, fire
+    // trigger?force=true, verify, then unset.
     const status = getMarketStatus().status;
-    if (status === "closed") return;
+    const allowClosedWrites = process.env["ALLOW_CLOSED_WRITES"] === "true";
+    if (status === "closed" && !allowClosedWrites) return;
 
     // Throttle: only save one snapshot per asset per 6 hours (4 per day max)
     // This allows fresh signals during pre-market, open, and post-close windows.
