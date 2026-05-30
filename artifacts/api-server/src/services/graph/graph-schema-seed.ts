@@ -182,16 +182,29 @@ const CHANNEL_ASSET_LINKS: Array<{
 ];
 
 export async function seedTransmissionChannels(): Promise<void> {
-  // Seed TransmissionChannel nodes
+  // Seed TransmissionChannel + Channel nodes (dual label).
+  // - `:TransmissionChannel` is read by channel-recalibration.ts (legacy).
+  // - `:Channel` is read by market-agent.ts and written by pipeline.ts.
+  // Without the second label, market predictions never see news-driven channels.
+  // We also set `label` (human-readable) and `weight` (base correlation that
+  // the market layer then decays by days-since-trigger) so the
+  // `MATCH (s:Story)-[r:TRANSMITS_TO]->(c:Channel) ... ORDER BY c.weight DESC`
+  // query returns meaningful results instead of nulls.
   for (const ch of TRANSMISSION_CHANNELS) {
+    const humanLabel = ch.id
+      .split("_")
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(" ");
     await runCypher(
-      `MERGE (tc:TransmissionChannel {id: $id})
+      `MERGE (tc:TransmissionChannel:Channel {id: $id})
        SET tc.type = $type,
            tc.avg_lag_days = $avg_lag_days,
            tc.historical_correlation = $historical_correlation,
            tc.affected_sectors = $affected_sectors,
-           tc.trigger_condition = $trigger_condition`,
-      { ...ch, affected_sectors: ch.affected_sectors.join(",") }
+           tc.trigger_condition = $trigger_condition,
+           tc.label = $label,
+           tc.weight = $historical_correlation`,
+      { ...ch, affected_sectors: ch.affected_sectors.join(","), label: humanLabel }
     );
   }
 
