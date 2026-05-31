@@ -2389,13 +2389,8 @@ async function saveSnapshot(
   try {
     // Only persist snapshots when the NSE market is actively open or in pre-market.
     // Skips overnight + weekend writes so the UI never inherits stale "live" data.
-    // Override: ALLOW_CLOSED_WRITES env var (for diagnostic dry-runs like
-    // simulating "what would Friday's prediction have looked like with the
-    // channels pipeline working"). Set to "true" temporarily, restart, fire
-    // trigger?force=true, verify, then unset.
     const status = getMarketStatus().status;
-    const allowClosedWrites = process.env["ALLOW_CLOSED_WRITES"] === "true";
-    if (status === "closed" && !allowClosedWrites) return;
+    if (status === "closed") return;
 
     // Throttle: only save one snapshot per asset per 6 hours (4 per day max)
     // This allows fresh signals during pre-market, open, and post-close windows.
@@ -3032,14 +3027,7 @@ router.get("/intelligence/market-signals", async (req, res) => {
 // ─── Manual trigger for market signals ──────────────────────────────────────
 
 router.post("/intelligence/market-signals/trigger", async (req, res) => {
-  // Debug flag for diagnostic runs (e.g. simulating "what would Friday's
-  // prediction have looked like with channels working"). When force=true is
-  // passed, weekend / market-closed gating is bypassed. The result is still
-  // not persisted via saveSnapshot (the inner status="closed" check there
-  // still blocks writes during closed hours), so this is a non-destructive
-  // dry-run that exercises the full read path.
-  const force = req.query["force"] === "true";
-  if (!force && isWeekend()) {
+  if (isWeekend()) {
     res.status(400).json({ error: "Market is closed on weekends" });
     return;
   }
