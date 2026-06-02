@@ -110,6 +110,24 @@ export async function runPipeline(storyId: string): Promise<void> {
     // ── Stage 1: Fetch subgraph ────────────────────────────────────────────────
     const subgraphJson = await fetchStorySubgraph(storyId);
 
+    // Derive the story's trigger date from the earliest event in the subgraph.
+    // Agents use this to look up the correct trading day for priced-in detection
+    // and channel price-move validation — avoids the "always today" bug.
+    const storyTriggerDate = (() => {
+      try {
+        const subgraph = JSON.parse(subgraphJson) as {
+          events?: Array<{ eventDate?: string | null }>;
+        };
+        const dates = (subgraph.events ?? [])
+          .map(e => e.eventDate)
+          .filter((d): d is string => !!d)
+          .sort();
+        return dates[0] ?? new Date().toISOString();
+      } catch {
+        return new Date().toISOString();
+      }
+    })();
+
     // ── Stage 2: Analyst ──────────────────────────────────────────────────────
     state.stage = "analyst";
     const situationReport = await runAnalystAgent(storyId, subgraphJson);
@@ -131,11 +149,11 @@ export async function runPipeline(storyId: string): Promise<void> {
       logger.warn({ storyId, dominantChannel }, "pipeline: calibration penalty active for this story type");
       state.flags.push("calibration_penalty_active");
     }
-    const forecasterTree = await runForecasterAgent(storyId, situationReport, historianReport, calibrationWarning ?? undefined);
+    const forecasterTree = await runForecasterAgent(storyId, situationReport, historianReport, calibrationWarning ?? undefined, storyTriggerDate);
 
     // ── Stage 5: Devil's Advocate ─────────────────────────────────────────────
     state.stage = "devil";
-    const devilCritique = await runDevilAgent(storyId, forecasterTree);
+    const devilCritique = await runDevilAgent(storyId, forecasterTree, storyTriggerDate);
 
     // Detect active contradiction flag (from subgraph)
     const subgraph = JSON.parse(subgraphJson) as { contradictions: Array<{ eventIdA?: string | null; eventIdB?: string | null }> };

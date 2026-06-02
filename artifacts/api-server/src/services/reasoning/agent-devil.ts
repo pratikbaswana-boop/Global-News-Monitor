@@ -137,7 +137,8 @@ This catches cases like the H-1B/TCS scenario where the channel was active but t
 
 export async function runDevilAgent(
   storyId: string,
-  forecasterTree: ForecasterTree
+  forecasterTree: ForecasterTree,
+  storyTriggerDate?: string
 ): Promise<DevilCritique> {
   logger.info({ storyId }, "devil's advocate agent: critiquing forecast");
 
@@ -182,10 +183,11 @@ export async function runDevilAgent(
   // Build channel price-move validation for every channel cited by the Forecaster
   const uniqueChannels = [...new Set(forecasterTree.scenarios.flatMap(s => s.transmissionChannelIds))];
   const channelPriceMoves: string[] = [];
-  // Use the dominant scenario's trigger date as a proxy for the story trigger date
-  const storyTriggerDate = new Date().toISOString();
+  // Use the caller-supplied trigger date (earliest event from subgraph) so the
+  // Yahoo Finance lookup checks the right trading day rather than always today.
+  const effectiveTriggerDate = storyTriggerDate ?? new Date().toISOString();
   for (const chId of uniqueChannels) {
-    const { movePct, priceMovedOnChannel } = await fetchMarketMoveForChannel(chId, storyTriggerDate);
+    const { movePct, priceMovedOnChannel } = await fetchMarketMoveForChannel(chId, effectiveTriggerDate);
     const mapping = CHANNEL_TO_INSTRUMENT[chId];
     if (mapping) {
       channelPriceMoves.push(

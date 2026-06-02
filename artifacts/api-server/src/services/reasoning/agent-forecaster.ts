@@ -147,7 +147,8 @@ export async function runForecasterAgent(
   storyId: string,
   situationReport: SituationReport,
   historianReport: HistorianReport,
-  calibrationWarning?: string
+  calibrationWarning?: string,
+  storyTriggerDate?: string
 ): Promise<ForecasterTree> {
   logger.info({ storyId }, "forecaster agent: generating scenario tree");
 
@@ -157,9 +158,11 @@ export async function runForecasterAgent(
 
   const calibrationSection = calibrationWarning ? `\n${calibrationWarning}\n` : "";
 
-  // Compute priced-in context before calling GPT-4o
-  const storyTriggerDate = new Date().toISOString();
-  const pricedIn = await checkIfPricedIn(storyId, storyTriggerDate);
+  // Compute priced-in context before calling GPT-4o.
+  // Use the caller-supplied trigger date (earliest event from subgraph) so the
+  // Yahoo Finance lookup finds the right trading day instead of always today.
+  const effectiveTriggerDate = storyTriggerDate ?? new Date().toISOString();
+  const pricedIn = await checkIfPricedIn(storyId, effectiveTriggerDate);
 
   const userContent = `Generate a probabilistic scenario tree for this geopolitical situation.${calibrationSection}
 
