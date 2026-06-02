@@ -198,9 +198,22 @@ export async function runDevilAgent(
     }
   }
 
+  // Defensive: dominantScenario can be an out-of-range index when the
+  // Forecaster's JSON is malformed or missing the field. Fall back to the
+  // highest-probability scenario rather than crashing the whole pipeline.
+  const domIdx = (typeof forecasterTree.dominantScenario === "number" &&
+    forecasterTree.scenarios[forecasterTree.dominantScenario])
+    ? forecasterTree.dominantScenario
+    : forecasterTree.scenarios.reduce(
+        (best, s, i) => (s.probability > (forecasterTree.scenarios[best]?.probability ?? 0) ? i : best),
+        0,
+      );
+  const domScenario = forecasterTree.scenarios[domIdx];
+  const domProbPct = domScenario ? (domScenario.probability * 100).toFixed(0) : "—";
+
   const userContent = `Critique this probabilistic forecast:
 
-Dominant scenario: ${forecasterTree.dominantScenario} (${(forecasterTree.scenarios[forecasterTree.dominantScenario].probability * 100).toFixed(0)}%)
+Dominant scenario: ${domIdx} (${domProbPct}%)
 Model confidence: ${forecasterTree.modelConfidence}
 No historical analogue: ${forecasterTree.noHistoricalAnalogue}
 Dominant Indian market channel: ${forecasterTree.dominantChannel}
