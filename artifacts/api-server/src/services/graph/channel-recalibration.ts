@@ -103,10 +103,28 @@ async function runRecalibration(): Promise<void> {
   logger.info({ channelsUpdated: updated, totalChannels: channelData.size }, "channel-recalibration: complete");
 }
 
+// Schedule the next quarterly run using a chained setTimeout instead of
+// setInterval. Node's setInterval/setTimeout max delay is INT32_MAX (~24.8
+// days); QUARTERLY_INTERVAL_MS (90d) overflows and gets silently clamped to
+// 1ms, producing a tight infinite loop that consumes the entire event loop.
+// We chunk the wait into safe-sized pieces (≤24 days each).
+const MAX_TIMEOUT_MS = 24 * 24 * 60 * 60 * 1000; // 24 days — well below INT32_MAX
+
+function scheduleNextRecalibration(remainingMs: number): void {
+  if (remainingMs <= MAX_TIMEOUT_MS) {
+    setTimeout(() => {
+      void runRecalibration();
+      scheduleNextRecalibration(QUARTERLY_INTERVAL_MS);
+    }, remainingMs);
+  } else {
+    setTimeout(() => scheduleNextRecalibration(remainingMs - MAX_TIMEOUT_MS), MAX_TIMEOUT_MS);
+  }
+}
+
 export function startChannelRecalibrationScheduler(): void {
   logger.info("channel-recalibration: scheduler registered (first run in 15 min, then quarterly)");
   setTimeout(() => {
     void runRecalibration();
-    setInterval(() => { void runRecalibration(); }, QUARTERLY_INTERVAL_MS);
+    scheduleNextRecalibration(QUARTERLY_INTERVAL_MS);
   }, FIRST_RUN_DELAY_MS);
 }
