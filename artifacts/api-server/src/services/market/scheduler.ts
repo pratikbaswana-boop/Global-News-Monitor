@@ -11,6 +11,7 @@
 
 import { randomUUID } from "crypto";
 import { db, marketRegimesTable, flipGuardsTable } from "@workspace/db";
+import { desc, gt } from "drizzle-orm";
 import { logger } from "../../lib/logger.js";
 import { fetchRegimeFeatures, fetchNSEPriceData } from "./nse-direct-scraper.js";
 import { detectRegime } from "./hmm-regime.js";
@@ -162,11 +163,20 @@ async function detectAndStoreRegime(): Promise<boolean> {
 }
 
 async function runEnsembleForAllAssets(window: Window): Promise<void> {
-  // Load latest stored regime (within last 24h)
+  // Load LATEST stored regime (within last 24h). Without ORDER BY, Postgres
+  // returned rows in physical/arbitrary order — the scheduler was picking up
+  // an old CRISIS row from initial setup, passing CRISIS into every ensemble
+  // call, and confidenceWeightedVote was returning UNCERTAIN on every asset.
   const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  const rows = await db.select().from(marketRegimesTable).limit(1).then((r) => r);
+  const rows = await db
+    .select()
+    .from(marketRegimesTable)
+    .where(gt(marketRegimesTable.detectedAt, cutoff))
+    .orderBy(desc(marketRegimesTable.detectedAt))
+    .limit(1)
+    .then((r) => r);
   if (rows.length === 0) {
-    logger.info("market-scheduler: no regime row yet, skipping ensemble");
+    logger.info("market-scheduler: no recent regime row, skipping ensemble");
     return;
   }
 
