@@ -675,11 +675,14 @@ Return JSON: { "call": "BULLISH" | "BEARISH" | "NEUTRAL", "confidence": 0.0-1.0,
     bearScore = bearVotes * 3 + 1;
     bullScore = bullVotes * 3;
   } else {
-    // NEUTRAL or UNCERTAIN — verdict is "no directional edge". Show equal
-    // (zero) on both sides so the bar / "100% bullish weight" label can't
-    // claim a side that the verdict didn't pick.
-    bullScore = 0;
-    bearScore = 0;
+    // NEUTRAL or UNCERTAIN by FlipGuard — but the ensemble may still have
+    // voted directionally (e.g. 1 BULLISH + 2 NEUTRAL). Reflect the raw
+    // ensemble vote balance so the UI's "bull signals / bear signals" row
+    // shows real evidence instead of triggering an "insufficient data"
+    // empty state. Direction badge will still read NEUTRAL — correctly —
+    // because the agent hasn't confirmed a flip yet.
+    bullScore = bullVotes * 3;
+    bearScore = bearVotes * 3;
   }
 
   const primaryRationale = ensemble.votes.find(v => v.call === finalCall)?.rationale
