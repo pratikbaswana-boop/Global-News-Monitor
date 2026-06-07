@@ -73,6 +73,7 @@ export type NewsSummaryBySource = {
 
 export interface NewsSummary {
   totalArticles: number;
+  totalDbArticles?: number;
   byCategory: NewsSummaryByCategory;
   bySource: NewsSummaryBySource;
   lastUpdated: string;
@@ -466,6 +467,8 @@ export type GetNewsParams = {
   country?: string;
   page?: number;
   pageSize?: number;
+  search?: string;
+  sort?: "newest" | "oldest";
 };
 
 export type GetNewsCategory =

@@ -30,6 +30,8 @@ export const GetNewsQueryParams = zod.object({
   country: zod.coerce.string().optional(),
   page: zod.coerce.number().default(getNewsQueryPageDefault),
   pageSize: zod.coerce.number().default(getNewsQueryPageSizeDefault),
+  search: zod.string().optional(),
+  sort: zod.enum(["newest", "oldest"]).default("newest"),
 });
 
 export const GetNewsResponse = zod.object({
@@ -66,6 +68,7 @@ export const GetNewsResponse = zod.object({
  */
 export const GetNewsSummaryResponse = zod.object({
   totalArticles: zod.number(),
+  totalDbArticles: zod.number().optional(),
   byCategory: zod.object({
     politics: zod.number(),
     deals: zod.number(),

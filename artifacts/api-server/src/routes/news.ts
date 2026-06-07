@@ -6,7 +6,7 @@ import {
   GetTrendingTopicsResponse,
 } from "@workspace/api-zod";
 import { db, rawArticlesTable } from "@workspace/db";
-import { desc } from "drizzle-orm";
+import { count, desc, like, or } from "drizzle-orm";
 
 const router = Router();
 
@@ -453,6 +453,53 @@ async function fetchArticlesFromDatabase(): Promise<RawArticle[]> {
   }
 }
 
+async function getTotalDbArticleCount(): Promise<number> {
+  try {
+    const result = await db.select({ value: count() }).from(rawArticlesTable);
+    return result[0]?.value ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function searchArticlesFromDatabase(query: string): Promise<RawArticle[]> {
+  try {
+    const term = `%${query}%`;
+    const rows = await db
+      .select()
+      .from(rawArticlesTable)
+      .where(
+        or(
+          like(rawArticlesTable.title, term),
+          like(rawArticlesTable.body, term)
+        )
+      )
+      .orderBy(desc(rawArticlesTable.publishedAt))
+      .limit(200);
+
+    return rows.map((row) => {
+      const title = row.title ?? "";
+      const body = row.body ?? "";
+      return {
+        id: row.id,
+        title,
+        description: body,
+        url: row.url,
+        imageUrl: null,
+        source: row.feedId,
+        sourceName: row.feedId,
+        publishedAt: row.publishedAt.toISOString(),
+        category: classifyArticle(title, body),
+        countries: extractCountries(title, body),
+        leaders: extractLeaders(title, body),
+      };
+    });
+  } catch (err) {
+    console.error("Failed to search articles from database:", err);
+    return [];
+  }
+}
+
 async function getAllArticles(): Promise<{
   articles: RawArticle[];
   counts: Record<string, number>;
@@ -515,9 +562,40 @@ router.get("/news", async (req, res) => {
   const parseResult = GetNewsQueryParams.safeParse(req.query);
   const params = parseResult.success
     ? parseResult.data
-    : { category: "all", page: 1, pageSize: 30, country: undefined };
+    : { category: "all", page: 1, pageSize: 30, country: undefined, search: undefined, sort: "newest" as const };
 
-  const { articles, counts } = await getAllArticles();
+  const searchQuery = params.search?.trim();
+  const sort = params.sort ?? "newest";
+
+  let articles: RawArticle[];
+  let counts: Record<string, number>;
+
+  if (searchQuery) {
+    // Search: try cached articles first, fall back to DB search
+    const { articles: cached, counts: cachedCounts } = await getAllArticles();
+    const lq = searchQuery.toLowerCase();
+    const cacheHits = cached.filter(
+      (a) =>
+        a.title.toLowerCase().includes(lq) ||
+        a.description.toLowerCase().includes(lq)
+    );
+
+    if (cacheHits.length > 0) {
+      articles = cacheHits;
+      counts = cachedCounts;
+    } else {
+      // Fall back to direct DB search
+      articles = await searchArticlesFromDatabase(searchQuery);
+      counts = {};
+      for (const a of articles) {
+        counts[a.sourceName] = (counts[a.sourceName] ?? 0) + 1;
+      }
+    }
+  } else {
+    const result = await getAllArticles();
+    articles = result.articles;
+    counts = result.counts;
+  }
 
   let filtered = articles;
 
@@ -531,6 +609,17 @@ router.get("/news", async (req, res) => {
     const c = params.country.toLowerCase();
     filtered = filtered.filter((a) =>
       a.countries.some((country) => country.toLowerCase().includes(c))
+    );
+  }
+
+  // Sort
+  if (sort === "oldest") {
+    filtered = [...filtered].sort(
+      (a, b) => new Date(a.publishedAt).getTime() - new Date(b.publishedAt).getTime()
+    );
+  } else {
+    filtered = [...filtered].sort(
+      (a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime()
     );
   }
 
@@ -551,7 +640,10 @@ router.get("/news", async (req, res) => {
 });
 
 router.get("/news/summary", async (_req, res) => {
-  const { articles, counts } = await getAllArticles();
+  const [{ articles, counts }, totalDbArticles] = await Promise.all([
+    getAllArticles(),
+    getTotalDbArticleCount(),
+  ]);
 
   const byCategory = {
     politics: articles.filter((a) => a.category === "politics").length,
@@ -563,6 +655,7 @@ router.get("/news/summary", async (_req, res) => {
 
   const response = GetNewsSummaryResponse.parse({
     totalArticles: articles.length,
+    totalDbArticles,
     byCategory,
     bySource: counts,
     lastUpdated: lastFetched?.toISOString() ?? new Date().toISOString(),
