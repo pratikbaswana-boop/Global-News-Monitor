@@ -22,6 +22,16 @@ NEW_FEEDS = [
     {"id": "icij",                  "url": "https://www.icij.org/feed/",                               "tier": 2},
     {"id": "cnbc-top",              "url": "https://www.cnbc.com/id/100003114/device/rss/rss.html",    "tier": 2},
     {"id": "worldbank-news",        "url": "https://www.worldbank.org/en/news/all/rss",                "tier": 1},
+    {"id": "bloomberg-markets",     "url": "https://feeds.bloomberg.com/markets/news.rss",             "tier": 1},
+    {"id": "bbc-business",          "url": "https://feeds.bbci.co.uk/news/business/rss.xml",           "tier": 1},
+    {"id": "bbc-world",             "url": "https://feeds.bbci.co.uk/news/world/rss.xml",              "tier": 1},
+    {"id": "eia-today-in-energy",   "url": "https://www.eia.gov/todayinenergy/rss.xml",                  "tier": 1},
+    {"id": "project-syndicate",     "url": "https://www.project-syndicate.org/rss",                      "tier": 2},
+    {"id": "livemint-markets",      "url": "https://www.livemint.com/rss/markets",                       "tier": 2},
+    {"id": "livemint-industry",     "url": "https://www.livemint.com/rss/industry",                      "tier": 2},
+    {"id": "livemint-news",         "url": "https://www.livemint.com/rss/news",                          "tier": 2},
+    {"id": "worldbank-blogs",       "url": "https://blogs.worldbank.org/feed/",                          "tier": 1},
+    {"id": "occrp-investigations",  "url": "https://www.occrp.org/en/investigations?format=feed&type=rss", "tier": 2},
 ]
 
 CUTOFF = datetime.now(timezone.utc) - timedelta(days=30)
