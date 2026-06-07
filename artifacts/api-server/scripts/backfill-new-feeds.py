@@ -32,6 +32,11 @@ NEW_FEEDS = [
     {"id": "livemint-news",         "url": "https://www.livemint.com/rss/news",                          "tier": 2},
     {"id": "worldbank-blogs",       "url": "https://blogs.worldbank.org/feed/",                          "tier": 1},
     {"id": "occrp-investigations",  "url": "https://www.occrp.org/en/investigations?format=feed&type=rss", "tier": 2},
+    {"id": "indiatoday-economy",    "url": "https://www.indiatoday.in/rss/1206513",                      "tier": 2},
+    {"id": "indiatoday-home",       "url": "https://www.indiatoday.in/rss/home",                           "tier": 2},
+    {"id": "hindu-bl-news",         "url": "https://www.thehindubusinessline.com/news/feeder/default.rss",   "tier": 2},
+    {"id": "hindu-bl-commodities",   "url": "https://www.thehindubusinessline.com/markets/commodities/feeder/default.rss", "tier": 2},
+    {"id": "hindu-bl-markets",      "url": "https://www.thehindubusinessline.com/markets/feeder/default.rss", "tier": 2},
 ]
 
 CUTOFF = datetime.now(timezone.utc) - timedelta(days=30)
