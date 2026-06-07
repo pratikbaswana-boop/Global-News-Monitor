@@ -430,10 +430,14 @@ async function fetchArticlesFromDatabase(): Promise<RawArticle[]> {
       .orderBy(desc(rawArticlesTable.publishedAt))
       .limit(500);
 
-    return rows.map((row) => {
+    const seenUrls = new Set<string>();
+    const articles: RawArticle[] = [];
+    for (const row of rows) {
+      if (seenUrls.has(row.url)) continue;
+      seenUrls.add(row.url);
       const title = row.title ?? "";
       const body = row.body ?? "";
-      return {
+      articles.push({
         id: row.id,
         title,
         description: body,
@@ -445,8 +449,9 @@ async function fetchArticlesFromDatabase(): Promise<RawArticle[]> {
         category: classifyArticle(title, body),
         countries: extractCountries(title, body),
         leaders: extractLeaders(title, body),
-      };
-    });
+      });
+    }
+    return articles;
   } catch (err) {
     console.error("Failed to fetch articles from database:", err);
     return [];
@@ -477,10 +482,14 @@ async function searchArticlesFromDatabase(query: string): Promise<RawArticle[]> 
       .orderBy(desc(rawArticlesTable.publishedAt))
       .limit(200);
 
-    return rows.map((row) => {
+    const seenUrls = new Set<string>();
+    const articles: RawArticle[] = [];
+    for (const row of rows) {
+      if (seenUrls.has(row.url)) continue;
+      seenUrls.add(row.url);
       const title = row.title ?? "";
       const body = row.body ?? "";
-      return {
+      articles.push({
         id: row.id,
         title,
         description: body,
@@ -492,8 +501,9 @@ async function searchArticlesFromDatabase(query: string): Promise<RawArticle[]> 
         category: classifyArticle(title, body),
         countries: extractCountries(title, body),
         leaders: extractLeaders(title, body),
-      };
-    });
+      });
+    }
+    return articles;
   } catch (err) {
     console.error("Failed to search articles from database:", err);
     return [];

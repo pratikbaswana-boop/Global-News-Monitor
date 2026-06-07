@@ -34,9 +34,19 @@ async function processArticle(
   credibilityTier: number,
   isStateMedia: boolean
 ): Promise<void> {
+  // Fast path: skip if URL already exists (catches RSS re-fetches, cross-feed duplicates)
+  const existing = await db
+    .select({ id: rawArticlesTable.id })
+    .from(rawArticlesTable)
+    .where(eq(rawArticlesTable.url, url))
+    .limit(1);
+  if (existing.length > 0) {
+    return;
+  }
+
   const articleId = randomUUID();
 
-  // Step 1: Semantic deduplication
+  // Step 1: Semantic deduplication (catches near-duplicate rewrites)
   const dedupResult = await deduplicateArticle(articleId, title, body, credibilityTier);
 
   if (dedupResult.status === "duplicate") {
