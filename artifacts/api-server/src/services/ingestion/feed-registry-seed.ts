@@ -548,4 +548,138 @@ export const FEED_REGISTRY_SEED: InsertFeedRegistry[] = [
     fetchIntervalSeconds: 86400,
     parser: "fred",
   },
+
+  // ─── Tier-1 Wire: Business & Commodities ──────────────────────────────────
+  {
+    id: "reuters-commodities",
+    name: "Reuters Commodities",
+    url: "https://feeds.reuters.com/reuters/commoditiesNews",
+    type: "rss",
+    credibilityTier: 1,
+    isStateMedia: false,
+    fetchIntervalSeconds: 300,
+    parser: "rss",
+  },
+  {
+    id: "reuters-business",
+    name: "Reuters Business News",
+    url: "https://feeds.reuters.com/reuters/businessNews",
+    type: "rss",
+    credibilityTier: 1,
+    isStateMedia: false,
+    fetchIntervalSeconds: 300,
+    parser: "rss",
+  },
+
+  // ─── Tier-2: Energy, Oil & Commodities ──────────────────────────────────
+  {
+    id: "oilprice-energy",
+    name: "OilPrice Energy News",
+    url: "https://oilprice.com/rss/energy.xml",
+    type: "rss",
+    credibilityTier: 2,
+    isStateMedia: false,
+    fetchIntervalSeconds: 900,
+    parser: "rss",
+  },
+
+  // ─── Tier-2: India Business & Industry ────────────────────────────────────
+  {
+    id: "business-standard-all",
+    name: "Business Standard India",
+    url: "https://www.business-standard.com/rss/rss_xml.php?category=all",
+    type: "rss",
+    credibilityTier: 2,
+    isStateMedia: false,
+    fetchIntervalSeconds: 900,
+    parser: "rss",
+  },
+  {
+    id: "moneycontrol-news",
+    name: "Moneycontrol News",
+    url: "https://www.moneycontrol.com/rss/news.xml",
+    type: "rss",
+    credibilityTier: 2,
+    isStateMedia: false,
+    fetchIntervalSeconds: 900,
+    parser: "rss",
+  },
+  {
+    id: "et-industry",
+    name: "Economic Times Industry",
+    url: "https://economictimes.indiatimes.com/industry/rssfeeds/13352306.cms",
+    type: "rss",
+    credibilityTier: 2,
+    isStateMedia: false,
+    fetchIntervalSeconds: 900,
+    parser: "rss",
+  },
+
+  // ─── Tier-2: Terrorism, Security & Defense ──────────────────────────────
+  {
+    id: "long-war-journal",
+    name: "Long War Journal",
+    url: "https://www.longwarjournal.org/feed/",
+    type: "rss",
+    credibilityTier: 2,
+    isStateMedia: false,
+    fetchIntervalSeconds: 900,
+    parser: "rss",
+  },
+  {
+    id: "defense-news",
+    name: "Defense News",
+    url: "https://www.defensenews.com/arc/outboundfeeds/rss/?outputType=xml",
+    type: "rss",
+    credibilityTier: 2,
+    isStateMedia: false,
+    fetchIntervalSeconds: 900,
+    parser: "rss",
+  },
+
+  // ─── Tier-2: Fraud, Corruption & Investigative ────────────────────────────
+  {
+    id: "occrp",
+    name: "OCCRP Organized Crime",
+    url: "https://www.occrp.org/en/rss",
+    type: "rss",
+    credibilityTier: 2,
+    isStateMedia: false,
+    fetchIntervalSeconds: 900,
+    parser: "rss",
+  },
+  {
+    id: "icij",
+    name: "ICIJ Investigations",
+    url: "https://www.icij.org/feed/",
+    type: "rss",
+    credibilityTier: 2,
+    isStateMedia: false,
+    fetchIntervalSeconds: 1800,
+    parser: "rss",
+  },
+
+  // ─── Tier-2: Market-moving Global ────────────────────────────────────────
+  {
+    id: "cnbc-top",
+    name: "CNBC Top News",
+    url: "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+    type: "rss",
+    credibilityTier: 2,
+    isStateMedia: false,
+    fetchIntervalSeconds: 900,
+    parser: "rss",
+  },
+
+  // ─── Tier-1 Official: Development & Projects ─────────────────────────────
+  {
+    id: "worldbank-news",
+    name: "World Bank News",
+    url: "https://www.worldbank.org/en/news/all/rss",
+    type: "rss",
+    credibilityTier: 1,
+    isStateMedia: false,
+    fetchIntervalSeconds: 1800,
+    parser: "rss",
+  },
 ];
