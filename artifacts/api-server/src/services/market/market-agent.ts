@@ -9,7 +9,7 @@ import type { RegimeState } from "./hmm-regime.js";
 import type { ForecasterTree } from "../reasoning/agent-forecaster.js";
 import { runCypher } from "../graph/neo4j-client.js";
 import { fetchTier3Snapshot, computeTier3Score, type Tier3Snapshot } from "./tier3-fetcher.js";
-import type { SectorDeltas } from "./nse-direct-scraper.js";
+import { firecrawlFetchJson, type SectorDeltas } from "./nse-direct-scraper.js";
 import { checkCandleTrust, type CandleTrustResult, type OHLCV } from "./candle-trust.js";
 import { randomUUID } from "crypto";
 
@@ -43,6 +43,10 @@ export interface MarketSignal {
     deliveryPct: number | null;
     indiaVix5dChange: number | null;
     tier3Score: number;
+    maxPainStrike: number | null;
+    maxPainDistancePct: number | null;
+    sgxNiftyChangePct: number | null;
+    shortCoveringSignal: "none" | "covering" | "unwinding";
   };
   candleTrustScore: number;
   candleFlags: string[];
@@ -292,10 +296,7 @@ async function fetchYahooOHLCV(symbol: string, days = 25): Promise<YahooOHLCV[] 
   try {
     const yahooSymbol = symbol.endsWith(".NS") ? symbol : `${symbol}.NS`;
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?interval=1d&range=${Math.ceil(days * 1.5)}d`;
-    const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" }, signal: AbortSignal.timeout(12000) });
-    if (!res.ok) return null;
-
-    const json = await res.json() as {
+    let json: {
       chart?: {
         result?: Array<{
           timestamp?: number[];
@@ -311,6 +312,14 @@ async function fetchYahooOHLCV(symbol: string, days = 25): Promise<YahooOHLCV[] 
         }>;
       };
     };
+    try {
+      const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" }, signal: AbortSignal.timeout(12000) });
+      if (!res.ok) throw new Error(`Yahoo returned HTTP ${res.status}`);
+      json = await res.json() as typeof json;
+    } catch (err) {
+      logger.warn({ symbol, err: err instanceof Error ? err.message : err }, "market-agent: Yahoo OHLCV direct failed — trying Firecrawl");
+      json = await firecrawlFetchJson<typeof json>(url);
+    }
 
     const result = json.chart?.result?.[0];
     if (!result) return null;
@@ -388,6 +397,15 @@ function applyFlipGuard(
       emitFlip: false,
       confirmedDirection: guard.confirmedDirection,
       updatedGuard: { pendingDirection: null, pendingCount: 0, confirmedDirection: guard.confirmedDirection },
+    };
+  }
+
+  // From uncertain, accept any clear direction immediately (no 2-signal wait)
+  if (guard.confirmedDirection === "uncertain" && newDirection !== "uncertain") {
+    return {
+      emitFlip: true,
+      confirmedDirection: newDirection,
+      updatedGuard: { pendingDirection: null, pendingCount: 0, confirmedDirection: newDirection },
     };
   }
 
@@ -579,10 +597,13 @@ CURRENT SESSION DATA (use this, not historical closes):
 - Advance/decline ratio: ${tier3.advanceDeclineRatio !== null ? tier3.advanceDeclineRatio.toFixed(2) + " (above 1.5=bullish breadth)" : "unavailable — NSE direct API disabled on this server"}
 - India VIX: ${tier3.indiaVix !== null ? tier3.indiaVix.toFixed(1) + " (5d change: " + (tier3.indiaVix5dChange !== null && tier3.indiaVix5dChange > 0 ? "+" : "") + (tier3.indiaVix5dChange !== null ? tier3.indiaVix5dChange.toFixed(1) : "N/A") + ")" : "unavailable — NSE direct API disabled on this server"}
 - Live implied volatility: ${tier3.impliedVolPct !== null ? tier3.impliedVolPct.toFixed(1) + "%" : "unavailable — NSE direct API disabled on this server"}
+- Max pain strike: ${tier3.maxPainStrike !== null ? tier3.maxPainStrike.toFixed(0) + " (distance: " + (tier3.maxPainDistancePct !== null ? (tier3.maxPainDistancePct > 0 ? "+" : "") + tier3.maxPainDistancePct.toFixed(2) + "%" : "N/A") + ")" : "unavailable"}
+- SGX Nifty pre-market: ${tier3.sgxNiftyChangePct !== null ? (tier3.sgxNiftyChangePct > 0 ? "+" : "") + tier3.sgxNiftyChangePct.toFixed(2) + "%" : "unavailable"}
+- Short covering signal: ${tier3.shortCoveringSignal} (${tier3.shortCoveringSignal === "covering" ? "high PCR + falling OI + falling VIX = shorts buying back, bullish" : tier3.shortCoveringSignal === "unwinding" ? "low PCR + rising OI + rising VIX = fresh shorts, bearish" : "no clear short covering pattern"})
 SECTORAL CONTEXT (intraday, updates every 5 minutes):
 ${sectoralNarrative}
 ${sectoralLine}
-Weight rule: Bank Nifty leading NIFTY up by >0.5% is the single strongest intraday signal for institutional conviction. Weight this above candle patterns.
+Weight rule: Bank Nifty leading NIFTY up by >0.5% is the single strongest intraday signal for institutional conviction. Weight this above candle patterns. If short covering is active, the upside can be 1.5-2% because there are no sellers left.
 HMM REGIME: ${currentRegime} (active for ${regimeAge} consecutive cycles)
 REGIME INSTRUCTION: If regime says RISK_OFF but live microstructure data is unavailable, rely on candle quality, price momentum, and geopolitical channels instead. Do not default to NEUTRAL just because NSE data is missing.
 ACTIVE GEOPOLITICAL CHANNELS (only channels with daysSinceTrigger <= 3 and decayedWeight > 0.3):
@@ -602,6 +623,8 @@ INSTITUTIONAL CONVICTION (this is the primary signal for this window):
 - Delivery %: ${tier3.deliveryPct !== null ? tier3.deliveryPct.toFixed(1) + "%" : "not yet available (intraday)"}
 - Open interest change: ${tier3.openInterestChange > 0 ? "+" : ""}${tier3.openInterestChange.toFixed(1)}% (positive=new positions=conviction)
 - Put/call ratio: ${tier3.putCallRatio !== null ? tier3.putCallRatio.toFixed(2) : "unavailable — NSE direct API disabled"}
+- Short covering assessment: ${tier3.shortCoveringSignal} (${tier3.shortCoveringSignal === "covering" ? "bullish — shorts are trapped, no sellers left" : tier3.shortCoveringSignal === "unwinding" ? "bearish — fresh shorts entering" : "neutral — no clear pattern"})
+- Max pain pin level: ${tier3.maxPainStrike !== null ? tier3.maxPainStrike.toFixed(0) : "unavailable"} (market makers may pull price toward this at expiry)
 MACRO (secondary signal):
 - INR/USD: ${tier3.inrUsdRate.toFixed(2)} (5d change: ${tier3.inrUsd5dChangePct > 0 ? "+" : ""}${tier3.inrUsd5dChangePct.toFixed(2)}%)
 - 10Y yield: ${tier3.yield10Y.toFixed(2)}% (5d change: ${tier3.yield10Y5dChangeBps > 0 ? "+" : ""}${tier3.yield10Y5dChangeBps.toFixed(0)} bps)
@@ -627,6 +650,8 @@ OPTIONS STRUCTURE (3-day view):
 - Put/call ratio: ${tier3.putCallRatio !== null ? tier3.putCallRatio.toFixed(2) : "unavailable — NSE direct API disabled"}
 - Implied volatility: ${tier3.impliedVolPct !== null ? tier3.impliedVolPct.toFixed(1) + "%" : "unavailable — NSE direct API disabled"}
 - OI change trend: ${tier3.openInterestChange > 0 ? "building" : "unwinding"} (${tier3.openInterestChange > 0 ? "+" : ""}${tier3.openInterestChange.toFixed(1)}%)
+- Max pain strike: ${tier3.maxPainStrike !== null ? tier3.maxPainStrike.toFixed(0) : "unavailable"} (if price >1.5% away, expect pin toward expiry)
+- Short covering signal: ${tier3.shortCoveringSignal} (structural view: covering rallies can extend 1.5-2%)
 ACTIVE GEOPOLITICAL SCENARIOS (structural, 72h view):
 ${activeScenariosWithDecay.map(s => `- ${s.label} (prob: ${(s.probability * 100).toFixed(0)}%, channel: ${s.channel}, decay: ${s.decayFactor.toFixed(2)})`).join("\n") || "- none"}
 HMM REGIME: ${currentRegime} (${regimeAge} cycles). Weight this at 30% of your reasoning. Macro signals above are 70%.
@@ -721,6 +746,10 @@ Return JSON: { "call": "BULLISH" | "BEARISH" | "NEUTRAL", "confidence": 0.0-1.0,
       deliveryPct: tier3.deliveryPct,
       indiaVix5dChange: tier3.indiaVix5dChange,
       tier3Score,
+      maxPainStrike: tier3.maxPainStrike,
+      maxPainDistancePct: tier3.maxPainDistancePct,
+      sgxNiftyChangePct: tier3.sgxNiftyChangePct,
+      shortCoveringSignal: tier3.shortCoveringSignal,
     },
     candleTrustScore: candleTrust.trustScore,
     candleFlags: candleTrust.flags,

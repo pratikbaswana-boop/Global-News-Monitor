@@ -46,6 +46,12 @@ export const marketSnapshotsTable = pgTable("market_snapshots", {
   candleFlags: text("candle_flags"),                       // JSON array of flags
   regimeAge: integer("regime_age"),                      // consecutive cycles HMM has been in current state
   channelDecaySummary: text("channel_decay_summary"),    // JSON: active channels after decay
+
+  // ── New Phase-6: Max Pain + SGX Nifty + Short Covering ──
+  maxPainStrike: numeric("max_pain_strike"),               // computed max pain strike price
+  maxPainDistancePct: real("max_pain_distance_pct"),     // (underlying - maxPain) / maxPain * 100
+  sgxNiftyChangePct: real("sgx_nifty_change_pct"),       // pre-market SGX Nifty % change
+  shortCoveringSignal: text("short_covering_signal"),       // "none" | "covering" | "unwinding"
 });
 
 export const insertMarketSnapshotSchema = createInsertSchema(marketSnapshotsTable).omit({

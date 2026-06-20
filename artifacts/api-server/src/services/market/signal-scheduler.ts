@@ -16,22 +16,20 @@ function isWeekend(): boolean {
 
 function msUntil9AM_IST(): number {
   const now = new Date();
-  const istMs = now.getTime() + 330 * 60 * 1000;
-  const istDate = new Date(istMs);
-  istDate.setUTCHours(3, 30, 0, 0); // 09:00 IST = 03:30 UTC
-  let targetMs = istDate.getTime() - 330 * 60 * 1000;
-
-  if (targetMs <= now.getTime()) {
-    targetMs += 24 * 60 * 60 * 1000; // next day
+  // 09:00 IST = 03:30 UTC. Target is today at 03:30 UTC.
+  const target = new Date(now);
+  target.setUTCHours(3, 30, 0, 0);
+  if (target.getTime() <= now.getTime()) {
+    target.setUTCDate(target.getUTCDate() + 1);
   }
   // Skip weekends
   while (true) {
-    const targetISTDay = new Date(targetMs + 330 * 60 * 1000).getUTCDay();
+    const targetISTDay = new Date(target.getTime() + 330 * 60 * 1000).getUTCDay();
     if (targetISTDay !== 0 && targetISTDay !== 6) break;
-    targetMs += 24 * 60 * 60 * 1000;
+    target.setUTCDate(target.getUTCDate() + 1);
+    target.setUTCHours(3, 30, 0, 0);
   }
-
-  return targetMs - now.getTime();
+  return target.getTime() - now.getTime();
 }
 
 async function runDailySignalSnapshot(): Promise<void> {

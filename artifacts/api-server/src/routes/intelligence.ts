@@ -1466,6 +1466,11 @@ interface AIPrediction {
   _activeChannels?: string[];
   _ensembleVotes?: Record<string, unknown>[];
   _uncertaintyFlag?: boolean;
+  // ── New Phase-6 fields ──
+  _maxPainStrike?: number | null;
+  _maxPainDistancePct?: number | null;
+  _sgxNiftyChangePct?: number | null;
+  _shortCoveringSignal?: "none" | "covering" | "unwinding";
 }
 
 const _aiPredictionCache = new Map<string, { prediction: AIPrediction; fetchedAt: number }>();
@@ -2384,6 +2389,11 @@ async function saveSnapshot(
     activeChannels?: string[];
     ensembleVotes?: Record<string, unknown>[];
     uncertaintyFlag?: boolean;
+    // ── New Phase-6 fields ──
+    maxPainStrike?: number | null;
+    maxPainDistancePct?: number | null;
+    sgxNiftyChangePct?: number | null;
+    shortCoveringSignal?: "none" | "covering" | "unwinding";
   }
 ): Promise<void> {
   try {
@@ -2462,6 +2472,11 @@ async function saveSnapshot(
       ...(extra?.regime ? { regimeAtSnapshot: extra.regime } : {}),
       ...(extra?.activeChannels ? { activeChannels: JSON.stringify(extra.activeChannels) } : {}),
       ...(extra?.uncertaintyFlag !== undefined ? { uncertaintyFlag: extra.uncertaintyFlag } : {}),
+      // ── Phase-6 fields ──
+      ...(extra?.maxPainStrike !== undefined && extra.maxPainStrike !== null ? { maxPainStrike: extra.maxPainStrike.toString() } : {}),
+      ...(extra?.maxPainDistancePct !== undefined ? { maxPainDistancePct: extra.maxPainDistancePct } : {}),
+      ...(extra?.sgxNiftyChangePct !== undefined ? { sgxNiftyChangePct: extra.sgxNiftyChangePct } : {}),
+      ...(extra?.shortCoveringSignal !== undefined ? { shortCoveringSignal: extra.shortCoveringSignal } : {}),
     });
   } catch {
     // Non-fatal
@@ -2472,6 +2487,166 @@ function isWeekendForDate(date: Date): boolean {
   const istMs = date.getTime() + 330 * 60 * 1000;
   const istDay = new Date(istMs).getUTCDay();
   return istDay === 0 || istDay === 6;
+}
+
+// ── Option Trade Signal Derivation ───────────────────────────────────────────
+// Conservative rules: only fire when all indicators align. Default = NO_TRADE.
+
+interface OptionSignal {
+  signal: "BUY_CALL" | "BUY_PUT" | "NO_TRADE";
+  reason: string;
+  suggestedStrike: number | null;
+  targetPct: number | null;
+  stopLossPct: number | null;
+}
+
+function deriveOptionSignal(
+  aiDirection: "up" | "down" | "neutral",
+  aiConfidence: "high" | "medium" | "low",
+  maxPainDistancePct: number | null,
+  shortCoveringSignal: "none" | "covering" | "unwinding",
+  sgxNiftyChangePct: number | null,
+  putCallRatio: number | null,
+  realPrice: number | null,
+  currentPriceChangePct: number | null = null,
+): OptionSignal {
+  // ── Tier-3 data quality gate ───────────────────────────────────────────────
+  // If ALL critical tier-3 metrics are missing, we cannot make an informed
+  // option decision → NO_TRADE (not "follow AI blindly").
+  const hasMaxPain = maxPainDistancePct !== null;
+  const hasPcr = putCallRatio !== null;
+  const hasSgx = sgxNiftyChangePct !== null;
+  if (!hasMaxPain && !hasPcr && !hasSgx) {
+    return { signal: "NO_TRADE", reason: "Insufficient options data — waiting for tier-3 metrics", suggestedStrike: null, targetPct: null, stopLossPct: null };
+  }
+
+  // ── REVERSAL DETECTION (Tier-3 overrides AI direction when stretched) ─────
+
+  // 1. Max Pain stretch → fade the move (take opposite side)
+  if (hasMaxPain && maxPainDistancePct! > 1.5) {
+    return {
+      signal: "BUY_PUT",
+      reason: `Price +${maxPainDistancePct!.toFixed(1)}% above max pain — stretched, expect pullback`,
+      suggestedStrike: realPrice ? Math.round(realPrice / 50) * 50 : null,
+      targetPct: -0.8,
+      stopLossPct: 0.6,
+    };
+  }
+  if (hasMaxPain && maxPainDistancePct! < -1.5) {
+    return {
+      signal: "BUY_CALL",
+      reason: `Price ${maxPainDistancePct!.toFixed(1)}% below max pain — oversold, expect bounce`,
+      suggestedStrike: realPrice ? Math.round(realPrice / 50) * 50 : null,
+      targetPct: 0.8,
+      stopLossPct: 0.6,
+    };
+  }
+
+  // 2. PCR extremes → contrarian reversal
+  if (hasPcr && putCallRatio! < 0.65) {
+    return {
+      signal: "BUY_PUT",
+      reason: `PCR ${putCallRatio!.toFixed(2)} — too bullish, crowded long side, fade the move`,
+      suggestedStrike: realPrice ? Math.round(realPrice / 50) * 50 : null,
+      targetPct: -0.8,
+      stopLossPct: 0.6,
+    };
+  }
+  if (hasPcr && putCallRatio! > 1.35) {
+    return {
+      signal: "BUY_CALL",
+      reason: `PCR ${putCallRatio!.toFixed(2)} — too bearish, crowded short side, expect bounce`,
+      suggestedStrike: realPrice ? Math.round(realPrice / 50) * 50 : null,
+      targetPct: 0.8,
+      stopLossPct: 0.6,
+    };
+  }
+
+  // ── TREND CONTINUATION (Tier-3 confirms AI direction) ──────────────────────
+
+  // 3. Short covering → ride the momentum in the direction of covering
+  if (shortCoveringSignal === "covering") {
+    return {
+      signal: "BUY_CALL",
+      reason: "Short covering active — shorts trapped, ride the squeeze",
+      suggestedStrike: realPrice ? Math.round(realPrice / 50) * 50 : null,
+      targetPct: aiConfidence === "high" ? 1.2 : 0.8,
+      stopLossPct: 0.5,
+    };
+  }
+  if (shortCoveringSignal === "unwinding") {
+    return {
+      signal: "BUY_PUT",
+      reason: "Fresh shorts entering — momentum building on downside",
+      suggestedStrike: realPrice ? Math.round(realPrice / 50) * 50 : null,
+      targetPct: aiConfidence === "high" ? -1.2 : -0.8,
+      stopLossPct: 0.5,
+    };
+  }
+
+  // 4. SGX divergence check → if global disagrees with AI, NO_TRADE
+  if (hasSgx && aiDirection === "up" && sgxNiftyChangePct! < -0.8) {
+    return { signal: "NO_TRADE", reason: `SGX Nifty down ${sgxNiftyChangePct!.toFixed(1)}% — global divergence, skip long`, suggestedStrike: null, targetPct: null, stopLossPct: null };
+  }
+  if (hasSgx && aiDirection === "down" && sgxNiftyChangePct! > 0.8) {
+    return { signal: "NO_TRADE", reason: `SGX Nifty up +${sgxNiftyChangePct!.toFixed(1)}% — global divergence, skip short`, suggestedStrike: null, targetPct: null, stopLossPct: null };
+  }
+
+  // 5. Max Pain mild conflict → NO_TRADE (not stretched enough for reversal, but not aligned)
+  if (hasMaxPain && Math.abs(maxPainDistancePct!) > 1.0) {
+    return { signal: "NO_TRADE", reason: `Price ${maxPainDistancePct! > 0 ? "+" : ""}${maxPainDistancePct!.toFixed(1)}% from max pain — not stretched enough for reversal`, suggestedStrike: null, targetPct: null, stopLossPct: null };
+  }
+
+  // ── INTRADAY PRICE STOP / ENTRY (early entry, quick cut) ────────────────────
+  const hasPrice = currentPriceChangePct !== null;
+  if (hasPrice) {
+    // Early entry: market moves with AI direction — get in before the full move
+    if (aiDirection === "up" && currentPriceChangePct! > 0.20) {
+      return { signal: "BUY_CALL", reason: `Intraday up +${currentPriceChangePct!.toFixed(2)}% — early bullish confirmation, riding momentum`, suggestedStrike: realPrice ? Math.round(realPrice / 50) * 50 : null, targetPct: aiConfidence === "high" ? 1.0 : 0.7, stopLossPct: 0.35 };
+    }
+    if (aiDirection === "down" && currentPriceChangePct! < -0.20) {
+      return { signal: "BUY_PUT", reason: `Intraday down ${currentPriceChangePct!.toFixed(2)}% — early bearish confirmation, riding momentum`, suggestedStrike: realPrice ? Math.round(realPrice / 50) * 50 : null, targetPct: aiConfidence === "high" ? -1.0 : -0.7, stopLossPct: 0.35 };
+    }
+    // Stop loss: market moves against AI direction → cut fast
+    if (aiDirection === "up" && currentPriceChangePct! < -0.35) {
+      return { signal: "NO_TRADE", reason: `Intraday down ${currentPriceChangePct!.toFixed(2)}% — bullish setup broken, exit long`, suggestedStrike: null, targetPct: null, stopLossPct: null };
+    }
+    if (aiDirection === "down" && currentPriceChangePct! > 0.35) {
+      return { signal: "NO_TRADE", reason: `Intraday up +${currentPriceChangePct!.toFixed(2)}% — bearish setup broken, exit short`, suggestedStrike: null, targetPct: null, stopLossPct: null };
+    }
+    // Tiny drift → wait (don't chase yet)
+    if (aiDirection === "up" && currentPriceChangePct! < -0.10) {
+      return { signal: "NO_TRADE", reason: `Intraday drift ${currentPriceChangePct!.toFixed(2)}% — waiting for bullish push`, suggestedStrike: null, targetPct: null, stopLossPct: null };
+    }
+    if (aiDirection === "down" && currentPriceChangePct! > 0.10) {
+      return { signal: "NO_TRADE", reason: `Intraday drift +${currentPriceChangePct!.toFixed(2)}% — waiting for bearish push`, suggestedStrike: null, targetPct: null, stopLossPct: null };
+    }
+  }
+
+  // ── DEFAULT TO AI DIRECTION (Tier-3 neutral, no reversal detected) ─────────
+
+  if (aiDirection === "up") {
+    return {
+      signal: "BUY_CALL",
+      reason: "AI bullish + tier-3 neutral — trend continuation play",
+      suggestedStrike: realPrice ? Math.round(realPrice / 50) * 50 : null,
+      targetPct: aiConfidence === "high" ? 1.2 : 0.8,
+      stopLossPct: 0.5,
+    };
+  }
+
+  if (aiDirection === "down") {
+    return {
+      signal: "BUY_PUT",
+      reason: "AI bearish + tier-3 neutral — trend continuation play",
+      suggestedStrike: realPrice ? Math.round(realPrice / 50) * 50 : null,
+      targetPct: aiConfidence === "high" ? -1.2 : -0.8,
+      stopLossPct: 0.5,
+    };
+  }
+
+  // aiDirection === "neutral"
+  return { signal: "NO_TRADE", reason: "AI direction neutral — no clear option edge", suggestedStrike: null, targetPct: null, stopLossPct: null };
 }
 
 // Adapt a DB market_snapshots row into the response asset shape so the UI
@@ -2496,6 +2671,11 @@ async function adaptSnapshotToAsset(
   currentRealPrice: number | null;
   lessonsFromPastFailures: string | null;
   recentHistory: Array<unknown>;
+  optionSignal: "BUY_CALL" | "BUY_PUT" | "NO_TRADE";
+  optionSignalReason: string;
+  suggestedStrike: number | null;
+  targetPct: number | null;
+  stopLossPct: number | null;
 }> {
   const history = recentHistory.map((r) => {
     const status: "pending" | "correct" | "incorrect" = r.resolvedAt !== null
@@ -2506,7 +2686,7 @@ async function adaptSnapshotToAsset(
       assetId: r.assetId,
       assetName: r.assetName,
       assetSymbol: r.assetSymbol,
-      predictedDirection: r.predictedDirection as "up" | "down" | "neutral",
+      predictedDirection: (r.predictedDirection === "uncertain" ? "neutral" : r.predictedDirection) as "up" | "down" | "neutral",
       predictedMagnitude: r.predictedMagnitude as "strong" | "moderate" | "mild",
       predictedConfidence: r.predictedConfidence as "high" | "medium" | "low",
       priceImpactEstimate: r.priceImpactEstimate,
@@ -2530,7 +2710,12 @@ async function adaptSnapshotToAsset(
       lessonsLearned: r.lessonsLearned ?? null,
       status,
     };
-  });
+  }).filter((h, idx) => {
+    // Always show the most recent snapshot (current signal).
+    // For older entries, only show resolved ones with actual price data.
+    if (idx === 0) return true;
+    return h.status !== "pending" && h.priceChangePct !== null;
+  }).slice(0, 5);
 
   // Re-synthesize bull/bear signal items from the persisted ensemble votes so
   // the UI's "BULL SIGNALS (n) — m pts" row shows the agent's actual reasoning,
@@ -2543,8 +2728,9 @@ async function adaptSnapshotToAsset(
       const votes = JSON.parse(snapshot.ensembleVotes) as Array<{
         window: "6h" | "24h" | "72h"; call: string; confidence: number; rationale?: string;
       }>;
+      const tier3Json = snapshot.tier3Evidence ? JSON.parse(snapshot.tier3Evidence) as Record<string, unknown> : {};
       const fakeSignal: MarketSignal = {
-        direction: snapshot.predictedDirection as "up" | "down" | "neutral",
+        direction: (snapshot.predictedDirection === "uncertain" ? "neutral" : snapshot.predictedDirection) as "up" | "down" | "neutral",
         magnitude: snapshot.predictedMagnitude as "strong" | "moderate" | "mild",
         confidence: snapshot.predictedConfidence as "high" | "medium" | "low",
         timeframe: "intraday",
@@ -2563,7 +2749,16 @@ async function adaptSnapshotToAsset(
         uncertaintyFlag: snapshot.uncertaintyFlag ?? false,
         priceScore: snapshot.priceScore ?? 0,
         flipConfirmed: snapshot.flipConfirmed ?? false,
-        tier3Evidence: { fiiNetCrore: 0, fiiIsStale: true, putCallRatio: null, advanceDeclineRatio: null, deliveryPct: null, indiaVix5dChange: null, tier3Score: 0 },
+        tier3Evidence: {
+          fiiNetCrore: 0, fiiIsStale: true,
+          putCallRatio: typeof tier3Json.putCallRatio === "number" ? tier3Json.putCallRatio : null,
+          advanceDeclineRatio: typeof tier3Json.advanceDeclineRatio === "number" ? tier3Json.advanceDeclineRatio : null,
+          deliveryPct: null, indiaVix5dChange: null, tier3Score: 0,
+          maxPainStrike: snapshot.maxPainStrike ? Number(snapshot.maxPainStrike) : null,
+          maxPainDistancePct: snapshot.maxPainDistancePct ?? null,
+          sgxNiftyChangePct: snapshot.sgxNiftyChangePct ?? null,
+          shortCoveringSignal: (snapshot.shortCoveringSignal as "none" | "covering" | "unwinding") ?? "none",
+        },
         candleTrustScore: snapshot.candleTrustScore ?? 0,
         candleFlags: snapshot.candleFlags ? JSON.parse(snapshot.candleFlags) : [],
         regimeAge: snapshot.regimeAge ?? 0,
@@ -2577,11 +2772,27 @@ async function adaptSnapshotToAsset(
     }
   }
 
+  const tier3Json = snapshot.tier3Evidence ? JSON.parse(snapshot.tier3Evidence) as Record<string, unknown> : {};
+  const snapshotPrice = snapshot.realPriceAtSnapshot !== null ? parseFloat(snapshot.realPriceAtSnapshot) : null;
+  const currentPriceChangePct = (realPrice !== null && snapshotPrice !== null && snapshotPrice > 0)
+    ? ((realPrice - snapshotPrice) / snapshotPrice) * 100
+    : null;
+  const optionSig = deriveOptionSignal(
+    (snapshot.predictedDirection === "uncertain" ? "neutral" : snapshot.predictedDirection) as "up" | "down" | "neutral",
+    snapshot.predictedConfidence as "high" | "medium" | "low",
+    snapshot.maxPainDistancePct,
+    (snapshot.shortCoveringSignal as "none" | "covering" | "unwinding") ?? "none",
+    snapshot.sgxNiftyChangePct,
+    typeof tier3Json.putCallRatio === "number" ? tier3Json.putCallRatio : null,
+    realPrice,
+    currentPriceChangePct,
+  );
+
   return {
     id: asset.id,
     name: asset.name,
     symbol: asset.symbol,
-    direction: snapshot.predictedDirection as "up" | "down" | "neutral",
+    direction: (snapshot.predictedDirection === "uncertain" ? "neutral" : snapshot.predictedDirection) as "up" | "down" | "neutral",
     magnitude: snapshot.predictedMagnitude as "strong" | "moderate" | "mild",
     confidence: snapshot.predictedConfidence as "high" | "medium" | "low",
     timeframe: snapshot.timeframe,
@@ -2604,6 +2815,11 @@ async function adaptSnapshotToAsset(
     currentRealPrice: realPrice,
     lessonsFromPastFailures: lessons,
     recentHistory: history,
+    optionSignal: optionSig.signal,
+    optionSignalReason: optionSig.reason,
+    suggestedStrike: optionSig.suggestedStrike,
+    targetPct: optionSig.targetPct,
+    stopLossPct: optionSig.stopLossPct,
   };
 }
 
@@ -2633,7 +2849,7 @@ router.get("/intelligence/market-signals", async (req, res) => {
           db.select().from(marketSnapshotsTable)
             .where(eq(marketSnapshotsTable.assetId, a.id))
             .orderBy(desc(marketSnapshotsTable.snapshotAt))
-            .limit(5)
+            .limit(20)
             .catch(() => []),
         )),
         Promise.all(ASSET_TEMPLATES.map((a) => getLessonsFromFailures(a.id))),
@@ -2731,7 +2947,7 @@ router.get("/intelligence/market-signals", async (req, res) => {
           .from(marketSnapshotsTable)
           .where(eq(marketSnapshotsTable.assetId, a.id))
           .orderBy(desc(marketSnapshotsTable.snapshotAt))
-          .limit(5);
+          .limit(20);
         return rows;
       } catch { return []; }
     })),
@@ -2824,6 +3040,10 @@ router.get("/intelligence/market-signals", async (req, res) => {
             _activeChannels: signal.activeChannels,
             _ensembleVotes: signal.ensembleVotes as unknown as Record<string, unknown>[],
             _uncertaintyFlag: signal.uncertaintyFlag,
+            _maxPainStrike: signal.tier3Evidence.maxPainStrike,
+            _maxPainDistancePct: signal.tier3Evidence.maxPainDistancePct,
+            _sgxNiftyChangePct: signal.tier3Evidence.sgxNiftyChangePct,
+            _shortCoveringSignal: signal.tier3Evidence.shortCoveringSignal,
           };
         } catch {
           // fall through to legacy path
@@ -2875,6 +3095,10 @@ router.get("/intelligence/market-signals", async (req, res) => {
         activeChannels: ai._activeChannels,
         ensembleVotes: ai._ensembleVotes,
         uncertaintyFlag: ai._uncertaintyFlag,
+        maxPainStrike: ai._maxPainStrike,
+        maxPainDistancePct: ai._maxPainDistancePct,
+        sgxNiftyChangePct: ai._sgxNiftyChangePct,
+        shortCoveringSignal: ai._shortCoveringSignal,
       }
     );
 
@@ -2882,17 +3106,15 @@ router.get("/intelligence/market-signals", async (req, res) => {
     let resolveAfter: string;
     if (timeframe === "today") {
       const now = new Date();
-      const istMs = now.getTime() + 330 * 60 * 1000;
-      const istDate = new Date(istMs);
-      istDate.setUTCHours(10, 0, 0, 0); // 15:30 IST = 10:00 UTC
-      let targetMs = istDate.getTime() - 330 * 60 * 1000;
-      if (targetMs <= now.getTime()) {
-        targetMs += 24 * 60 * 60 * 1000;
-        while (isWeekendForDate(new Date(targetMs))) {
-          targetMs += 24 * 60 * 60 * 1000;
+      const target = new Date(now);
+      target.setUTCHours(10, 0, 0, 0); // 15:30 IST market close
+      if (target.getTime() <= now.getTime()) {
+        target.setTime(target.getTime() + 24 * 60 * 60 * 1000);
+        while (isWeekendForDate(target)) {
+          target.setTime(target.getTime() + 24 * 60 * 60 * 1000);
         }
       }
-      resolveAfter = new Date(targetMs).toISOString();
+      resolveAfter = target.toISOString();
     } else {
       resolveAfter = new Date(Date.now() + timeframeToMs(timeframe)).toISOString();
     }
@@ -2907,7 +3129,7 @@ router.get("/intelligence/market-signals", async (req, res) => {
         assetId: r.assetId,
         assetName: r.assetName,
         assetSymbol: r.assetSymbol,
-        predictedDirection: r.predictedDirection as "up" | "down" | "neutral",
+        predictedDirection: (r.predictedDirection === "uncertain" ? "neutral" : r.predictedDirection) as "up" | "down" | "neutral",
         predictedMagnitude: r.predictedMagnitude as "strong" | "moderate" | "mild",
         predictedConfidence: r.predictedConfidence as "high" | "medium" | "low",
         priceImpactEstimate: r.priceImpactEstimate,
@@ -2935,6 +3157,17 @@ router.get("/intelligence/market-signals", async (req, res) => {
 
     // Normalize direction for API contract (schema rejects "uncertain")
     const apiDirection: "up" | "down" | "neutral" = direction === "uncertain" ? "neutral" : direction;
+
+    const optionSig = deriveOptionSignal(
+      apiDirection,
+      confidence,
+      ai._maxPainDistancePct ?? null,
+      (ai._shortCoveringSignal as "none" | "covering" | "unwinding") ?? "none",
+      ai._sgxNiftyChangePct ?? null,
+      typeof ai._tier3Evidence?.putCallRatio === "number" ? ai._tier3Evidence.putCallRatio : null,
+      realPrice,
+      null, // new snapshot — price change computed on refresh cycle
+    );
 
     return {
       id: asset.id,
@@ -2969,6 +3202,11 @@ router.get("/intelligence/market-signals", async (req, res) => {
       currentRealPrice: realPrice,
       lessonsFromPastFailures: assetLessons[idx] ?? null,
       recentHistory,
+      optionSignal: optionSig.signal,
+      optionSignalReason: optionSig.reason,
+      suggestedStrike: optionSig.suggestedStrike,
+      targetPct: optionSig.targetPct,
+      stopLossPct: optionSig.stopLossPct,
     };
   });
 
@@ -3152,6 +3390,10 @@ router.post("/intelligence/market-signals/trigger", async (req, res) => {
           activeChannels: ai._activeChannels,
           ensembleVotes: ai._ensembleVotes,
           uncertaintyFlag: ai._uncertaintyFlag,
+          maxPainStrike: ai._maxPainStrike,
+          maxPainDistancePct: ai._maxPainDistancePct,
+          sgxNiftyChangePct: ai._sgxNiftyChangePct,
+          shortCoveringSignal: ai._shortCoveringSignal,
         }
       );
     }
@@ -3186,7 +3428,7 @@ router.get("/intelligence/track-record", async (req, res) => {
       assetId: r.assetId,
       assetName: r.assetName,
       assetSymbol: r.assetSymbol,
-      predictedDirection: r.predictedDirection as "up" | "down" | "neutral",
+      predictedDirection: (r.predictedDirection === "uncertain" ? "neutral" : r.predictedDirection) as "up" | "down" | "neutral",
       predictedMagnitude: r.predictedMagnitude as "strong" | "moderate" | "mild",
       predictedConfidence: r.predictedConfidence as "high" | "medium" | "low",
       priceImpactEstimate: r.priceImpactEstimate,

@@ -357,6 +357,29 @@ export const GetIntelligenceMarketSignalsResponse = zod.object({
         .describe(
           "Last N prediction snapshots for this asset (for timeline UI)",
         ),
+      optionSignal: zod
+        .enum(["BUY_CALL", "BUY_PUT", "NO_TRADE"])
+        .describe("Derived option trade signal: BUY_CALL, BUY_PUT, or NO_TRADE")
+        .optional(),
+      optionSignalReason: zod
+        .string()
+        .describe("Why this option signal was given or withheld")
+        .optional(),
+      suggestedStrike: zod
+        .number()
+        .nullish()
+        .describe("Suggested option strike price (ATM, rounded to 50)")
+        .optional(),
+      targetPct: zod
+        .number()
+        .nullish()
+        .describe("Target profit % for the option trade")
+        .optional(),
+      stopLossPct: zod
+        .number()
+        .nullish()
+        .describe("Stop loss % for the option trade")
+        .optional(),
     }),
   ),
   totalArticlesAnalyzed: zod.number(),

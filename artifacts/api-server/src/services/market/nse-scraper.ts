@@ -2,6 +2,7 @@
 // Supplements the 7-day data used by aiPredictAsset with a longer series for regime detection.
 
 import { logger } from "../../lib/logger.js";
+import { firecrawlFetchJson } from "./nse-direct-scraper.js";
 
 export interface DailyClose {
   date: string;   // ISO date string
@@ -42,16 +43,7 @@ export async function fetchNSEPriceData(assetId: string, days = 35): Promise<NSE
 
   try {
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=${days}d`;
-    const resp = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; HMM/1.0)" },
-      signal: AbortSignal.timeout(12000),
-    });
-    if (!resp.ok) {
-      logger.warn({ assetId, status: resp.status }, "nse-scraper: Yahoo Finance returned non-OK");
-      return null;
-    }
-
-    const json = await resp.json() as {
+    let json: {
       chart?: {
         result?: Array<{
           timestamp?: number[];
@@ -59,6 +51,17 @@ export async function fetchNSEPriceData(assetId: string, days = 35): Promise<NSE
         }>;
       };
     };
+    try {
+      const resp = await fetch(url, {
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; HMM/1.0)" },
+        signal: AbortSignal.timeout(12000),
+      });
+      if (!resp.ok) throw new Error(`Yahoo returned HTTP ${resp.status}`);
+      json = await resp.json() as typeof json;
+    } catch (err) {
+      logger.warn({ assetId, err: err instanceof Error ? err.message : err }, "nse-scraper: Yahoo direct failed — trying Firecrawl");
+      json = await firecrawlFetchJson<typeof json>(url);
+    }
 
     const result = json.chart?.result?.[0];
     const timestamps = result?.timestamp ?? [];

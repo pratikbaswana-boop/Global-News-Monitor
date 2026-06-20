@@ -362,6 +362,16 @@ export interface MarketAsset {
   lessonsFromPastFailures?: string | null;
   /** Last N prediction snapshots for this asset (for timeline UI) */
   recentHistory?: TrackRecordEntry[] | null;
+  /** Derived option trade signal */
+  optionSignal?: "BUY_CALL" | "BUY_PUT" | "NO_TRADE";
+  /** Why this option signal was given or withheld */
+  optionSignalReason?: string;
+  /** Suggested option strike price (ATM) */
+  suggestedStrike?: number | null;
+  /** Target profit % for the option trade */
+  targetPct?: number | null;
+  /** Stop loss % for the option trade */
+  stopLossPct?: number | null;
 }
 
 export interface MarketSignalsResponse {

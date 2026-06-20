@@ -16,6 +16,12 @@ import {
   fetchFiiDiiFlow,
   fetchADRatio,
   fetchSectoralDeltas,
+  firecrawlFetchJson,
+  fetchSGXNiftyFirecrawl,
+  fetchOptionChainPcrFirecrawl,
+  fetchNseAllIndicesFirecrawl,
+  fetchPcrFromUpstox,
+  fetchMaxPainFromNiftyInvest,
   type SectorDeltas,
 } from "./nse-direct-scraper.js";
 
@@ -31,6 +37,7 @@ export interface SessionPriors {
   deliveryPct: number | null;
   deliveryDate: string | null;
   fiiParticipantOINet: number | null; // FII long index futures − FII short index futures
+  sgxNiftyChangePct: number | null;
   fetchedAt: string;
   tradingDate: string;
 }
@@ -54,6 +61,8 @@ export interface LiveSnapshot {
   // Options structure
   impliedVolPct: number | null;
   openInterestChange: number;
+  maxPainStrike: number | null;
+  maxPainDistancePct: number | null;
   fetchedAt: string;
 }
 
@@ -94,6 +103,16 @@ export interface Tier3Snapshot {
   // --- Sectoral deltas (live) ---
   sectorDeltas: SectorDeltas | null;
   sectorDeltaScore: number;
+
+  // --- Max Pain (live from option chain) ---
+  maxPainStrike: number | null;
+  maxPainDistancePct: number | null;
+
+  // --- SGX Nifty (session prior, pre-market) ---
+  sgxNiftyChangePct: number | null;
+
+  // --- Short covering signal (derived) ---
+  shortCoveringSignal: "none" | "covering" | "unwinding";
 
   fetchedAt: string;
 }
@@ -197,9 +216,14 @@ interface YahooChartResult {
 
 async function fetchYahooChart(symbol: string, range: string): Promise<YahooChartResult> {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=${range}`;
-  const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-  if (!res.ok) throw new Error(`Yahoo ${symbol} fetch failed: ${res.status}`);
-  return res.json() as Promise<YahooChartResult>;
+  try {
+    const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+    if (!res.ok) throw new Error(`Yahoo ${symbol} fetch failed: ${res.status}`);
+    return res.json() as Promise<YahooChartResult>;
+  } catch (err) {
+    logger.warn({ symbol, err: err instanceof Error ? err.message : err }, "Yahoo direct fetch failed — trying Firecrawl");
+    return firecrawlFetchJson<YahooChartResult>(url);
+  }
 }
 
 function getLatestClose(chart: YahooChartResult): number | null {
@@ -296,6 +320,24 @@ async function fetchPreviousDayParticipantOI(): Promise<number | null> {
   }
 }
 
+async function fetchSGXNifty(): Promise<{ changePct: number | null }> {
+  try {
+    const chart = await fetchYahooChart("IN1!", "2d");
+    const closes = getCloses(chart);
+    if (closes.length < 2) {
+      // Fallback: try ^NSEI pre-market
+      const fallbackChart = await fetchYahooChart("%5ENSEI", "2d");
+      const fallbackCloses = getCloses(fallbackChart);
+      if (fallbackCloses.length < 2) throw new Error("Yahoo SGX Nifty: no data");
+      return { changePct: ((fallbackCloses[1]! - fallbackCloses[0]!) / fallbackCloses[0]!) * 100 };
+    }
+    return { changePct: ((closes[1]! - closes[0]!) / closes[0]!) * 100 };
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : err }, "tier3-fetcher: Yahoo SGX Nifty failed — trying Firecrawl");
+    return fetchSGXNiftyFirecrawl();
+  }
+}
+
 export function getPreviousTradingDate(): string {
   // Walk back from today, skip weekends. (NSE holiday list ignored — best-effort.)
   const d = new Date();
@@ -306,14 +348,16 @@ export function getPreviousTradingDate(): string {
 
 export async function fetchSessionPriors(): Promise<SessionPriors> {
   logger.info("tier3-fetcher: loading EOD session priors (once-per-session)");
-  const [fii, delivery, participantOI] = await Promise.allSettled([
+  const [fii, delivery, participantOI, sgxNifty] = await Promise.allSettled([
     fetchPreviousDayFIIDII(),
     fetchPreviousDayDelivery(),
     fetchPreviousDayParticipantOI(),
+    fetchSGXNifty(),
   ]);
   const fiiData = fii.status === "fulfilled" ? fii.value : { fii: 0, dii: 0, date: "" };
   const delData = delivery.status === "fulfilled" ? delivery.value : { pct: null, date: null };
   const poi = participantOI.status === "fulfilled" ? participantOI.value : null;
+  const sgxData = sgxNifty.status === "fulfilled" ? sgxNifty.value : { changePct: null };
 
   const priors: SessionPriors = {
     fiiNetFlowCrore: fiiData.fii,
@@ -323,6 +367,7 @@ export async function fetchSessionPriors(): Promise<SessionPriors> {
     deliveryPct: delData.pct,
     deliveryDate: delData.date,
     fiiParticipantOINet: poi,
+    sgxNiftyChangePct: sgxData.changePct,
     fetchedAt: new Date().toISOString(),
     tradingDate: getPreviousTradingDate(),
   };
@@ -331,6 +376,7 @@ export async function fetchSessionPriors(): Promise<SessionPriors> {
     diiNet: priors.diiNetFlowCrore,
     deliveryPct: priors.deliveryPct,
     fiiParticipantOINet: priors.fiiParticipantOINet,
+    sgxNiftyChangePct: priors.sgxNiftyChangePct,
     tradingDate: priors.tradingDate,
   }, "tier3-fetcher: session priors loaded — frozen for today");
   return priors;
@@ -342,54 +388,84 @@ async function fetchOptionChainFull(): Promise<{
   pcr: number | null;
   atmIv: number | null;
   totalOi: number;
+  maxPainStrike: number | null;
+  maxPainDistancePct: number | null;
 }> {
-  if (!USE_NSE_DIRECT) return { pcr: null, atmIv: null, totalOi: 0 };
-  try {
-    interface OptionChainRecord {
-      strikePrice: number;
-      CE?: { openInterest?: number; impliedVolatility?: number };
-      PE?: { openInterest?: number };
-    }
-    interface OptionChainResponse {
-      records?: { underlyingValue?: number; data?: OptionChainRecord[] };
-      filtered?: { CE?: { totOI?: number }; PE?: { totOI?: number }; data?: OptionChainRecord[] };
-    }
-
-    // NSE retired /api/option-chain-indices (returns 404). /api/option-chain-v3
-    // is the replacement and exposes the same records.data shape.
-    const raw = await nseGet<OptionChainResponse>("/api/option-chain-v3?symbol=NIFTY");
-    let ceTotOi = raw.filtered?.CE?.totOI ?? 0;
-    let peTotOi = raw.filtered?.PE?.totOI ?? 0;
-    // v3 doesn't always populate filtered.totOI — fall back to summing records.
-    if (ceTotOi === 0 || peTotOi === 0) {
-      for (const rec of raw.records?.data ?? []) {
-        ceTotOi += rec.CE?.openInterest ?? 0;
-        peTotOi += rec.PE?.openInterest ?? 0;
+  // Try NSE direct API first (works locally), fallback to Firecrawl (works on EC2)
+  if (USE_NSE_DIRECT) {
+    try {
+      interface OptionChainRecord {
+        strikePrice: number;
+        CE?: { openInterest?: number; impliedVolatility?: number };
+        PE?: { openInterest?: number };
       }
-    }
-    if (ceTotOi === 0) throw new Error("option-chain-v3: no CE openInterest");
-    const pcr = peTotOi / ceTotOi;
+      interface OptionChainResponse {
+        records?: { underlyingValue?: number; data?: OptionChainRecord[] };
+        filtered?: { CE?: { totOI?: number }; PE?: { totOI?: number }; data?: OptionChainRecord[] };
+      }
 
-    const underlying = raw.records?.underlyingValue ?? 0;
-    const data = raw.filtered?.data ?? [];
-
-    let atmIv = 0;
-    if (underlying > 0 && data.length > 0) {
-      let minDiff = Infinity;
-      for (const rec of data) {
-        const diff = Math.abs(rec.strikePrice - underlying);
-        if (diff < minDiff) {
-          minDiff = diff;
-          atmIv = rec.CE?.impliedVolatility ?? 0;
+      const raw = await nseGet<OptionChainResponse>("/api/option-chain-v3?symbol=NIFTY");
+      let ceTotOi = raw.filtered?.CE?.totOI ?? 0;
+      let peTotOi = raw.filtered?.PE?.totOI ?? 0;
+      if (ceTotOi === 0 || peTotOi === 0) {
+        for (const rec of raw.records?.data ?? []) {
+          ceTotOi += rec.CE?.openInterest ?? 0;
+          peTotOi += rec.PE?.openInterest ?? 0;
         }
       }
-    }
+      if (ceTotOi === 0) throw new Error("option-chain-v3: no CE openInterest");
+      const pcr = peTotOi / ceTotOi;
 
-    const totalOi = ceTotOi + peTotOi;
-    return { pcr, atmIv, totalOi };
+      const underlying = raw.records?.underlyingValue ?? 0;
+      const data = raw.filtered?.data ?? raw.records?.data ?? [];
+
+      let atmIv = 0;
+      if (underlying > 0 && data.length > 0) {
+        let minDiff = Infinity;
+        for (const rec of data) {
+          const diff = Math.abs(rec.strikePrice - underlying);
+          if (diff < minDiff) {
+            minDiff = diff;
+            atmIv = rec.CE?.impliedVolatility ?? 0;
+          }
+        }
+      }
+
+      let maxPainStrike: number | null = null;
+      let maxPainDistancePct: number | null = null;
+      if (underlying > 0 && data.length > 0) {
+        let minPain = Infinity;
+        for (const rec of data) {
+          const ceOi = rec.CE?.openInterest ?? 0;
+          const peOi = rec.PE?.openInterest ?? 0;
+          const strike = rec.strikePrice;
+          const pain = strike * (ceOi + peOi);
+          if (pain < minPain) {
+            minPain = pain;
+            maxPainStrike = strike;
+          }
+        }
+        if (maxPainStrike !== null && maxPainStrike > 0) {
+          maxPainDistancePct = ((underlying - maxPainStrike) / maxPainStrike) * 100;
+        }
+      }
+
+      const totalOi = ceTotOi + peTotOi;
+      return { pcr, atmIv, totalOi, maxPainStrike, maxPainDistancePct };
+    } catch (err) {
+      logger.warn({ err: err instanceof Error ? err.message : err }, "tier3-fetcher: NSE direct option chain failed — trying Firecrawl");
+    }
+  }
+  // Firecrawl fallback: Upstox for PCR, NiftyInvest for Max Pain (EC2/cloud IPs)
+  try {
+    const [{ pcr }, { maxPainStrike, maxPainDistancePct }] = await Promise.all([
+      fetchPcrFromUpstox(),
+      fetchMaxPainFromNiftyInvest(),
+    ]);
+    return { pcr, atmIv: null, totalOi: 0, maxPainStrike, maxPainDistancePct };
   } catch (err) {
-    logger.warn({ err }, "tier3-fetcher: option chain fetch failed");
-    return { pcr: null, atmIv: null, totalOi: 0 };
+    logger.warn({ err: err instanceof Error ? err.message : err }, "tier3-fetcher: Upstox/NiftyInvest fallback failed");
+    return { pcr: null, atmIv: null, totalOi: 0, maxPainStrike: null, maxPainDistancePct: null };
   }
 }
 
@@ -450,22 +526,63 @@ async function fetchIndiaVixYahoo(): Promise<{ current: number; previousClose: n
 }
 
 export async function fetchLiveSnapshot(): Promise<LiveSnapshot> {
-  const [vix, opt, adr, sector, inrUsd, crude, yield10y] = await Promise.allSettled([
-    USE_NSE_DIRECT ? fetchIndiaVix() : fetchIndiaVixYahoo(),
+  // Try NSE direct first, fallback to Firecrawl for EC2/cloud deployments
+  const [vixDirect, optDirect, adrDirect, sectorDirect, inrUsd, crude, yield10y] = await Promise.allSettled([
+    USE_NSE_DIRECT ? fetchIndiaVix() : Promise.reject(new Error("NSE direct disabled")),
     fetchOptionChainFull(),
-    USE_NSE_DIRECT ? fetchADRatio() : Promise.reject(new Error("NSE direct API disabled")),
-    USE_NSE_DIRECT ? fetchSectoralDeltas() : Promise.reject(new Error("NSE direct API disabled")),
+    USE_NSE_DIRECT ? fetchADRatio() : Promise.reject(new Error("NSE direct disabled")),
+    USE_NSE_DIRECT ? fetchSectoralDeltas() : Promise.reject(new Error("NSE direct disabled")),
     fetchInrUsdFull(),
     fetchCrudeBrent(),
     fetchYield10Y(),
   ]);
 
-  const vixData = vix.status === "fulfilled"
-    ? (vix.value ?? { current: null as number | null, previousClose: null as number | null, change: null as number | null })
-    : { current: null as number | null, previousClose: null as number | null, change: null as number | null };
-  const optData = opt.status === "fulfilled" ? opt.value : { pcr: null, atmIv: null, totalOi: 0 };
-  const adrData = adr.status === "fulfilled" ? adr.value : { advance: 0, decline: 0, ratio: 0 };
-  const sectorData = sector.status === "fulfilled" ? sector.value : null;
+  // Firecrawl fallback for VIX + AD ratio + sectoral (used when NSE direct fails on EC2)
+  let vixData: { current: number | null; previousClose: number | null; change: number | null };
+  let adrData: { advance: number; decline: number; ratio: number } = { advance: 0, decline: 0, ratio: 0 };
+  let sectorData: SectorDeltas | null = null;
+
+  if (vixDirect.status === "fulfilled") {
+    vixData = vixDirect.value ?? { current: null, previousClose: null, change: null };
+    adrData = adrDirect.status === "fulfilled" ? adrDirect.value : { advance: 0, decline: 0, ratio: 0 };
+    sectorData = sectorDirect.status === "fulfilled" ? sectorDirect.value : null;
+  } else {
+    // Fallback: fetch allIndices via Firecrawl to get VIX + AD + sectoral in one call
+    const allIdx = await fetchNseAllIndicesFirecrawl();
+    vixData = {
+      current: allIdx.vix,
+      previousClose: null,
+      change: null,
+    };
+    adrData = {
+      advance: allIdx.advances ?? 0,
+      decline: allIdx.declines ?? 0,
+      ratio: (allIdx.advances ?? 0) > 0 && (allIdx.declines ?? 0) > 0
+        ? (allIdx.advances! / allIdx.declines!)
+        : 0,
+    };
+    // Derive sectoral deltas from bankNifty and niftyIt vs nifty50
+    if (allIdx.nifty50 && allIdx.bankNifty && allIdx.niftyIt) {
+      const nifty50Pct = 0;
+      const bankPct = ((allIdx.bankNifty - allIdx.nifty50) / allIdx.nifty50) * 100;
+      const itPct = ((allIdx.niftyIt - allIdx.nifty50) / allIdx.nifty50) * 100;
+      sectorData = {
+        nifty50PctChange: nifty50Pct,
+        bankPctChange: bankPct,
+        itPctChange: itPct,
+        pharmaPctChange: 0,
+        autoPctChange: 0,
+        bank: bankPct,
+        it: itPct,
+        pharma: 0,
+        auto: 0,
+      };
+    } else {
+      sectorData = null;
+    }
+  }
+
+  const optData = optDirect.status === "fulfilled" ? optDirect.value : { pcr: null, atmIv: null, totalOi: 0, maxPainStrike: null as number | null, maxPainDistancePct: null as number | null };
   const fxData = inrUsd.status === "fulfilled" ? inrUsd.value : { rate: 83.5, change5dPct: 0 };
   const crudeData = crude.status === "fulfilled" ? crude.value : { price: 82.0, change5dPct: 0 };
   const yieldData = yield10y.status === "fulfilled" ? yield10y.value : { yield: 7.0, change5dBps: 0 };
@@ -493,8 +610,25 @@ export async function fetchLiveSnapshot(): Promise<LiveSnapshot> {
     crude5dChangePct: crudeData.change5dPct,
     impliedVolPct: optData.atmIv,
     openInterestChange: oiChange,
+    maxPainStrike: optData.maxPainStrike ?? null,
+    maxPainDistancePct: optData.maxPainDistancePct ?? null,
     fetchedAt: new Date().toISOString(),
   };
+}
+
+// ── Short covering signal helper ──────────────────────────────────────────────
+
+function computeShortCoveringSignal(
+  pcr: number | null,
+  oiChange: number,
+  vix5dChange: number
+): "none" | "covering" | "unwinding" {
+  if (pcr === null) return "none";
+  // covering: high PCR + falling OI + falling VIX = shorts buying back
+  if (pcr > 1.0 && oiChange < 0 && vix5dChange < 0) return "covering";
+  // unwinding: low PCR + rising OI + rising VIX = fresh shorts entering
+  if (pcr < 0.9 && oiChange > 0 && vix5dChange > 0) return "unwinding";
+  return "none";
 }
 
 // ── Sector delta score helper ────────────────────────────────────────────────
@@ -542,6 +676,12 @@ export async function fetchTier3Snapshot(): Promise<Tier3Snapshot> {
 
   const sectorDeltaScore = computeSectorDeltaScore(live.sectorDeltas);
 
+  const shortCoveringSignal = computeShortCoveringSignal(
+    live.putCallRatio,
+    live.openInterestChange,
+    live.indiaVix5dChange ?? 0
+  );
+
   const snapshot: Tier3Snapshot = {
     fiiNetCrore: priors?.fiiNetFlowCrore ?? 0,
     diiNetCrore: priors?.diiNetFlowCrore ?? 0,
@@ -572,6 +712,11 @@ export async function fetchTier3Snapshot(): Promise<Tier3Snapshot> {
 
     sectorDeltas: live.sectorDeltas,
     sectorDeltaScore,
+
+    maxPainStrike: live.maxPainStrike,
+    maxPainDistancePct: live.maxPainDistancePct,
+    sgxNiftyChangePct: priors?.sgxNiftyChangePct ?? null,
+    shortCoveringSignal,
 
     fetchedAt: new Date().toISOString(),
   };
@@ -605,9 +750,13 @@ export function computeTier3Score(s: Tier3Snapshot): number {
 
   // Live signals — total weight 0.85
   if (s.putCallRatio !== null) {
-    // PCR < 0.8 = bullish complacency; > 1.1 = bearish hedging.
-    // Map (1 - pcr)/0.5 into [-1, +1] roughly.
-    const pcrScore = clamp((1.0 - s.putCallRatio) / 0.5, -1, 1);
+    // Short covering: high PCR + falling OI = bullish (shorts buying back).
+    // Otherwise: PCR < 0.8 = bullish complacency; > 1.1 = bearish hedging.
+    let pcrScore = clamp((1.0 - s.putCallRatio) / 0.5, -1, 1);
+    if (s.shortCoveringSignal === "covering") {
+      // Invert: high PCR is bullish during short covering
+      pcrScore = clamp((s.putCallRatio - 1.0) / 0.5, -1, 1);
+    }
     liveScore += pcrScore * 0.30;
     liveWeight += 0.30;
   }
@@ -647,6 +796,22 @@ export function computeTier3Score(s: Tier3Snapshot): number {
     const oiScore = clamp(s.fiiParticipantOINet / 50000, -1, 1);
     priorScore += oiScore * 0.03;
     priorWeight += 0.03;
+  }
+
+  // Max Pain penalty: if price is >1.5% away from max pain, apply directional pull toward pin
+  if (s.maxPainDistancePct !== null && Math.abs(s.maxPainDistancePct) > 1.5) {
+    // Negative distance = underlying below max pain = bullish pull; positive = bearish pull
+    const painScore = clamp(-s.maxPainDistancePct / 3.0, -1, 1);
+    priorScore += painScore * 0.10;
+    priorWeight += 0.10;
+  }
+
+  // SGX Nifty divergence: if pre-market move >0.5% vs regime, adjust uncertainty
+  if (s.sgxNiftyChangePct !== null && Math.abs(s.sgxNiftyChangePct) > 0.5) {
+    // SGX up = bullish; SGX down = bearish. Weight lightly — it's a prior.
+    const sgxScore = clamp(s.sgxNiftyChangePct / 1.5, -1, 1);
+    priorScore += sgxScore * 0.08;
+    priorWeight += 0.08;
   }
 
   const totalWeight = liveWeight + priorWeight;

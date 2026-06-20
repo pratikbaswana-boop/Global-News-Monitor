@@ -94,6 +94,7 @@ services:
       NODE_ENV: production
       PORT: "3000"
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      NODE_OPTIONS: "--max-old-space-size=4096"
 
       # LLM provider — flip via .env.production
       LLM_PROVIDER: ${LLM_PROVIDER:-openai}
@@ -129,6 +130,9 @@ services:
 
       # NSE direct API toggle (set false on EC2/cloud where NSE blocks IPs)
       USE_NSE_DIRECT: ${USE_NSE_DIRECT:-true}
+
+      # Firecrawl web scraping
+      FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:-}
 
       # Emergency kill-switch — when set to "true", api-server boots the HTTP
       # server only and skips ingestion / reasoning / market schedulers.

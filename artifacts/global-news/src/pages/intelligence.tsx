@@ -435,6 +435,36 @@ function MarketAssetCard({ asset, allArticles, onArticleClick, marketClosed }: {
             {dirConfig.icon}
             <span className={`text-[10px] font-bold tracking-wider ${dirConfig.color}`}>{dirConfig.label}</span>
           </div>
+
+          {/* Option Trade Signal badge */}
+          {asset.optionSignal && asset.optionSignal !== "NO_TRADE" && (
+            <div className={`shrink-0 flex flex-col items-center gap-1 px-3 py-2 rounded-lg border ${
+              asset.optionSignal === "BUY_CALL"
+                ? "bg-emerald-400/10 border-emerald-400/30"
+                : "bg-red-400/10 border-red-400/30"
+            }`}>
+              <span className={`text-[10px] font-bold tracking-wider ${
+                asset.optionSignal === "BUY_CALL" ? "text-emerald-400" : "text-red-400"
+              }`}>
+                {asset.optionSignal === "BUY_CALL" ? "BUY CALL" : "BUY PUT"}
+              </span>
+              {asset.targetPct !== null && asset.targetPct !== undefined && (
+                <span className="text-[9px] font-mono text-foreground/70">
+                  Target: {asset.targetPct > 0 ? "+" : ""}{asset.targetPct.toFixed(1)}%
+                </span>
+              )}
+            </div>
+          )}
+          {asset.optionSignal === "NO_TRADE" && (
+            <div className="shrink-0 flex flex-col items-center gap-1 px-3 py-2 rounded-lg border bg-slate-500/10 border-slate-500/30">
+              <span className="text-[10px] font-bold tracking-wider text-slate-400">NO TRADE</span>
+              {asset.optionSignalReason && (
+                <span className="text-[8px] text-muted-foreground max-w-[80px] text-center leading-tight" title={asset.optionSignalReason}>
+                  {asset.optionSignalReason.length > 30 ? asset.optionSignalReason.slice(0, 30) + "..." : asset.optionSignalReason}
+                </span>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Key metrics row */}
@@ -463,6 +493,36 @@ function MarketAssetCard({ asset, allArticles, onArticleClick, marketClosed }: {
             <p className={`text-sm font-bold font-mono ${confColor}`}>{asset.confidence.toUpperCase()}</p>
           </div>
         </div>
+
+        {/* Trade details row — only shown when option signal is active */}
+        {asset.optionSignal && asset.optionSignal !== "NO_TRADE" && (
+          <div className="grid grid-cols-3 gap-2 pt-2">
+            <div className="bg-emerald-950/20 rounded-lg p-2 text-center space-y-0.5 border border-emerald-400/20">
+              <p className="text-[9px] uppercase tracking-wider text-emerald-400/70 font-semibold">Strike</p>
+              <p className="text-sm font-bold font-mono text-emerald-400">
+                {asset.suggestedStrike !== null && asset.suggestedStrike !== undefined
+                  ? asset.suggestedStrike.toLocaleString()
+                  : "ATM"}
+              </p>
+            </div>
+            <div className="bg-emerald-950/20 rounded-lg p-2 text-center space-y-0.5 border border-emerald-400/20">
+              <p className="text-[9px] uppercase tracking-wider text-emerald-400/70 font-semibold">Target</p>
+              <p className="text-sm font-bold font-mono text-emerald-400">
+                {asset.targetPct !== null && asset.targetPct !== undefined
+                  ? (asset.targetPct > 0 ? "+" : "") + asset.targetPct.toFixed(1) + "%"
+                  : "—"}
+              </p>
+            </div>
+            <div className="bg-red-950/20 rounded-lg p-2 text-center space-y-0.5 border border-red-400/20">
+              <p className="text-[9px] uppercase tracking-wider text-red-400/70 font-semibold">Stop Loss</p>
+              <p className="text-sm font-bold font-mono text-red-400">
+                {asset.stopLossPct !== null && asset.stopLossPct !== undefined
+                  ? "-" + asset.stopLossPct.toFixed(1) + "%"
+                  : "—"}
+              </p>
+            </div>
+          </div>
+        )}
       </CardHeader>
 
       <CardContent className="p-0">

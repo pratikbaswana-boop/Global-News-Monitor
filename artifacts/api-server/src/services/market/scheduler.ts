@@ -10,13 +10,13 @@
 // Each cycle: HMM regime → 3-window ensemble per asset → persist to market_snapshots cache.
 
 import { randomUUID } from "crypto";
-import { db, marketRegimesTable, flipGuardsTable } from "@workspace/db";
-import { desc, gt } from "drizzle-orm";
+import { db, marketRegimesTable, flipGuardsTable, marketSnapshotsTable } from "@workspace/db";
+import { desc, gt, eq, and } from "drizzle-orm";
 import { logger } from "../../lib/logger.js";
 import { fetchRegimeFeatures, fetchNSEPriceData } from "./nse-direct-scraper.js";
 import { detectRegime } from "./hmm-regime.js";
 import { runMarketAgent } from "./market-agent.js";
-import { fetchSessionPriors, setSessionPriors, getSessionPriors } from "./tier3-fetcher.js";
+import { fetchSessionPriors, setSessionPriors, getSessionPriors, fetchTier3Snapshot } from "./tier3-fetcher.js";
 
 const ASSET_ID = "nse_market";
 const FIRST_RUN_DELAY_MS = 2 * 60 * 1000; // 2 min after startup
@@ -251,7 +251,7 @@ async function runEnsembleForAllAssets(window: Window): Promise<void> {
         logger.warn({ asset: asset.id, err: err instanceof Error ? err.message : err }, "market-scheduler: price fetch failed, using fallback");
       }
 
-      await runMarketAgent(
+      const signal = await runMarketAgent(
         asset.id,
         asset.name,
         asset.symbol,
@@ -262,6 +262,114 @@ async function runEnsembleForAllAssets(window: Window): Promise<void> {
         { force: true, ohlcvCandles },
       );
       ok++;
+
+      // Update latest snapshot with fresh direction/flip/regime/priceScore
+      // so the UI never shows stale morning data when AI has changed its mind.
+      try {
+        const today = todayIstDateKey();
+        const todayStart = new Date(`${today}T00:00:00+05:30`);
+        const rows = await db
+          .select()
+          .from(marketSnapshotsTable)
+          .where(
+            and(
+              eq(marketSnapshotsTable.assetId, asset.id),
+              gt(marketSnapshotsTable.snapshotAt, todayStart)
+            )
+          )
+          .orderBy(desc(marketSnapshotsTable.snapshotAt))
+          .limit(1);
+
+        if (rows.length > 0) {
+          const snapshot = rows[0]!;
+          const oldDirection = snapshot.predictedDirection;
+          const oldFlip = snapshot.flipConfirmed;
+          const directionChanged = oldDirection !== signal.direction;
+          const flipChanged = oldFlip !== signal.flipConfirmed;
+
+          await db
+            .update(marketSnapshotsTable)
+            .set({
+              predictedDirection: signal.direction,
+              predictedConfidence: signal.confidence,
+              flipConfirmed: signal.flipConfirmed,
+              priceScore: signal.priceScore,
+              regimeAtSnapshot: signal.regime,
+              tier3Evidence: JSON.stringify(signal.tier3Evidence),
+              ...(directionChanged || flipChanged ? { flipReason: directionChanged ? `Direction flipped to ${signal.direction}` : `Flip confirmed=${signal.flipConfirmed}` } : {}),
+            })
+            .where(eq(marketSnapshotsTable.id, snapshot.id));
+
+          logger.info({
+            assetId: asset.id,
+            oldDirection,
+            newDirection: signal.direction,
+            flip: signal.flipConfirmed,
+            priceScore: signal.priceScore.toFixed(3),
+            regime: signal.regime,
+          }, "market-scheduler: snapshot refreshed from ensemble");
+        } else {
+          // No snapshot for today yet — create one so the UI has fresh data.
+          const now = new Date();
+          let resolveAfter: Date;
+          resolveAfter = new Date(now);
+          resolveAfter.setUTCHours(10, 0, 0, 0); // 15:30 IST market close
+          if (resolveAfter.getTime() <= now.getTime()) {
+            resolveAfter = new Date(resolveAfter.getTime() + 24 * 60 * 60 * 1000);
+            while (isWeekendForDate(resolveAfter)) {
+              resolveAfter = new Date(resolveAfter.getTime() + 24 * 60 * 60 * 1000);
+            }
+          }
+          const latestPrice = ohlcvCandles.length > 0 ? ohlcvCandles[ohlcvCandles.length - 1]!.close : null;
+
+          await db.insert(marketSnapshotsTable).values({
+            id: randomUUID(),
+            assetId: asset.id,
+            assetName: asset.name,
+            assetSymbol: asset.symbol,
+            predictedDirection: signal.direction === "uncertain" ? "neutral" : signal.direction,
+            predictedMagnitude: signal.magnitude,
+            predictedConfidence: signal.confidence,
+            priceImpactEstimate: signal.priceImpactEstimate,
+            timeframe: "today",
+            bullScore: signal.bullScore.toString(),
+            bearScore: signal.bearScore.toString(),
+            dominantNarrative: signal.dominantNarrative,
+            verdict: signal.verdict,
+            triggerNewsSummary: signal.triggerNewsSummary,
+            assumptions: signal.assumptions,
+            triggerArticleIds: JSON.stringify([]),
+            resolveAfter,
+            ...(latestPrice !== null ? { realPriceAtSnapshot: latestPrice.toString() } : {}),
+            priceScore: signal.priceScore,
+            flipConfirmed: signal.flipConfirmed,
+            regimeAtSnapshot: signal.regime,
+            tier3Evidence: JSON.stringify(signal.tier3Evidence),
+            candleTrustScore: signal.candleTrustScore,
+            regimeAge: signal.regimeAge,
+            ...(signal.candleFlags?.length ? { candleFlags: JSON.stringify(signal.candleFlags) } : {}),
+            ...(signal.channelDecaySummary?.length ? { channelDecaySummary: JSON.stringify(signal.channelDecaySummary) } : {}),
+            ...(signal.regimeProbabilities ? { regimeProbabilities: JSON.stringify(signal.regimeProbabilities) } : {}),
+            ...(signal.activeChannels?.length ? { activeChannels: JSON.stringify(signal.activeChannels) } : {}),
+            ...(signal.ensembleVotes?.length ? { ensembleVotes: JSON.stringify(signal.ensembleVotes) } : {}),
+            uncertaintyFlag: signal.uncertaintyFlag,
+            ...(signal.tier3Evidence?.maxPainStrike != null ? { maxPainStrike: signal.tier3Evidence.maxPainStrike.toString() } : {}),
+            ...(signal.tier3Evidence?.maxPainDistancePct != null ? { maxPainDistancePct: signal.tier3Evidence.maxPainDistancePct } : {}),
+            ...(signal.tier3Evidence?.sgxNiftyChangePct != null ? { sgxNiftyChangePct: signal.tier3Evidence.sgxNiftyChangePct } : {}),
+            ...(signal.tier3Evidence?.shortCoveringSignal != null ? { shortCoveringSignal: signal.tier3Evidence.shortCoveringSignal } : {}),
+          });
+
+          logger.info({
+            assetId: asset.id,
+            direction: signal.direction,
+            confidence: signal.confidence,
+            priceScore: signal.priceScore.toFixed(3),
+            regime: signal.regime,
+          }, "market-scheduler: snapshot created from ensemble");
+        }
+      } catch (err) {
+        logger.warn({ asset: asset.id, err: err instanceof Error ? err.message : err }, "market-scheduler: snapshot update failed");
+      }
     } catch (err) {
       failed++;
       logger.warn({ asset: asset.id, err: err instanceof Error ? err.message : err }, "market-scheduler: ensemble failed");
@@ -284,6 +392,11 @@ function todayIstDateKey(): string {
   const istDate = new Date(now.getTime());
   istDate.setUTCMinutes(istMin);
   return istDate.toISOString().slice(0, 10);
+}
+
+function isWeekendForDate(d: Date): boolean {
+  const day = d.getUTCDay();
+  return day === 0 || day === 6;
 }
 
 async function onMarketOpen(): Promise<void> {
@@ -386,6 +499,156 @@ export function startMarketScheduler(): void {
     }
     scheduleNext();
   }, FIRST_RUN_DELAY_MS);
+
+  // Start 30-second tier3 + price refresh cycle (Option A: live signal updates)
+  startTier3RefreshTimer();
+}
+
+// ── 30-second tier3 + price refresh (Option A) ────────────────────────────────
+// Refreshes existing market_snapshots with live tier3 + current price so the UI
+// option signal reacts intraday without waiting for the next ensemble cycle.
+
+const TIER3_REFRESH_MS = 30_000; // 30 seconds
+
+function startTier3RefreshTimer(): void {
+  logger.info({ intervalMs: TIER3_REFRESH_MS }, "market-scheduler: tier3 refresh timer starting");
+  setInterval(async () => {
+    try {
+      await refreshSnapshotTier3();
+    } catch (err) {
+      logger.warn({ err: err instanceof Error ? err.message : err }, "market-scheduler: tier3 refresh failed");
+    }
+  }, TIER3_REFRESH_MS);
+}
+
+async function refreshSnapshotTier3(): Promise<void> {
+  const window = currentWindow();
+  if (window === "closed") return; // only refresh during market hours
+
+  // 1. Fetch fresh tier3 (PCR, Max Pain, VIX, ADR, etc.)
+  const tier3 = await fetchTier3Snapshot();
+  const freshTier3Json = {
+    fiiNetCrore: tier3.fiiNetCrore,
+    fiiIsStale: tier3.fiiIsStale,
+    putCallRatio: tier3.putCallRatio,
+    advanceDeclineRatio: tier3.advanceDeclineRatio,
+    deliveryPct: tier3.deliveryPct,
+    indiaVix5dChange: tier3.indiaVix5dChange,
+    tier3Score: 0, // recalculated on read
+    maxPainStrike: tier3.maxPainStrike,
+    maxPainDistancePct: tier3.maxPainDistancePct,
+    sgxNiftyChangePct: tier3.sgxNiftyChangePct,
+    shortCoveringSignal: tier3.shortCoveringSignal,
+  };
+
+  // 2. Fetch current prices for all assets (live intraday, not daily close)
+  const prices = await Promise.all(
+    FORECAST_ASSETS.map(async (asset) => {
+      try {
+        const yahooSymbol = asset.symbol === "NIFTY" ? "^NSEI" :
+                            asset.symbol === "SENSEX" ? "^BSESN" :
+                            asset.symbol === "GOLD" ? "GC=F" :
+                            asset.symbol === "SILVER" ? "SI=F" :
+                            `${asset.symbol}.NS`;
+        const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?interval=1d&range=1d`;
+        const resp = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" }, signal: AbortSignal.timeout(8000) });
+        if (!resp.ok) return { assetId: asset.id, price: null as number | null, changePct: 0 };
+        const json = await resp.json() as {
+          chart?: { result?: Array<{ meta?: { regularMarketPrice?: number; previousClose?: number } }> };
+        };
+        const meta = json.chart?.result?.[0]?.meta;
+        if (meta?.regularMarketPrice != null) {
+          const prev = meta.previousClose ?? meta.regularMarketPrice;
+          return {
+            assetId: asset.id,
+            price: meta.regularMarketPrice,
+            changePct: prev ? ((meta.regularMarketPrice - prev) / prev) * 100 : 0,
+          };
+        }
+      } catch {
+        // skip
+      }
+      return { assetId: asset.id, price: null as number | null, changePct: 0 };
+    })
+  );
+
+  // 3. Find today's latest snapshot per asset and UPDATE with fresh data
+  const today = todayIstDateKey();
+  const todayStart = new Date(`${today}T00:00:00+05:30`);
+
+  for (const asset of FORECAST_ASSETS) {
+    const priceInfo = prices.find(p => p.assetId === asset.id);
+    if (!priceInfo || priceInfo.price === null) continue;
+
+    try {
+      // Get latest snapshot for this asset today
+      const rows = await db
+        .select()
+        .from(marketSnapshotsTable)
+        .where(
+          and(
+            eq(marketSnapshotsTable.assetId, asset.id),
+            gt(marketSnapshotsTable.snapshotAt, todayStart)
+          )
+        )
+        .orderBy(desc(marketSnapshotsTable.snapshotAt))
+        .limit(1);
+
+      if (rows.length === 0) continue; // no snapshot yet — ensemble cycle will create it
+      const snapshot = rows[0]!;
+
+      // Compute fresh max pain distance using current price
+      let freshMaxPainDistance: number | null = null;
+      if (tier3.maxPainStrike !== null && priceInfo.price > 0) {
+        freshMaxPainDistance = ((priceInfo.price - tier3.maxPainStrike) / tier3.maxPainStrike) * 100;
+      }
+
+      // Only update if something materially changed
+      const oldTier3 = snapshot.tier3Evidence ? JSON.parse(snapshot.tier3Evidence) as Record<string, unknown> : {};
+      const oldPcr = typeof oldTier3.putCallRatio === "number" ? oldTier3.putCallRatio : null;
+      const oldMaxPain = snapshot.maxPainDistancePct ?? null;
+      const oldPrice = snapshot.realPriceAtSnapshot !== null ? parseFloat(snapshot.realPriceAtSnapshot) : null;
+
+      const pcrChanged = oldPcr === null || tier3.putCallRatio === null || Math.abs(tier3.putCallRatio - oldPcr) > 0.02;
+      const maxPainChanged = oldMaxPain === null || freshMaxPainDistance === null || Math.abs(freshMaxPainDistance - oldMaxPain) > 0.10;
+      const priceChanged = oldPrice === null || Math.abs(priceInfo.price - oldPrice) / oldPrice > 0.001;
+
+      if (!pcrChanged && !maxPainChanged && !priceChanged) continue;
+
+      // Build updated tier3 evidence
+      const updatedTier3 = {
+        ...oldTier3,
+        putCallRatio: tier3.putCallRatio,
+        advanceDeclineRatio: tier3.advanceDeclineRatio,
+        indiaVix5dChange: tier3.indiaVix5dChange,
+        maxPainStrike: tier3.maxPainStrike,
+        maxPainDistancePct: freshMaxPainDistance,
+        sgxNiftyChangePct: tier3.sgxNiftyChangePct,
+        shortCoveringSignal: tier3.shortCoveringSignal,
+      };
+
+      await db
+        .update(marketSnapshotsTable)
+        .set({
+          tier3Evidence: JSON.stringify(updatedTier3),
+          realPriceAtSnapshot: priceInfo.price.toString(),
+          maxPainDistancePct: freshMaxPainDistance,
+        })
+        .where(eq(marketSnapshotsTable.id, snapshot.id));
+
+      logger.info({
+        assetId: asset.id,
+        oldPcr: oldPcr !== null ? oldPcr.toFixed(3) : "null",
+        newPcr: tier3.putCallRatio !== null ? tier3.putCallRatio.toFixed(3) : "null",
+        oldMaxPain: oldMaxPain !== null ? oldMaxPain.toFixed(3) : "null",
+        newMaxPain: freshMaxPainDistance !== null ? freshMaxPainDistance.toFixed(3) : "null",
+        oldPrice: oldPrice !== null ? oldPrice.toFixed(2) : "null",
+        newPrice: priceInfo.price.toFixed(2),
+      }, "market-scheduler: snapshot tier3 refreshed");
+    } catch (err) {
+      logger.warn({ asset: asset.id, err: err instanceof Error ? err.message : err }, "market-scheduler: refresh snapshot failed");
+    }
+  }
 }
 
 // Re-exports consumed by intelligence.ts and other services
