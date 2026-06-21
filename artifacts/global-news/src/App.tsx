@@ -7,13 +7,15 @@ import Dashboard from "@/pages/dashboard";
 import Trending from "@/pages/trending";
 import Sources from "@/pages/sources";
 import Intelligence from "@/pages/intelligence";
+import LandingPage from "@/pages/landing";
 
 const queryClient = new QueryClient();
 
 function Router() {
   return (
     <Switch>
-      <Route path="/" component={Dashboard} />
+      <Route path="/" component={LandingPage} />
+      <Route path="/dashboard" component={Dashboard} />
       <Route path="/trending" component={Trending} />
       <Route path="/sources" component={Sources} />
       <Route path="/intelligence" component={Intelligence} />

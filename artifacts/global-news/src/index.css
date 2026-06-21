@@ -74,53 +74,53 @@
   --elevate-1: rgba(255,255,255, .04);
   --elevate-2: rgba(255,255,255, .09);
 
-  /* Command Center Dark Theme */
-  --background: 225 32% 5%;
-  --foreground: 230 40% 94%;
-  --border: 220 20% 14%;
-  
-  --card: 220 24% 8%;
-  --card-foreground: 230 40% 94%;
-  --card-border: 220 20% 14%;
+  /* Obsidian News - Apple-level Dark Theme */
+  --background: 223 26% 8%;
+  --foreground: 230 27% 90%;
+  --border: 220 16% 13%;
 
-  --sidebar: 225 32% 5%;
-  --sidebar-foreground: 230 40% 94%;
-  --sidebar-border: 220 20% 14%;
-  --sidebar-primary: 217 91% 60%;
-  --sidebar-primary-foreground: 230 40% 94%;
-  --sidebar-accent: 220 20% 12%;
-  --sidebar-accent-foreground: 230 40% 94%;
-  --sidebar-ring: 217 91% 60%;
+  --card: 220 16% 13%;
+  --card-foreground: 230 27% 90%;
+  --card-border: 220 16% 13%;
 
-  --popover: 220 24% 8%;
-  --popover-foreground: 230 40% 94%;
-  --popover-border: 220 20% 14%;
+  --sidebar: 223 26% 8%;
+  --sidebar-foreground: 230 27% 90%;
+  --sidebar-border: 220 16% 13%;
+  --sidebar-primary: 211 100% 52%;
+  --sidebar-primary-foreground: 0 0% 100%;
+  --sidebar-accent: 220 14% 17%;
+  --sidebar-accent-foreground: 230 27% 90%;
+  --sidebar-ring: 211 100% 52%;
 
-  --primary: 217 91% 60%;
-  --primary-foreground: 230 40% 94%;
-  
-  --secondary: 220 20% 12%;
-  --secondary-foreground: 230 40% 94%;
-  
-  --muted: 220 20% 12%;
-  --muted-foreground: 220 14% 55%;
-  
-  --accent: 220 20% 12%;
-  --accent-foreground: 230 40% 94%;
-  
+  --popover: 220 16% 13%;
+  --popover-foreground: 230 27% 90%;
+  --popover-border: 220 16% 13%;
+
+  --primary: 211 100% 52%;
+  --primary-foreground: 0 0% 100%;
+
+  --secondary: 220 14% 17%;
+  --secondary-foreground: 230 27% 90%;
+
+  --muted: 220 14% 17%;
+  --muted-foreground: 225 18% 75%;
+
+  --accent: 220 14% 17%;
+  --accent-foreground: 230 27% 90%;
+
   --destructive: 0 84% 60%;
-  --destructive-foreground: 230 40% 94%;
-  
-  --input: 220 20% 14%;
-  --ring: 217 91% 60%;
-  
-  --chart-1: 217 91% 60%;
+  --destructive-foreground: 0 0% 100%;
+
+  --input: 220 16% 13%;
+  --ring: 211 100% 52%;
+
+  --chart-1: 211 100% 52%;
   --chart-2: 0 84% 60%;
   --chart-3: 38 92% 50%;
   --chart-4: 142 71% 45%;
   --chart-5: 215 16% 47%;
 
-  --app-font-sans: 'IBM Plex Sans', 'Inter', sans-serif;
+  --app-font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
   --app-font-serif: Georgia, serif;
   --app-font-mono: 'JetBrains Mono', Menlo, monospace;
   --radius: 0.5rem;

@@ -63,7 +63,7 @@ export function ArticleCard({ article, onClick }: ArticleCardProps) {
         </div>
 
         <div className="flex-1">
-          <h3 className="text-base font-bold leading-snug group-hover:text-primary transition-colors text-foreground mb-2" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>
+          <h3 className="text-base font-bold leading-snug group-hover:text-primary transition-colors text-foreground mb-2" style={{ fontFamily: "'Inter', sans-serif" }}>
             <span className="line-clamp-3">{article.title}</span>
           </h3>
           <p className="text-sm text-muted-foreground/80 line-clamp-2 leading-relaxed">

@@ -1,4 +1,4 @@
-import { chatComplete } from "@workspace/integrations-openai-ai-server";
+import { chatCompleteFast } from "@workspace/integrations-openai-ai-server";
 import { db, extractedEventsTable, extractionErrorsTable } from "@workspace/db";
 import { logger } from "../../lib/logger.js";
 import { randomUUID } from "crypto";
@@ -65,8 +65,7 @@ export async function extractEventFromArticle(
   const userContent = `Article title: ${title}\n\nArticle body:\n${body.slice(0, 3000)}`;
 
   try {
-    const response = await chatComplete({
-      model: "gpt-4o",
+    const response = await chatCompleteFast({
       temperature: 0.1,
       messages: [
         { role: "system", content: EXTRACTION_SYSTEM_PROMPT },

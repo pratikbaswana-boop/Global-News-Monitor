@@ -1,8 +1,10 @@
 export { openai } from "./client";
 export {
   chatComplete,
+  chatCompleteFast,
   llmProvider,
   llmChatModel,
+  llmFastModel,
   type ChatMessage,
   type ChatCompleteParams,
   type ChatCompleteResponse,

@@ -27,7 +27,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
               <div className="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center">
                 <Globe className="h-5 w-5 text-primary" />
               </div>
-              <span className="font-bold text-base tracking-tight" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>Intel<span className="text-muted-foreground font-medium">Dash</span></span>
+              <span className="font-bold text-base tracking-tight" style={{ fontFamily: "'Inter', sans-serif" }}>Intel<span className="text-muted-foreground font-medium">Dash</span></span>
             </div>
           </SidebarHeader>
           <SidebarContent>
@@ -36,8 +36,8 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
               <SidebarGroupContent>
                 <SidebarMenu>
                   <SidebarMenuItem>
-                    <SidebarMenuButton asChild isActive={location === "/"} className="data-[active=true]:bg-primary/10 data-[active=true]:text-primary data-[active=true]:border-l-2 data-[active=true]:border-primary rounded-md px-3 py-2.5 text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-all">
-                      <Link href={`${basePath}`}>
+                    <SidebarMenuButton asChild isActive={location === "/dashboard" || location === "/"} className="data-[active=true]:bg-primary/10 data-[active=true]:text-primary data-[active=true]:border-l-2 data-[active=true]:border-primary rounded-md px-3 py-2.5 text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-all">
+                      <Link href={`${basePath}dashboard`}>
                         <LayoutDashboard className="h-4 w-4" />
                         <span>Terminal</span>
                       </Link>

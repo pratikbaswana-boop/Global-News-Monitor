@@ -59,7 +59,7 @@ export default function Dashboard() {
               <div className="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center">
                 <Activity className="h-4 w-4 text-primary" />
               </div>
-              <h1 className="text-xl font-bold tracking-tight" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>Global Intelligence Terminal</h1>
+              <h1 className="text-xl font-bold tracking-tight" style={{ fontFamily: "'Inter', sans-serif" }}>Global Intelligence Terminal</h1>
             </div>
 
             <div className="flex items-center gap-6 text-sm font-mono text-muted-foreground">

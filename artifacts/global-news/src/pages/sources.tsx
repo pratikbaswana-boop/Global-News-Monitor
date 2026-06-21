@@ -15,7 +15,7 @@ export default function Sources() {
       <div className="flex-1 overflow-y-auto">
         <div className="p-6 max-w-screen-2xl mx-auto space-y-6">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight mb-2" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>Data Sources</h1>
+            <h1 className="text-3xl font-bold tracking-tight mb-2" style={{ fontFamily: "'Inter', sans-serif" }}>Data Sources</h1>
             <p className="text-muted-foreground/70 text-sm">Overview of incoming intel streams and collection metrics.</p>
           </div>
 
@@ -23,7 +23,7 @@ export default function Sources() {
             {/* NewsAPI */}
             <Card className="bg-[#0a1512] border border-emerald-400/15 rounded-lg hover:bg-[#0d1a16] transition-colors">
               <CardHeader className="pb-2">
-                <CardTitle className="flex items-center gap-2 text-emerald-400 text-sm font-bold" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>
+                <CardTitle className="flex items-center gap-2 text-emerald-400 text-sm font-bold" style={{ fontFamily: "'Inter', sans-serif" }}>
                   <Database className="h-4 w-4" />
                   NewsAPI
                 </CardTitle>
@@ -52,7 +52,7 @@ export default function Sources() {
             {/* GNews */}
             <Card className="bg-[#100a15] border border-violet-400/15 rounded-lg hover:bg-[#140d1a] transition-colors">
               <CardHeader className="pb-2">
-                <CardTitle className="flex items-center gap-2 text-violet-400 text-sm font-bold" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>
+                <CardTitle className="flex items-center gap-2 text-violet-400 text-sm font-bold" style={{ fontFamily: "'Inter', sans-serif" }}>
                   <Zap className="h-4 w-4" />
                   GNews
                 </CardTitle>
@@ -81,7 +81,7 @@ export default function Sources() {
             {/* Guardian */}
             <Card className="bg-[#150a0e] border border-rose-400/15 rounded-lg hover:bg-[#1a0d12] transition-colors">
               <CardHeader className="pb-2">
-                <CardTitle className="flex items-center gap-2 text-rose-400 text-sm font-bold" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>
+                <CardTitle className="flex items-center gap-2 text-rose-400 text-sm font-bold" style={{ fontFamily: "'Inter', sans-serif" }}>
                   <SiTheguardian className="h-4 w-4" />
                   The Guardian
                 </CardTitle>
@@ -111,7 +111,7 @@ export default function Sources() {
           {/* System Health */}
           <Card className="mt-6 bg-[#10131b] border-border/20 rounded-lg">
             <CardHeader className="pb-3 border-b border-border/20">
-              <CardTitle className="flex items-center gap-2 text-sm font-bold" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>
+              <CardTitle className="flex items-center gap-2 text-sm font-bold" style={{ fontFamily: "'Inter', sans-serif" }}>
                 <HardDrive className="h-4 w-4 text-primary" />
                 System Health
               </CardTitle>

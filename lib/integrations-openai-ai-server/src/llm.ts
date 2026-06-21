@@ -22,6 +22,7 @@ const DEFAULT_CHAT_MODEL =
   "gpt-4o";
 
 const CHAT_MODEL = process.env.LLM_MODEL_CHAT || DEFAULT_CHAT_MODEL;
+const FAST_CHAT_MODEL = process.env.LLM_MODEL_FAST || CHAT_MODEL;
 
 let _anthropic: Anthropic | null = null;
 function getAnthropic(): Anthropic {
@@ -147,12 +148,11 @@ export async function chatComplete(
 
 async function openaiChat(
   params: ChatCompleteParams,
+  modelOverride?: string,
 ): Promise<ChatCompleteResponse> {
   const client = getOpenAIForChat();
-  // Always use env-configured model — ignore call-site overrides so a single
-  // env flip swaps every call site.
   const res = await client.chat.completions.create({
-    model: CHAT_MODEL,
+    model: modelOverride || CHAT_MODEL,
     temperature: params.temperature,
     max_tokens: params.max_tokens,
     messages: params.messages,
@@ -179,6 +179,7 @@ async function openaiChat(
 
 async function anthropicChat(
   params: ChatCompleteParams,
+  modelOverride?: string,
 ): Promise<ChatCompleteResponse> {
   const client = getAnthropic();
 
@@ -193,8 +194,7 @@ async function anthropicChat(
   }
 
   const res = await client.messages.create({
-    // Always use env-configured Claude model
-    model: CHAT_MODEL,
+    model: modelOverride || CHAT_MODEL,
     max_tokens: params.max_tokens ?? 4096,
     temperature: params.temperature,
     system: system || undefined,
@@ -233,8 +233,10 @@ async function anthropicChat(
 
 async function bedrockChat(
   params: ChatCompleteParams,
+  modelOverride?: string,
 ): Promise<ChatCompleteResponse> {
   const client = getBedrock();
+  const model = modelOverride || CHAT_MODEL;
 
   // Separate system messages from turn messages
   const systemMessages = params.messages.filter((m) => m.role === "system");
@@ -258,7 +260,7 @@ async function bedrockChat(
   }));
 
   const command = new ConverseCommand({
-    modelId: CHAT_MODEL,
+    modelId: model,
     system,
     messages,
     inferenceConfig: {
@@ -267,7 +269,7 @@ async function bedrockChat(
     },
   });
 
-  const res = await withBackoff(() => client.send(command), `bedrock:${CHAT_MODEL}`);
+  const res = await withBackoff(() => client.send(command), `bedrock:${model}`);
 
   const textContent = res.output?.message?.content
     ?.filter((c: { text?: string }): c is { text: string } => "text" in c && typeof c.text === "string")
@@ -289,7 +291,7 @@ async function bedrockChat(
         finish_reason: res.stopReason ?? "stop",
       },
     ],
-    model: CHAT_MODEL,
+    model: modelOverride || CHAT_MODEL,
     usage: usage
       ? {
           prompt_tokens: usage.inputTokens ?? 0,
@@ -302,3 +304,20 @@ async function bedrockChat(
 
 export const llmProvider = PROVIDER;
 export const llmChatModel = CHAT_MODEL;
+export const llmFastModel = FAST_CHAT_MODEL;
+
+/**
+ * Fast model variant for lightweight tasks (event extraction, summarisation).
+ * Uses LLM_MODEL_FAST env var; falls back to the main chat model if not set.
+ */
+export async function chatCompleteFast(
+  params: ChatCompleteParams,
+): Promise<ChatCompleteResponse> {
+  if (PROVIDER === "openai") {
+    return openaiChat(params, FAST_CHAT_MODEL);
+  }
+  if (PROVIDER === "bedrock") {
+    return bedrockChat(params, FAST_CHAT_MODEL);
+  }
+  return anthropicChat(params, FAST_CHAT_MODEL);
+}

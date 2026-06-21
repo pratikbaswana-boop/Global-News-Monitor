@@ -99,6 +99,7 @@ services:
       # LLM provider — flip via .env.production
       LLM_PROVIDER: ${LLM_PROVIDER:-openai}
       LLM_MODEL_CHAT: ${LLM_MODEL_CHAT:-gpt-4o-mini}
+      LLM_MODEL_FAST: ${LLM_MODEL_FAST:-}
       LLM_MODEL_EMBED: ${LLM_MODEL_EMBED:-}
 
       OPENAI_API_KEY: ${OPENAI_API_KEY:?set in .env.production}

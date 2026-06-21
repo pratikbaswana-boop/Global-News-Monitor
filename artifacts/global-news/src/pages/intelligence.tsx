@@ -1943,7 +1943,7 @@ export default function Intelligence() {
                 <div className="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
                   <Brain className="h-4 w-4 text-primary" />
                 </div>
-                <h1 className="text-lg sm:text-xl font-bold tracking-tight truncate" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>Intelligence Analysis</h1>
+                <h1 className="text-lg sm:text-xl font-bold tracking-tight truncate" style={{ fontFamily: "'Inter', sans-serif" }}>Intelligence Analysis</h1>
               </div>
               <div className="flex items-center gap-2 shrink-0">
                 {clusterData && (

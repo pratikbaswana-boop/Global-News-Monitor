@@ -15,7 +15,7 @@ export default function Trending() {
       <div className="flex-1 overflow-y-auto">
         <div className="p-6 max-w-screen-2xl mx-auto space-y-6">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight mb-2" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>Trending Vectors</h1>
+            <h1 className="text-3xl font-bold tracking-tight mb-2" style={{ fontFamily: "'Inter', sans-serif" }}>Trending Vectors</h1>
             <p className="text-muted-foreground/70 text-sm">Entity frequency analysis across all monitored data sources.</p>
           </div>
 
@@ -23,7 +23,7 @@ export default function Trending() {
             {/* Countries */}
             <Card className="bg-[#10131b] border-border/20 rounded-lg">
               <CardHeader className="pb-3 border-b border-border/20">
-                <CardTitle className="flex items-center gap-2 text-sm font-bold" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>
+                <CardTitle className="flex items-center gap-2 text-sm font-bold" style={{ fontFamily: "'Inter', sans-serif" }}>
                   <Map className="h-4 w-4 text-primary" />
                   Geopolitical Hotspots
                 </CardTitle>
@@ -66,7 +66,7 @@ export default function Trending() {
             {/* Leaders */}
             <Card className="bg-[#10131b] border-border/20 rounded-lg">
               <CardHeader className="pb-3 border-b border-border/20">
-                <CardTitle className="flex items-center gap-2 text-sm font-bold" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>
+                <CardTitle className="flex items-center gap-2 text-sm font-bold" style={{ fontFamily: "'Inter', sans-serif" }}>
                   <Users className="h-4 w-4 text-amber-400" />
                   Key Figures
                 </CardTitle>
@@ -109,7 +109,7 @@ export default function Trending() {
             {/* Topics */}
             <Card className="bg-[#10131b] border-border/20 rounded-lg">
               <CardHeader className="pb-3 border-b border-border/20">
-                <CardTitle className="flex items-center gap-2 text-sm font-bold" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>
+                <CardTitle className="flex items-center gap-2 text-sm font-bold" style={{ fontFamily: "'Inter', sans-serif" }}>
                   <Hash className="h-4 w-4 text-blue-400" />
                   Emerging Themes
                 </CardTitle>

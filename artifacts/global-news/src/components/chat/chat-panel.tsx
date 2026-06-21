@@ -55,7 +55,7 @@ export function ChatPanel() {
             <Brain className="h-4 w-4 text-primary" />
           </div>
           <div className="leading-tight">
-            <div className="text-sm font-semibold tracking-tight" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>
+            <div className="text-sm font-semibold tracking-tight" style={{ fontFamily: "'Inter', sans-serif" }}>
               IntelDash Assistant
             </div>
             <div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
