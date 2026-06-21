@@ -11,8 +11,9 @@ import {
   SidebarProvider,
   SidebarHeader,
   SidebarFooter,
+  SidebarTrigger,
 } from "@/components/ui/sidebar";
-import { LayoutDashboard, TrendingUp, Database, Globe, Brain } from "lucide-react";
+import { LayoutDashboard, TrendingUp, Database, Globe, Brain, Menu } from "lucide-react";
 import React from "react";
 import { UserMenu } from "@/components/auth/user-menu";
 const basePath = import.meta.env.BASE_URL;
@@ -78,6 +79,13 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
           </SidebarFooter>
         </Sidebar>
         <main className="flex-1 flex flex-col overflow-hidden">
+          <div className="flex items-center gap-3 border-b border-border/40 bg-[#0c0e14] px-4 py-3 md:hidden">
+            <SidebarTrigger className="h-9 w-9 shrink-0">
+              <Menu className="h-5 w-5" />
+              <span className="sr-only">Toggle menu</span>
+            </SidebarTrigger>
+            <span className="font-bold text-sm tracking-tight" style={{ fontFamily: "'Inter', sans-serif" }}>Intel<span className="text-muted-foreground font-medium">Dash</span></span>
+          </div>
           {children}
         </main>
       </div>
