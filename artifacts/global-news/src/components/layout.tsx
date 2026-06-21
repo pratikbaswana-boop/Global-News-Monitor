@@ -9,10 +9,12 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
-  SidebarHeader
+  SidebarHeader,
+  SidebarFooter,
 } from "@/components/ui/sidebar";
 import { LayoutDashboard, TrendingUp, Database, Globe, Brain } from "lucide-react";
 import React from "react";
+import { UserMenu } from "@/components/auth/user-menu";
 const basePath = import.meta.env.BASE_URL;
 
 export function AppLayout({ children }: { children: React.ReactNode }) {
@@ -71,6 +73,9 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
               </SidebarGroupContent>
             </SidebarGroup>
           </SidebarContent>
+          <SidebarFooter className="p-3 border-t border-border/40">
+            <UserMenu />
+          </SidebarFooter>
         </Sidebar>
         <main className="flex-1 flex flex-col overflow-hidden">
           {children}

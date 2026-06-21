@@ -8,17 +8,50 @@ import Trending from "@/pages/trending";
 import Sources from "@/pages/sources";
 import Intelligence from "@/pages/intelligence";
 import LandingPage from "@/pages/landing";
+import { AuthProvider } from "@/hooks/use-auth";
+import { AuthGuard } from "@/components/auth/auth-guard";
+import { useAppOpenTracking, usePageViewTracking } from "@/hooks/use-engagement";
 
 const queryClient = new QueryClient();
+
+function EngagementTracker() {
+  useAppOpenTracking();
+  usePageViewTracking();
+  return null;
+}
 
 function Router() {
   return (
     <Switch>
       <Route path="/" component={LandingPage} />
-      <Route path="/dashboard" component={Dashboard} />
-      <Route path="/trending" component={Trending} />
-      <Route path="/sources" component={Sources} />
-      <Route path="/intelligence" component={Intelligence} />
+      <Route path="/dashboard">
+        {() => (
+          <AuthGuard>
+            <Dashboard />
+          </AuthGuard>
+        )}
+      </Route>
+      <Route path="/trending">
+        {() => (
+          <AuthGuard>
+            <Trending />
+          </AuthGuard>
+        )}
+      </Route>
+      <Route path="/sources">
+        {() => (
+          <AuthGuard>
+            <Sources />
+          </AuthGuard>
+        )}
+      </Route>
+      <Route path="/intelligence">
+        {() => (
+          <AuthGuard>
+            <Intelligence />
+          </AuthGuard>
+        )}
+      </Route>
       <Route component={NotFound} />
     </Switch>
   );
@@ -26,14 +59,17 @@ function Router() {
 
 function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <TooltipProvider>
-        <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
-          <Router />
-        </WouterRouter>
-        <Toaster />
-      </TooltipProvider>
-    </QueryClientProvider>
+    <AuthProvider>
+      <QueryClientProvider client={queryClient}>
+        <TooltipProvider>
+          <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
+            <EngagementTracker />
+            <Router />
+          </WouterRouter>
+          <Toaster />
+        </TooltipProvider>
+      </QueryClientProvider>
+    </AuthProvider>
   );
 }
 

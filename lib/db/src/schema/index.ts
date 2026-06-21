@@ -32,3 +32,9 @@ export * from "./prediction-v2";
 export * from "./market-regimes";
 // Phase 5 — Prediction System Hardening
 export * from "./flip-guards";
+
+// User Auth & Engagement Tracking
+export * from "./users";
+export * from "./user-sessions";
+export * from "./page-views";
+export * from "./app-opens";
