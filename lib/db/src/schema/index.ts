@@ -38,3 +38,11 @@ export * from "./users";
 export * from "./user-sessions";
 export * from "./page-views";
 export * from "./app-opens";
+
+// Broker & Trading Integration
+export * from "./broker-accounts";
+export * from "./broker-orders";
+export * from "./broker-positions";
+export * from "./broker-holdings";
+export * from "./signal-executions";
+export * from "./user-trade-preferences";

@@ -69,6 +69,10 @@ GUARDIAN_KEY=${GUARDIAN_KEY:-}
 ACLED_API_KEY=${ACLED_API_KEY:-}
 ACLED_EMAIL=${ACLED_EMAIL:-}
 
+# ── Kite Connect (Zerodha broker) ─────────────────────────
+KITE_API_KEY=${KITE_API_KEY:-}
+KITE_API_SECRET=${KITE_API_SECRET:-}
+
 # ── Push (optional) ──────────────────────────────────────
 VAPID_PUBLIC_KEY=${VAPID_PUBLIC_KEY:-}
 VAPID_PRIVATE_KEY=${VAPID_PRIVATE_KEY:-}
