@@ -7,6 +7,7 @@ export const brokerAccountsTable = pgTable("broker_accounts", {
   userId: text("user_id").notNull(),
   brokerName: text("broker_name").notNull().default("zerodha"),
   apiKey: text("api_key"),
+  apiSecret: text("api_secret"),
   accessToken: text("access_token"),
   refreshToken: text("refresh_token"),
   publicToken: text("public_token"),

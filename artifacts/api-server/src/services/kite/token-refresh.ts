@@ -1,7 +1,7 @@
 import { db, brokerAccountsTable } from "@workspace/db";
 import { eq, lt } from "drizzle-orm";
 import { logger } from "../../lib/logger.js";
-import { createKiteClient, getKiteApiSecret } from "./kite-client.js";
+import { createKiteClient, getApiSecret } from "./kite-client.js";
 
 const REFRESH_WINDOW_MS = 6 * 60 * 60 * 1000; // Refresh tokens expiring within 6h
 
@@ -42,14 +42,15 @@ async function refreshSingleToken(account: typeof brokerAccountsTable.$inferSele
     return;
   }
 
-  const apiSecret = getKiteApiSecret();
+  const apiSecret = account.apiSecret;
   if (!apiSecret) {
-    logger.warn("token-refresh: KITE_API_SECRET not configured");
-    return;
+    logger.warn({ userId: account.userId }, "token-refresh: no apiSecret for account, trying global fallback");
+    // fallback handled by getApiSecret below
   }
 
-  const kite = createKiteClient({ apiKey: account.apiKey, accessToken: account.accessToken ?? undefined });
-  const result = await kite.renewAccessToken(account.refreshToken, apiSecret);
+  const kite = createKiteClient({ apiKey: account.apiKey, apiSecret: account.apiSecret ?? undefined, accessToken: account.accessToken ?? undefined });
+  const resolvedSecret = getApiSecret({ apiSecret: account.apiSecret ?? undefined });
+  const result = await kite.renewAccessToken(account.refreshToken, resolvedSecret);
 
   const data = result as Record<string, unknown>;
   const newAccessToken = String(data["access_token"] ?? "");

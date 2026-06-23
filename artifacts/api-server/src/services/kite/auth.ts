@@ -1,7 +1,7 @@
 import { db, brokerAccountsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { logger } from "../../lib/logger.js";
-import { createKiteClient, getKiteApiKey, getKiteApiSecret } from "./kite-client.js";
+import { createKiteClient, getApiSecret } from "./kite-client.js";
 import { randomUUID } from "crypto";
 
 export interface KiteSession {
@@ -20,12 +20,15 @@ export interface KiteSession {
   avatarUrl?: string;
 }
 
-export async function exchangeRequestToken(requestToken: string): Promise<KiteSession> {
-  const kite = createKiteClient();
-  const apiSecret = getKiteApiSecret();
+export async function exchangeRequestToken(
+  requestToken: string,
+  apiKey: string,
+  apiSecret: string
+): Promise<KiteSession> {
+  const kite = createKiteClient({ apiKey });
 
   if (!apiSecret) {
-    throw new Error("KITE_API_SECRET not configured");
+    throw new Error("Kite API secret is required");
   }
 
   const session = await kite.generateSession(requestToken, apiSecret);
@@ -53,7 +56,8 @@ export async function exchangeRequestToken(requestToken: string): Promise<KiteSe
 export async function saveBrokerAccount(
   appUserId: string,
   session: KiteSession,
-  apiKey: string
+  apiKey: string,
+  apiSecret: string
 ): Promise<string> {
   // Check if account already exists
   const existing = await db
@@ -70,6 +74,7 @@ export async function saveBrokerAccount(
       .update(brokerAccountsTable)
       .set({
         apiKey,
+        apiSecret,
         accessToken: session.accessToken,
         refreshToken: session.refreshToken ?? null,
         publicToken: session.publicToken ?? null,
@@ -89,6 +94,7 @@ export async function saveBrokerAccount(
     userId: appUserId,
     brokerName: session.broker || "zerodha",
     apiKey,
+    apiSecret,
     accessToken: session.accessToken,
     refreshToken: session.refreshToken ?? null,
     publicToken: session.publicToken ?? null,

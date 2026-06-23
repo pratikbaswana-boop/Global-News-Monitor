@@ -391,7 +391,8 @@ async function fetchOptionChainFull(): Promise<{
   maxPainStrike: number | null;
   maxPainDistancePct: number | null;
 }> {
-  // Try NSE direct API first (works locally), fallback to Firecrawl (works on EC2)
+  // Firecrawl is PRIMARY via nseGet (works on EC2); NSE direct is fallback.
+  // Dedicated Firecrawl fallbacks (Upstox PCR + NiftyInvest Max Pain) if both fail.
   if (USE_NSE_DIRECT) {
     try {
       interface OptionChainRecord {
@@ -526,40 +527,24 @@ async function fetchIndiaVixYahoo(): Promise<{ current: number; previousClose: n
 }
 
 export async function fetchLiveSnapshot(): Promise<LiveSnapshot> {
-  // Try NSE direct first, fallback to Firecrawl for EC2/cloud deployments
-  const [vixDirect, optDirect, adrDirect, sectorDirect, inrUsd, crude, yield10y] = await Promise.allSettled([
-    USE_NSE_DIRECT ? fetchIndiaVix() : Promise.reject(new Error("NSE direct disabled")),
-    fetchOptionChainFull(),
-    USE_NSE_DIRECT ? fetchADRatio() : Promise.reject(new Error("NSE direct disabled")),
-    USE_NSE_DIRECT ? fetchSectoralDeltas() : Promise.reject(new Error("NSE direct disabled")),
-    fetchInrUsdFull(),
-    fetchCrudeBrent(),
-    fetchYield10Y(),
-  ]);
-
-  // Firecrawl fallback for VIX + AD ratio + sectoral (used when NSE direct fails on EC2)
+  // Firecrawl is PRIMARY for VIX + AD + sectoral (works on EC2 where NSE blocks IPs).
+  // NSE direct is fallback for local dev. Correct index: NIFTY 50 (not NSE500).
   let vixData: { current: number | null; previousClose: number | null; change: number | null };
   let adrData: { advance: number; decline: number; ratio: number } = { advance: 0, decline: 0, ratio: 0 };
   let sectorData: SectorDeltas | null = null;
 
-  if (vixDirect.status === "fulfilled") {
-    vixData = vixDirect.value ?? { current: null, previousClose: null, change: null };
-    adrData = adrDirect.status === "fulfilled" ? adrDirect.value : { advance: 0, decline: 0, ratio: 0 };
-    sectorData = sectorDirect.status === "fulfilled" ? sectorDirect.value : null;
-  } else {
-    // Fallback: fetch allIndices via Firecrawl to get VIX + AD + sectoral in one call
-    const allIdx = await fetchNseAllIndicesFirecrawl();
+  // 1. Try Firecrawl allIndices first (single call gets VIX + Nifty50 AD + sectoral)
+  const allIdx = await fetchNseAllIndicesFirecrawl();
+  if (allIdx.vix !== null && allIdx.advances !== null && allIdx.declines !== null) {
     vixData = {
       current: allIdx.vix,
       previousClose: null,
       change: null,
     };
     adrData = {
-      advance: allIdx.advances ?? 0,
-      decline: allIdx.declines ?? 0,
-      ratio: (allIdx.advances ?? 0) > 0 && (allIdx.declines ?? 0) > 0
-        ? (allIdx.advances! / allIdx.declines!)
-        : 0,
+      advance: allIdx.advances,
+      decline: allIdx.declines,
+      ratio: allIdx.declines > 0 ? allIdx.advances / allIdx.declines : 0,
     };
     // Derive sectoral deltas from bankNifty and niftyIt vs nifty50
     if (allIdx.nifty50 && allIdx.bankNifty && allIdx.niftyIt) {
@@ -577,12 +562,30 @@ export async function fetchLiveSnapshot(): Promise<LiveSnapshot> {
         pharma: 0,
         auto: 0,
       };
-    } else {
-      sectorData = null;
     }
+    logger.info({ vix: allIdx.vix, advances: allIdx.advances, declines: allIdx.declines }, "tier3-fetcher: Firecrawl allIndices primary succeeded");
+  } else {
+    // 2. Fallback to NSE direct (local dev only)
+    logger.warn("Firecrawl allIndices incomplete — falling back to NSE direct");
+    const [vixDirect, adrDirect, sectorDirect] = await Promise.allSettled([
+      fetchIndiaVix(),
+      fetchADRatio(),
+      fetchSectoralDeltas(),
+    ]);
+    vixData = vixDirect.status === "fulfilled" ? vixDirect.value : { current: null, previousClose: null, change: null };
+    adrData = adrDirect.status === "fulfilled" ? adrDirect.value : { advance: 0, decline: 0, ratio: 0 };
+    sectorData = sectorDirect.status === "fulfilled" ? sectorDirect.value : null;
   }
 
-  const optData = optDirect.status === "fulfilled" ? optDirect.value : { pcr: null, atmIv: null, totalOi: 0, maxPainStrike: null as number | null, maxPainDistancePct: null as number | null };
+  // Option chain, FX, crude, yields are independent of NSE/Firecrawl choice
+  const optDirect = await fetchOptionChainFull();
+  const [inrUsd, crude, yield10y] = await Promise.allSettled([
+    fetchInrUsdFull(),
+    fetchCrudeBrent(),
+    fetchYield10Y(),
+  ]);
+
+  const optData = optDirect ?? { pcr: null, atmIv: null, totalOi: 0, maxPainStrike: null as number | null, maxPainDistancePct: null as number | null };
   const fxData = inrUsd.status === "fulfilled" ? inrUsd.value : { rate: 83.5, change5dPct: 0 };
   const crudeData = crude.status === "fulfilled" ? crude.value : { price: 82.0, change5dPct: 0 };
   const yieldData = yield10y.status === "fulfilled" ? yield10y.value : { yield: 7.0, change5dBps: 0 };

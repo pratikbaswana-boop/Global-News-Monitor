@@ -3,15 +3,17 @@ import { db, brokerAccountsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { logger } from "../../lib/logger.js";
 
+// Global env fallback (legacy single-app mode)
 const KITE_API_KEY = process.env["KITE_API_KEY"] ?? "";
 const KITE_API_SECRET = process.env["KITE_API_SECRET"] ?? "";
 
 if (!KITE_API_KEY || !KITE_API_SECRET) {
-  logger.warn("KITE_API_KEY or KITE_API_SECRET not set — broker integration will not work");
+  logger.warn("KITE_API_KEY or KITE_API_SECRET not set — global fallback disabled, per-user keys required");
 }
 
 export interface KiteCredentials {
   apiKey: string;
+  apiSecret?: string;
   accessToken?: string;
 }
 
@@ -28,6 +30,14 @@ export function createKiteClient(creds?: KiteCredentials): KiteConnect {
     client.setAccessToken(token);
   }
   return client;
+}
+
+/** Resolve the API secret to use for a given user — prefers per-user key, falls back to global env. */
+export function getApiSecret(creds?: { apiSecret?: string | null }): string {
+  const perUser = creds?.apiSecret;
+  if (perUser) return perUser;
+  if (KITE_API_SECRET) return KITE_API_SECRET;
+  throw new Error("Kite API secret is required (set per-user or via KITE_API_SECRET)");
 }
 
 export async function getKiteClientForUser(userId: string): Promise<KiteConnect | null> {
@@ -51,6 +61,7 @@ export async function getKiteClientForUser(userId: string): Promise<KiteConnect 
 
     return createKiteClient({
       apiKey: account.apiKey ?? KITE_API_KEY,
+      apiSecret: account.apiSecret ?? undefined,
       accessToken: account.accessToken,
     });
   } catch (err) {
@@ -59,11 +70,12 @@ export async function getKiteClientForUser(userId: string): Promise<KiteConnect 
   }
 }
 
-export function getKiteLoginUrl(): string {
-  if (!KITE_API_KEY) {
-    throw new Error("KITE_API_KEY not configured");
+export function getKiteLoginUrl(apiKey?: string): string {
+  const key = apiKey ?? KITE_API_KEY;
+  if (!key) {
+    throw new Error("Kite API key is required (pass per-user key or set KITE_API_KEY)");
   }
-  const kite = createKiteClient();
+  const kite = createKiteClient({ apiKey: key });
   return kite.getLoginURL();
 }
 

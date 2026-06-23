@@ -93,6 +93,14 @@ async function ensureNseSession(): Promise<void> {
 }
 
 async function nseGet<T>(path: string): Promise<T> {
+  // Firecrawl is PRIMARY (works on EC2/cloud where NSE blocks IPs).
+  // NSE direct is fallback for local dev only.
+  try {
+    return await firecrawlFetchJson<T>(`https://www.nseindia.com${path}`);
+  } catch (fcErr) {
+    logger.warn({ path, err: fcErr instanceof Error ? fcErr.message : fcErr }, "Firecrawl failed — falling back to NSE direct");
+  }
+
   try {
     await ensureNseSession();
     const res = await fetch(`https://www.nseindia.com${path}`, {
@@ -104,8 +112,8 @@ async function nseGet<T>(path: string): Promise<T> {
     if (!res.ok) throw new Error(`NSE ${path} returned HTTP ${res.status}`);
     return res.json() as Promise<T>;
   } catch (err) {
-    logger.warn({ path, err: err instanceof Error ? err.message : err }, "NSE direct fetch failed — trying Firecrawl");
-    return firecrawlFetchJson<T>(`https://www.nseindia.com${path}`);
+    logger.error({ path, err: err instanceof Error ? err.message : err }, "NSE direct fallback also failed");
+    throw err;
   }
 }
 

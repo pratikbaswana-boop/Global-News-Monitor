@@ -23,10 +23,12 @@ import {
 const router = Router();
 
 // GET /broker/login-url — Return Kite Connect OAuth URL
-router.get("/broker/login-url", (_req, res) => {
+// Supports per-user API keys via query params (e.g. ?apiKey=abc&apiSecret=xyz)
+router.get("/broker/login-url", (req, res) => {
   try {
-    const url = getKiteLoginUrl();
-    res.json({ loginUrl: url, apiKey: getKiteApiKey() });
+    const apiKey = req.query.apiKey as string | undefined;
+    const url = getKiteLoginUrl(apiKey);
+    res.json({ loginUrl: url, apiKey: apiKey ?? getKiteApiKey() });
   } catch (err) {
     logger.error({ err }, "broker login-url failed");
     res.status(500).json({ error: "Kite API not configured" });
@@ -36,16 +38,19 @@ router.get("/broker/login-url", (_req, res) => {
 // POST /broker/callback — Exchange request token for session
 router.post("/broker/callback", async (req, res) => {
   try {
-    const { requestToken, userId } = req.body;
+    const { requestToken, userId, apiKey, apiSecret } = req.body;
 
     if (!requestToken || !userId) {
       res.status(400).json({ error: "requestToken and userId are required" });
       return;
     }
+    if (!apiKey || !apiSecret) {
+      res.status(400).json({ error: "apiKey and apiSecret are required (per-user Kite Connect credentials)" });
+      return;
+    }
 
-    const session = await exchangeRequestToken(requestToken);
-    const apiKey = getKiteApiKey();
-    const accountId = await saveBrokerAccount(userId, session, apiKey);
+    const session = await exchangeRequestToken(requestToken, apiKey, apiSecret);
+    const accountId = await saveBrokerAccount(userId, session, apiKey, apiSecret);
 
     // Connect WebSocket for real-time order updates
     void connectTickerForUser(userId);
