@@ -7,7 +7,7 @@ import { randomUUID } from "crypto";
 const router = Router();
 
 // Upsert user on Firebase login
-router.post("/api/auth/user", async (req, res) => {
+router.post("/auth/user", async (req, res) => {
   try {
     const { uid, email, displayName, photoURL } = req.body;
 

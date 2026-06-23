@@ -19,7 +19,7 @@ interface TrackPayload {
   viewportHeight?: number;
 }
 
-router.post("/api/engagement/track", async (req, res) => {
+router.post("/engagement/track", async (req, res) => {
   try {
     const payload = req.body as TrackPayload;
     const { userId, event } = payload;
