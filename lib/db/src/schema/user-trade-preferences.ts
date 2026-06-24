@@ -17,9 +17,15 @@ export const userTradePreferencesTable = pgTable("user_trade_preferences", {
   targetPct: numeric("target_pct").default("1.2"),   // +1.2% target
   stopLossPct: numeric("stop_loss_pct").default("2.0"), // -2.0% stop
   useGttBracket: boolean("use_gtt_bracket").notNull().default(true),
+  // Exit strategy
+  exitStrategy: text("exit_strategy").notNull().default("trailing_ratchet"), // fixed_target | trailing_ratchet
+  trailGapPct: numeric("trail_gap_pct").default("15"), // % gap for proportional ratchet
   // Execution guardrails
   minConfidence: text("min_confidence").notNull().default("medium"), // low | medium | high
   onlyIntraday: boolean("only_intraday").notNull().default(true),
+  // F&O auto-trade settings
+  useOptions: boolean("use_options").notNull().default(false),
+  maxCapitalPerTrade: numeric("max_capital_per_trade"), // max ₹ to deploy per trade (for F&O)
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

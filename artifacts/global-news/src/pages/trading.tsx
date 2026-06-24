@@ -43,6 +43,8 @@ interface TradePreference {
   targetPct: string;
   stopLossPct: string;
   useGttBracket: boolean;
+  exitStrategy: string;
+  trailGapPct: string;
   minConfidence: string;
   onlyIntraday: boolean;
 }
@@ -118,6 +120,7 @@ export default function TradingPage() {
   const [connecting, setConnecting] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const [updatingPrefs, setUpdatingPrefs] = useState<Record<string, boolean>>({});
+  const [configuringAsset, setConfiguringAsset] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Handle Kite OAuth callback redirect
@@ -232,6 +235,31 @@ export default function TradingPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ userId, assetId, enabled }),
+      });
+      await refetchPrefs();
+    } catch {
+      // ignore
+    } finally {
+      setUpdatingPrefs((prev) => ({ ...prev, [assetId]: false }));
+    }
+  }
+
+  async function updateAssetConfig(
+    assetId: string,
+    config: {
+      exitStrategy?: string;
+      trailGapPct?: string;
+      stopLossPct?: string;
+      targetPct?: string;
+    }
+  ) {
+    if (!userId) return;
+    setUpdatingPrefs((prev) => ({ ...prev, [assetId]: true }));
+    try {
+      await fetch(`${API_BASE}/broker/trade-preferences`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId, assetId, ...config }),
       });
       await refetchPrefs();
     } catch {
@@ -451,35 +479,138 @@ export default function TradingPage() {
                         const pref = prefsData.preferences.find((p) => p.assetId === asset.id);
                         const enabled = pref?.enabled ?? false;
                         const updating = updatingPrefs[asset.id] ?? false;
+                        const isConfiguring = configuringAsset === asset.id;
+                        const exitStrategy = pref?.exitStrategy ?? "trailing_ratchet";
+                        const trailGapPct = pref?.trailGapPct ?? "15";
+                        const stopLossPct = pref?.stopLossPct ?? "2.0";
+                        const targetPct = pref?.targetPct ?? "1.2";
                         return (
                           <div
                             key={asset.id}
-                            className={`flex items-center justify-between p-4 rounded-lg border transition-colors ${
+                            className={`rounded-lg border transition-colors ${
                               enabled
                                 ? "bg-primary/5 border-primary/30"
                                 : "bg-[#0c0e14] border-border/20"
                             }`}
                           >
-                            <div className="flex items-center gap-3">
-                              <div
-                                className={`h-8 w-8 rounded-md flex items-center justify-center text-xs font-bold ${
-                                  enabled ? "bg-primary/20 text-primary" : "bg-muted/30 text-muted-foreground"
-                                }`}
-                              >
-                                {asset.symbol.slice(0, 2)}
+                            <div className="flex items-center justify-between p-4">
+                              <div className="flex items-center gap-3">
+                                <div
+                                  className={`h-8 w-8 rounded-md flex items-center justify-center text-xs font-bold ${
+                                    enabled ? "bg-primary/20 text-primary" : "bg-muted/30 text-muted-foreground"
+                                  }`}
+                                >
+                                  {asset.symbol.slice(0, 2)}
+                                </div>
+                                <div>
+                                  <p className="text-sm font-medium">{asset.name}</p>
+                                  <p className="text-[10px] font-mono text-muted-foreground">
+                                    {asset.symbol} · {asset.exchange}
+                                  </p>
+                                </div>
                               </div>
-                              <div>
-                                <p className="text-sm font-medium">{asset.name}</p>
-                                <p className="text-[10px] font-mono text-muted-foreground">
-                                  {asset.symbol} · {asset.exchange}
-                                </p>
+                              <div className="flex items-center gap-2">
+                                {enabled && (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-7 text-[10px] text-muted-foreground hover:text-primary"
+                                    onClick={() => setConfiguringAsset(isConfiguring ? null : asset.id)}
+                                  >
+                                    <Settings className="h-3 w-3 mr-1" />
+                                    {isConfiguring ? "Done" : "Config"}
+                                  </Button>
+                                )}
+                                <Switch
+                                  checked={enabled}
+                                  onCheckedChange={(v) => toggleAsset(asset.id, v)}
+                                  disabled={updating}
+                                />
                               </div>
                             </div>
-                            <Switch
-                              checked={enabled}
-                              onCheckedChange={(v) => toggleAsset(asset.id, v)}
-                              disabled={updating}
-                            />
+
+                            {enabled && isConfiguring && (
+                              <div className="px-4 pb-4 space-y-3 border-t border-border/10 pt-3">
+                                <div className="space-y-1.5">
+                                  <Label className="text-[10px] text-muted-foreground">Exit Strategy</Label>
+                                  <select
+                                    className="w-full h-8 rounded-md border border-border/30 bg-[#0c0e14] px-2 text-xs text-muted-foreground"
+                                    value={exitStrategy}
+                                    onChange={(e) => updateAssetConfig(asset.id, { exitStrategy: e.target.value })}
+                                    disabled={updating}
+                                  >
+                                    <option value="trailing_ratchet">Trailing Ratchet (No Target)</option>
+                                    <option value="fixed_target">Fixed Target</option>
+                                  </select>
+                                </div>
+
+                                {exitStrategy === "trailing_ratchet" ? (
+                                  <div className="grid grid-cols-2 gap-3">
+                                    <div className="space-y-1.5">
+                                      <Label className="text-[10px] text-muted-foreground">Trail Gap %</Label>
+                                      <Input
+                                        type="number"
+                                        min={5}
+                                        max={50}
+                                        step={1}
+                                        value={trailGapPct}
+                                        onChange={(e) => updateAssetConfig(asset.id, { trailGapPct: e.target.value })}
+                                        disabled={updating}
+                                        className="h-8 text-xs bg-[#0c0e14] border-border/30"
+                                      />
+                                    </div>
+                                    <div className="space-y-1.5">
+                                      <Label className="text-[10px] text-muted-foreground">Hard Stop %</Label>
+                                      <Input
+                                        type="number"
+                                        min={0.5}
+                                        max={100}
+                                        step={0.1}
+                                        value={stopLossPct}
+                                        onChange={(e) => updateAssetConfig(asset.id, { stopLossPct: e.target.value })}
+                                        disabled={updating}
+                                        className="h-8 text-xs bg-[#0c0e14] border-border/30"
+                                      />
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div className="grid grid-cols-2 gap-3">
+                                    <div className="space-y-1.5">
+                                      <Label className="text-[10px] text-muted-foreground">Target %</Label>
+                                      <Input
+                                        type="number"
+                                        min={0.1}
+                                        max={100}
+                                        step={0.1}
+                                        value={targetPct}
+                                        onChange={(e) => updateAssetConfig(asset.id, { targetPct: e.target.value })}
+                                        disabled={updating}
+                                        className="h-8 text-xs bg-[#0c0e14] border-border/30"
+                                      />
+                                    </div>
+                                    <div className="space-y-1.5">
+                                      <Label className="text-[10px] text-muted-foreground">Stop Loss %</Label>
+                                      <Input
+                                        type="number"
+                                        min={0.1}
+                                        max={100}
+                                        step={0.1}
+                                        value={stopLossPct}
+                                        onChange={(e) => updateAssetConfig(asset.id, { stopLossPct: e.target.value })}
+                                        disabled={updating}
+                                        className="h-8 text-xs bg-[#0c0e14] border-border/30"
+                                      />
+                                    </div>
+                                  </div>
+                                )}
+
+                                <p className="text-[10px] text-muted-foreground/50">
+                                  {exitStrategy === "trailing_ratchet"
+                                    ? `Ratchet: every +10% milestone, floor = milestone × (1 - ${trailGapPct}%). Hard stop at -${stopLossPct}% before first milestone.`
+                                    : `Fixed target: exit at +${targetPct}% or -${stopLossPct}%.`}
+                                </p>
+                              </div>
+                            )}
                           </div>
                         );
                       })}
@@ -494,26 +625,29 @@ export default function TradingPage() {
                   <CardHeader className="pb-3 border-b border-border/20">
                     <CardTitle className="text-[11px] font-bold uppercase tracking-[0.12em] flex items-center gap-2 text-muted-foreground">
                       <Shield className="h-4 w-4 text-primary" />
-                      Risk Settings
+                      Strategy Overview
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="p-4">
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
                       <div className="space-y-1">
-                        <p className="text-xs text-muted-foreground">Max Risk / Trade</p>
-                        <p className="font-mono text-primary">2%</p>
+                        <p className="text-xs text-muted-foreground">Default Exit Strategy</p>
+                        <p className="font-mono text-primary">Trailing Ratchet</p>
                       </div>
                       <div className="space-y-1">
-                        <p className="text-xs text-muted-foreground">Default Product</p>
-                        <p className="font-mono text-primary">MIS (Intraday)</p>
-                      </div>
-                      <div className="space-y-1">
-                        <p className="text-xs text-muted-foreground">Target / Stop</p>
-                        <p className="font-mono text-primary">1.2% / 2.0%</p>
+                        <p className="text-xs text-muted-foreground">Default Trail Gap</p>
+                        <p className="font-mono text-primary">15% (Balanced)</p>
                       </div>
                     </div>
-                    <p className="text-[10px] text-muted-foreground/50 mt-4">
-                      Risk settings can be customized per asset in the Asset Preferences panel above.
+                    <div className="mt-3 p-3 rounded-md bg-muted/20 border border-border/10">
+                      <p className="text-[10px] text-muted-foreground leading-relaxed">
+                        <strong className="text-primary">Proportional Ratchet:</strong> Every +10% profit milestone,
+                        the floor ratchets up to <em>milestone × (1 - gap%)</em>. No fixed take-profit ceiling
+                        — lets winners run while locking in gains at each step.
+                      </p>
+                    </div>
+                    <p className="text-[10px] text-muted-foreground/50 mt-3">
+                      Click <strong>Config</strong> on any enabled asset above to customize gap %, hard stop, or switch to fixed target mode.
                     </p>
                   </CardContent>
                 </Card>

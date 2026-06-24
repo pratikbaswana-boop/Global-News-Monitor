@@ -19,8 +19,12 @@ export const signalExecutionsTable = pgTable("signal_executions", {
   // Exit logic
   targetPrice: numeric("target_price"),
   stopLossPrice: numeric("stop_loss_price"),
+  highestPriceReached: numeric("highest_price_reached"), // peak price for trailing ratchet
+  trailGapPct: numeric("trail_gap_pct"), // snapshot of gap setting at entry
+  exitStrategy: text("exit_strategy"), // fixed_target | trailing_ratchet
+  product: text("product"), // MIS | CNC | NRML
   gttTriggerId: text("gtt_trigger_id"), // Kite GTT trigger ID for bracket
-  exitReason: text("exit_reason"), // target_hit | stop_loss | manual | eod_squareoff
+  exitReason: text("exit_reason"), // target_hit | stop_loss | manual | eod_squareoff | trailing_stop
   executedAt: timestamp("executed_at", { withTimezone: true }).notNull().defaultNow(),
   closedAt: timestamp("closed_at", { withTimezone: true }),
 });

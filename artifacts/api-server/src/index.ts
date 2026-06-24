@@ -11,6 +11,7 @@ import { startResolutionScheduler } from "./services/resolution/index.js";
 import { startMarketCloseSummaryScheduler } from "./services/notifications/push-notifications.js";
 import { startChannelRecalibrationScheduler } from "./services/graph/channel-recalibration.js";
 import { startSignalExecutorScheduler } from "./services/kite/signal-executor-scheduler.js";
+import { startPositionMonitorScheduler } from "./services/kite/position-monitor-scheduler.js";
 import { startTokenRefreshScheduler } from "./services/kite/token-refresh-scheduler.js";
 
 const rawPort = process.env["PORT"];
@@ -81,6 +82,9 @@ app.listen(port, (err) => {
 
     // Broker: Auto-trade signal executor (runs every 5 min during IST market hours).
     startSignalExecutorScheduler();
+
+    // Broker: Trailing ratchet position monitor (runs every 2 min during IST market hours).
+    startPositionMonitorScheduler();
 
     // Broker: Token refresh (runs every 6h, refreshes tokens expiring within 6h).
     startTokenRefreshScheduler();

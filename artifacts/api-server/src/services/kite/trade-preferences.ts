@@ -33,8 +33,12 @@ export async function setTradePreference(
     targetPct?: string;
     stopLossPct?: string;
     useGttBracket?: boolean;
+    exitStrategy?: string;
+    trailGapPct?: string;
     minConfidence?: string;
     onlyIntraday?: boolean;
+    useOptions?: boolean;
+    maxCapitalPerTrade?: string;
   }
 ): Promise<void> {
   const existing = await db
@@ -61,8 +65,12 @@ export async function setTradePreference(
         ...(settings.targetPct !== undefined ? { targetPct: settings.targetPct } : {}),
         ...(settings.stopLossPct !== undefined ? { stopLossPct: settings.stopLossPct } : {}),
         ...(settings.useGttBracket !== undefined ? { useGttBracket: settings.useGttBracket } : {}),
+        ...(settings.exitStrategy !== undefined ? { exitStrategy: settings.exitStrategy } : {}),
+        ...(settings.trailGapPct !== undefined ? { trailGapPct: settings.trailGapPct } : {}),
         ...(settings.minConfidence !== undefined ? { minConfidence: settings.minConfidence } : {}),
         ...(settings.onlyIntraday !== undefined ? { onlyIntraday: settings.onlyIntraday } : {}),
+        ...(settings.useOptions !== undefined ? { useOptions: settings.useOptions } : {}),
+        ...(settings.maxCapitalPerTrade !== undefined ? { maxCapitalPerTrade: settings.maxCapitalPerTrade } : {}),
         updatedAt: new Date(),
       })
       .where(eq(userTradePreferencesTable.id, existing[0].id));
@@ -80,8 +88,12 @@ export async function setTradePreference(
       targetPct: settings.targetPct ?? null,
       stopLossPct: settings.stopLossPct ?? null,
       useGttBracket: settings.useGttBracket ?? true,
+      exitStrategy: settings.exitStrategy ?? "trailing_ratchet",
+      trailGapPct: settings.trailGapPct ?? null,
       minConfidence: settings.minConfidence ?? "medium",
       onlyIntraday: settings.onlyIntraday ?? true,
+      useOptions: settings.useOptions ?? false,
+      maxCapitalPerTrade: settings.maxCapitalPerTrade ?? null,
       createdAt: new Date(),
       updatedAt: new Date(),
     });

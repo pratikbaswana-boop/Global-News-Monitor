@@ -167,8 +167,12 @@ router.post("/broker/trade-preferences", async (req, res) => {
       targetPct,
       stopLossPct,
       useGttBracket,
+      exitStrategy,
+      trailGapPct,
       minConfidence,
       onlyIntraday,
+      useOptions,
+      maxCapitalPerTrade,
     } = req.body;
 
     if (!userId || !assetId) {
@@ -185,8 +189,12 @@ router.post("/broker/trade-preferences", async (req, res) => {
       targetPct,
       stopLossPct,
       useGttBracket,
+      exitStrategy,
+      trailGapPct,
       minConfidence,
       onlyIntraday,
+      useOptions,
+      maxCapitalPerTrade,
     });
 
     res.json({ success: true });

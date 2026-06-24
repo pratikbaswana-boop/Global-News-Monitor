@@ -3,6 +3,7 @@ import { eq, desc, and, gt, or } from "drizzle-orm";
 import { logger } from "../../lib/logger.js";
 import { placeOrder, type PlaceOrderParams } from "./orders.js";
 import { getMargins, syncPortfolio } from "./portfolio.js";
+import { getKiteClientForUser } from "./kite-client.js";
 import { randomUUID } from "crypto";
 
 // Asset symbol → Kite trading symbol mapping
@@ -18,6 +19,222 @@ interface ExecutionResult {
   executed: boolean;
   orderId?: string;
   reason?: string;
+}
+
+// ── Option Trading Constants ────────────────────────────────────────────────
+const NIFTY_LOT_SIZE = 75;
+const MIN_OPTION_PREMIUM = 30;
+const MAX_OPTION_PREMIUM = 400;
+const MAX_OPTION_LOTS = 20;
+const OPTION_HARD_STOP_PCT = 30; // entry framework hard stop
+const OPTION_TRAIL_GAP_PCT = 15; // entry framework trail gap
+const NIFTY_STRIKE_INTERVAL = 50;
+
+function getNearestWeeklyExpiry(): Date {
+  const today = new Date();
+  const day = today.getDay(); // 0=Sun, 1=Mon, ..., 4=Thu
+  let daysUntilThursday = (4 - day + 7) % 7;
+  const expiry = new Date(today);
+  expiry.setDate(today.getDate() + daysUntilThursday);
+  // If today is Thursday and after market close (~15:30 IST), use next Thursday
+  const istHour = today.getUTCHours() + 5;
+  const istMin = today.getUTCMinutes() + 30;
+  if (day === 4 && (istHour > 15 || (istHour === 15 && istMin >= 30))) {
+    expiry.setDate(today.getDate() + 7);
+  }
+  return expiry;
+}
+
+function formatExpiryForSymbol(expiry: Date): string {
+  const day = String(expiry.getDate()).padStart(2, "0");
+  const monthNames = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
+  const month = monthNames[expiry.getMonth()];
+  const year = String(expiry.getFullYear()).slice(-2);
+  return `${day}${month}${year}`;
+}
+
+function buildOptionSymbol(
+  underlying: string,
+  expiry: Date,
+  strike: number,
+  type: "CE" | "PE"
+): string {
+  return `${underlying}${formatExpiryForSymbol(expiry)}${strike}${type}`;
+}
+
+interface OptionCandidate {
+  symbol: string;
+  strike: number;
+  deltaEstimate: number;
+  premium: number;
+  lots: number;
+}
+
+/**
+ * Build 5 strike candidates around the suggested ATM strike.
+ * For CALLs: lower strike = ITM. For PUTs: higher strike = ITM.
+ */
+function buildStrikeCandidates(
+  suggestedStrike: number,
+  signal: "BUY_CALL" | "BUY_PUT",
+  expiry: Date
+): { symbol: string; strike: number; deltaEstimate: number }[] {
+  const type = signal === "BUY_CALL" ? "CE" : "PE";
+  const candidates: { symbol: string; strike: number; deltaEstimate: number }[] = [];
+
+  if (signal === "BUY_CALL") {
+    candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike - 100, type), strike: suggestedStrike - 100, deltaEstimate: 0.80 }); // 2 ITM
+    candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike - 50,  type), strike: suggestedStrike - 50,  deltaEstimate: 0.65 }); // 1 ITM
+    candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike,       type), strike: suggestedStrike,       deltaEstimate: 0.50 }); // ATM
+    candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike + 50,  type), strike: suggestedStrike + 50,  deltaEstimate: 0.35 }); // 1 OTM
+    candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike + 100, type), strike: suggestedStrike + 100, deltaEstimate: 0.20 }); // 2 OTM
+  } else {
+    candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike + 100, type), strike: suggestedStrike + 100, deltaEstimate: 0.80 }); // 2 ITM
+    candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike + 50,  type), strike: suggestedStrike + 50,  deltaEstimate: 0.65 }); // 1 ITM
+    candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike,       type), strike: suggestedStrike,       deltaEstimate: 0.50 }); // ATM
+    candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike - 50,  type), strike: suggestedStrike - 50,  deltaEstimate: 0.35 }); // 1 OTM
+    candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike - 100, type), strike: suggestedStrike - 100, deltaEstimate: 0.20 }); // 2 OTM
+  }
+  return candidates;
+}
+
+/**
+ * Fetch LTP for candidate option symbols via Kite.
+ * Returns only valid quotes with non-zero premium.
+ */
+async function fetchOptionQuotes(
+  userId: string,
+  candidates: { symbol: string; strike: number; deltaEstimate: number }[]
+): Promise<OptionCandidate[]> {
+  const kite = await getKiteClientForUser(userId);
+  if (!kite) return [];
+
+  const instruments = candidates.map((c) => `NFO:${c.symbol}`);
+  const quotes = await kite.getQuote(instruments);
+
+  const results: OptionCandidate[] = [];
+  for (const c of candidates) {
+    const key = `NFO:${c.symbol}`;
+    const quote = (quotes as Record<string, unknown>)[key];
+    if (!quote) continue;
+    const lastPrice = Number((quote as Record<string, unknown>).last_price ?? 0);
+    if (lastPrice <= 0) continue;
+    results.push({
+      symbol: c.symbol,
+      strike: c.strike,
+      deltaEstimate: c.deltaEstimate,
+      premium: lastPrice,
+      lots: 0,
+    });
+  }
+  return results;
+}
+
+/**
+ * Select the best option candidate based on capital and score = lots × delta.
+ * High capital (≥₹50k): only delta >= 0.50. Low capital: all valid.
+ */
+function selectBestOption(
+  candidates: OptionCandidate[],
+  maxCapital: number
+): OptionCandidate | null {
+  const costPerLot = (c: OptionCandidate) => c.premium * NIFTY_LOT_SIZE;
+
+  const scored = candidates
+    .filter((c) => c.premium >= MIN_OPTION_PREMIUM && c.premium <= MAX_OPTION_PREMIUM)
+    .map((c) => {
+      const lots = Math.min(
+        Math.floor(maxCapital / costPerLot(c)),
+        MAX_OPTION_LOTS
+      );
+      return { ...c, lots };
+    })
+    .filter((c) => c.lots >= 1);
+
+  if (scored.length === 0) return null;
+
+  // High capital filter: prefer quality strikes (delta >= 0.50)
+  const highCapital = maxCapital >= 50000;
+  const eligible = highCapital ? scored.filter((c) => c.deltaEstimate >= 0.50) : scored;
+  if (eligible.length === 0 && highCapital) return null;
+
+  const pool = eligible.length > 0 ? eligible : scored;
+  pool.sort((a, b) => (b.lots * b.deltaEstimate) - (a.lots * a.deltaEstimate));
+  return pool[0];
+}
+
+/**
+ * Derive option signal (BUY_CALL / BUY_PUT / NO_TRADE) from snapshot tier-3 data.
+ * Mirrors deriveOptionSignal in intelligence.ts but only returns signal + strike.
+ */
+function deriveOptionSignalFromSnapshot(
+  snapshot: typeof marketSnapshotsTable.$inferSelect
+): { signal: "BUY_CALL" | "BUY_PUT" | "NO_TRADE"; suggestedStrike: number | null; reason: string } {
+  const aiDirection = (snapshot.predictedDirection === "uncertain" ? "neutral" : snapshot.predictedDirection) as "up" | "down" | "neutral";
+  const aiConfidence = snapshot.predictedConfidence as "high" | "medium" | "low";
+  const maxPainDistancePct = snapshot.maxPainDistancePct;
+  const shortCoveringSignal = (snapshot.shortCoveringSignal ?? "none") as "none" | "covering" | "unwinding";
+  const sgxNiftyChangePct = snapshot.sgxNiftyChangePct;
+  const tier3Json = snapshot.tier3Evidence ? JSON.parse(snapshot.tier3Evidence) as Record<string, unknown> : {};
+  const putCallRatio = typeof tier3Json.putCallRatio === "number" ? tier3Json.putCallRatio : null;
+  const realPrice = snapshot.realPriceAtSnapshot ? parseFloat(snapshot.realPriceAtSnapshot) : null;
+
+  const hasMaxPain = maxPainDistancePct !== null;
+  const hasPcr = putCallRatio !== null;
+  const hasSgx = sgxNiftyChangePct !== null;
+
+  if (!hasMaxPain && !hasPcr && !hasSgx) {
+    return { signal: "NO_TRADE", reason: "Insufficient options data", suggestedStrike: null };
+  }
+
+  const suggestedStrike = realPrice ? Math.round(realPrice / NIFTY_STRIKE_INTERVAL) * NIFTY_STRIKE_INTERVAL : null;
+
+  // Reversal: Max Pain stretch
+  if (hasMaxPain && maxPainDistancePct! > 1.5) {
+    return { signal: "BUY_PUT", reason: `Max pain stretch +${maxPainDistancePct!.toFixed(1)}%`, suggestedStrike };
+  }
+  if (hasMaxPain && maxPainDistancePct! < -1.5) {
+    return { signal: "BUY_CALL", reason: `Max pain stretch ${maxPainDistancePct!.toFixed(1)}%`, suggestedStrike };
+  }
+
+  // Reversal: PCR extremes
+  if (hasPcr && putCallRatio! < 0.65) {
+    return { signal: "BUY_PUT", reason: `PCR ${putCallRatio!.toFixed(2)} too bullish`, suggestedStrike };
+  }
+  if (hasPcr && putCallRatio! > 1.35) {
+    return { signal: "BUY_CALL", reason: `PCR ${putCallRatio!.toFixed(2)} too bearish`, suggestedStrike };
+  }
+
+  // Trend: Short covering
+  if (shortCoveringSignal === "covering") {
+    return { signal: "BUY_CALL", reason: "Short covering active", suggestedStrike };
+  }
+  if (shortCoveringSignal === "unwinding") {
+    return { signal: "BUY_PUT", reason: "Fresh shorts entering", suggestedStrike };
+  }
+
+  // SGX divergence
+  if (hasSgx && aiDirection === "up" && sgxNiftyChangePct! < -0.8) {
+    return { signal: "NO_TRADE", reason: `SGX divergence ${sgxNiftyChangePct!.toFixed(1)}%`, suggestedStrike: null };
+  }
+  if (hasSgx && aiDirection === "down" && sgxNiftyChangePct! > 0.8) {
+    return { signal: "NO_TRADE", reason: `SGX divergence +${sgxNiftyChangePct!.toFixed(1)}%`, suggestedStrike: null };
+  }
+
+  // Mild max pain conflict
+  if (hasMaxPain && Math.abs(maxPainDistancePct!) > 1.0) {
+    return { signal: "NO_TRADE", reason: `Mild max pain conflict ${maxPainDistancePct!.toFixed(1)}%`, suggestedStrike: null };
+  }
+
+  // Default to AI direction
+  if (aiDirection === "up") {
+    return { signal: "BUY_CALL", reason: "AI bullish + tier-3 neutral", suggestedStrike };
+  }
+  if (aiDirection === "down") {
+    return { signal: "BUY_PUT", reason: "AI bearish + tier-3 neutral", suggestedStrike };
+  }
+
+  return { signal: "NO_TRADE", reason: "AI direction neutral", suggestedStrike: null };
 }
 
 /**
@@ -40,12 +257,6 @@ export async function processSignalForAutoTrade(snapshotId: string): Promise<voi
 
   const snapshot = snapshotRows[0];
   const direction = snapshot.predictedDirection;
-
-  // Only trade on clear directional signals
-  if (direction !== "up" && direction !== "down") {
-    logger.info({ snapshotId, direction }, "signal-executor: non-directional signal, skipping auto-trade");
-    return;
-  }
 
   // Only trade high/medium confidence (checked per-user later too)
   if (snapshot.predictedConfidence === "low") {
@@ -120,7 +331,7 @@ async function getUserTradePreference(
   return rows[0] ?? null;
 }
 
-async function executeSignalForUser(
+async function executeSpotSignalForUser(
   userId: string,
   account: typeof brokerAccountsTable.$inferSelect,
   snapshot: typeof marketSnapshotsTable.$inferSelect,
@@ -128,6 +339,11 @@ async function executeSignalForUser(
   exchange: string,
   direction: "up" | "down"
 ): Promise<ExecutionResult> {
+  // Spot trades require a clear directional signal
+  if (direction !== "up" && direction !== "down") {
+    return { executed: false, reason: `Non-directional signal (${direction}) — spot trading requires up/down` };
+  }
+
   // 1. Check if user has enabled this asset for auto-trade
   const pref = await getUserTradePreference(userId, snapshot.assetId);
 
@@ -247,11 +463,14 @@ async function executeSignalForUser(
   const orderResult = await placeOrder(userId, orderParams);
 
   // Compute target/stop from per-asset settings
+  const exitStrategy = pref.exitStrategy ?? "trailing_ratchet";
   const targetPctVal = pref.targetPct ? parseFloat(pref.targetPct) : 1.2;
   const stopLossPctVal = pref.stopLossPct ? parseFloat(pref.stopLossPct) : 2.0;
+  const trailGapPctVal = pref.trailGapPct ? parseFloat(pref.trailGapPct) : 15;
 
   // Record the signal execution
-  await db.insert(signalExecutionsTable).values({
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const execValues: any = {
     id: randomUUID(),
     signalSnapshotId: snapshot.id,
     userId,
@@ -263,15 +482,211 @@ async function executeSignalForUser(
     quantity,
     entryPrice: realPrice > 0 ? String(realPrice) : null,
     status: "open",
-    targetPrice: realPrice > 0 ? String(realPrice * (direction === "up" ? 1 + targetPctVal / 100 : 1 - targetPctVal / 100)) : null,
-    stopLossPrice: realPrice > 0 ? String(realPrice * (direction === "up" ? 1 - stopLossPctVal / 100 : 1 + stopLossPctVal / 100)) : null,
+    exitStrategy,
+    product,
+    trailGapPct: String(trailGapPctVal),
+    highestPriceReached: realPrice > 0 ? String(realPrice) : null,
     executedAt: new Date(),
-  });
+  };
+
+  if (exitStrategy === "fixed_target") {
+    execValues.targetPrice = realPrice > 0 ? String(realPrice * (direction === "up" ? 1 + targetPctVal / 100 : 1 - targetPctVal / 100)) : null;
+    execValues.stopLossPrice = realPrice > 0 ? String(realPrice * (direction === "up" ? 1 - stopLossPctVal / 100 : 1 + stopLossPctVal / 100)) : null;
+  } else {
+    // trailing_ratchet: no fixed target; initial hard stop only
+    execValues.targetPrice = null;
+    execValues.stopLossPrice = realPrice > 0 ? String(realPrice * (direction === "up" ? 1 - stopLossPctVal / 100 : 1 + stopLossPctVal / 100)) : null;
+  }
+
+  await db.insert(signalExecutionsTable).values(execValues);
 
   // Sync portfolio in background so we have latest positions
   void syncPortfolio(userId);
 
   return { executed: true, orderId: orderResult.kiteOrderId };
+}
+
+/**
+ * Execute an option (F&O) signal for a user.
+ * Uses 5-strike search, quote fetching, and score-based selection.
+ */
+async function executeOptionSignalForUser(
+  userId: string,
+  account: typeof brokerAccountsTable.$inferSelect,
+  snapshot: typeof marketSnapshotsTable.$inferSelect
+): Promise<ExecutionResult> {
+  const pref = await getUserTradePreference(userId, snapshot.assetId);
+  if (!pref) {
+    return { executed: false, reason: `Asset ${snapshot.assetId} not configured for auto-trade` };
+  }
+
+  if (!pref.enabled) {
+    return { executed: false, reason: `Auto-trade disabled for ${snapshot.assetId}` };
+  }
+
+  // Confidence check
+  const signalConfidenceRank = CONFIDENCE_RANK[snapshot.predictedConfidence] ?? 0;
+  const requiredConfidenceRank = CONFIDENCE_RANK[pref.minConfidence] ?? 1;
+  if (signalConfidenceRank < requiredConfidenceRank) {
+    return { executed: false, reason: `Signal confidence ${snapshot.predictedConfidence} below threshold ${pref.minConfidence}` };
+  }
+
+  // Intraday check
+  if (pref.onlyIntraday && snapshot.timeframe !== "intraday") {
+    return { executed: false, reason: `Only intraday trades enabled, got ${snapshot.timeframe}` };
+  }
+
+  // Derive option signal from snapshot tier-3 data
+  const optionSig = deriveOptionSignalFromSnapshot(snapshot);
+  if (optionSig.signal === "NO_TRADE" || optionSig.suggestedStrike === null) {
+    return { executed: false, reason: optionSig.reason };
+  }
+
+  // Build 5 strike candidates
+  const expiry = getNearestWeeklyExpiry();
+  const candidates = buildStrikeCandidates(optionSig.suggestedStrike, optionSig.signal, expiry);
+
+  // Fetch live premiums
+  const quotes = await fetchOptionQuotes(userId, candidates);
+  if (quotes.length === 0) {
+    return { executed: false, reason: "Could not fetch option quotes" };
+  }
+
+  // Determine capital to deploy
+  const margins = await getMargins(userId);
+  if (!margins) {
+    return { executed: false, reason: "Could not fetch margins" };
+  }
+  const availableCash = margins.equity?.available?.cash ?? 0;
+  const maxCapital = pref.maxCapitalPerTrade
+    ? parseFloat(pref.maxCapitalPerTrade)
+    : availableCash;
+
+  if (maxCapital <= 0) {
+    return { executed: false, reason: "No capital allocated for trade" };
+  }
+
+  // Select best strike
+  const best = selectBestOption(quotes, maxCapital);
+  if (!best) {
+    return { executed: false, reason: "No affordable option strike found" };
+  }
+
+  const optionSymbol = best.symbol;
+  const exchange = "NFO";
+  const premium = best.premium;
+  const lots = best.lots;
+  const quantity = lots * NIFTY_LOT_SIZE;
+
+  // Check existing orders/positions on this option symbol
+  const existingOrders = await db
+    .select()
+    .from(brokerOrdersTable)
+    .where(and(
+      eq(brokerOrdersTable.userId, userId),
+      eq(brokerOrdersTable.tradingsymbol, optionSymbol),
+      eq(brokerOrdersTable.exchange, exchange),
+      eq(brokerOrdersTable.status, "OPEN")
+    ))
+    .limit(1);
+
+  if (existingOrders.length > 0) {
+    return { executed: false, reason: "Pending order already exists for this option" };
+  }
+
+  const existingPositions = await db
+    .select()
+    .from(brokerPositionsTable)
+    .where(and(
+      eq(brokerPositionsTable.userId, userId),
+      eq(brokerPositionsTable.tradingsymbol, optionSymbol),
+      eq(brokerPositionsTable.exchange, exchange),
+    ))
+    .limit(1);
+
+  const hasPosition = existingPositions.length > 0 && existingPositions[0].quantity > 0;
+  if (hasPosition) {
+    return { executed: false, reason: "Already holding option position" };
+  }
+
+  // Product/order type
+  const product = (pref.defaultProduct ?? account.defaultProduct ?? "MIS") as "CNC" | "MIS" | "NRML";
+  const orderType = (pref.defaultOrderType ?? account.defaultOrderType ?? "MARKET") as "MARKET" | "LIMIT" | "SL" | "SL-M";
+
+  // Place order
+  const orderParams: PlaceOrderParams = {
+    exchange,
+    tradingsymbol: optionSymbol,
+    transactionType: "BUY",
+    quantity,
+    orderType,
+    product,
+    tag: `auto-option-${snapshot.assetId}-${snapshot.id}`,
+  };
+
+  if (orderParams.orderType === "LIMIT" && premium > 0) {
+    orderParams.price = Math.round(premium * 1.005 * 100) / 100;
+  }
+
+  const orderResult = await placeOrder(userId, orderParams);
+
+  // Record execution — for options we are always LONG, so direction = "up"
+  const direction = "up";
+  const execValues: any = {
+    id: randomUUID(),
+    signalSnapshotId: snapshot.id,
+    userId,
+    brokerAccountId: account.id,
+    brokerOrderId: orderResult.kiteOrderId,
+    assetId: snapshot.assetId,
+    assetSymbol: optionSymbol,
+    direction,
+    quantity,
+    entryPrice: String(premium),
+    status: "open",
+    exitStrategy: "trailing_ratchet",
+    product,
+    trailGapPct: String(OPTION_TRAIL_GAP_PCT),
+    highestPriceReached: String(premium),
+    executedAt: new Date(),
+    targetPrice: null,
+    stopLossPrice: String(premium * (1 - OPTION_HARD_STOP_PCT / 100)),
+  };
+
+  await db.insert(signalExecutionsTable).values(execValues);
+  void syncPortfolio(userId);
+
+  logger.info({
+    userId,
+    snapshotId: snapshot.id,
+    orderId: orderResult.kiteOrderId,
+    optionSymbol,
+    premium,
+    lots,
+    quantity,
+    signal: optionSig.signal,
+    reason: optionSig.reason,
+  }, "signal-executor: option auto-trade executed");
+
+  return { executed: true, orderId: orderResult.kiteOrderId };
+}
+
+/**
+ * Dispatcher: route to spot or option execution based on user preference.
+ */
+async function executeSignalForUser(
+  userId: string,
+  account: typeof brokerAccountsTable.$inferSelect,
+  snapshot: typeof marketSnapshotsTable.$inferSelect,
+  tradingsymbol: string,
+  exchange: string,
+  direction: "up" | "down"
+): Promise<ExecutionResult> {
+  const pref = await getUserTradePreference(userId, snapshot.assetId);
+  if (pref?.useOptions) {
+    return executeOptionSignalForUser(userId, account, snapshot);
+  }
+  return executeSpotSignalForUser(userId, account, snapshot, tradingsymbol, exchange, direction);
 }
 
 /**
@@ -289,7 +704,8 @@ export async function scanAndExecutePendingSignals(): Promise<void> {
       gt(marketSnapshotsTable.snapshotAt, cutoff),
       or(
         eq(marketSnapshotsTable.predictedDirection, "up"),
-        eq(marketSnapshotsTable.predictedDirection, "down")
+        eq(marketSnapshotsTable.predictedDirection, "down"),
+        eq(marketSnapshotsTable.predictedDirection, "neutral")
       )
     ))
     .orderBy(desc(marketSnapshotsTable.snapshotAt));
