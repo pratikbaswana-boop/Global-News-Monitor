@@ -696,8 +696,11 @@ async function refreshSnapshotTier3(): Promise<void> {
       const pcrChanged = oldPcr === null || tier3.putCallRatio === null || Math.abs(tier3.putCallRatio - oldPcr) > 0.02;
       const maxPainChanged = oldMaxPain === null || freshMaxPainDistance === null || Math.abs(freshMaxPainDistance - oldMaxPain) > 0.10;
       const priceChanged = oldPrice === null || Math.abs(priceInfo.price - oldPrice) / oldPrice > 0.001;
+      // Always update if intraday signal has new samples (buffer growing or verdict changed)
+      const oldIntraday = oldTier3.intradaySignal as { samples?: number; signal?: string; ready?: boolean } | undefined;
+      const intradayChanged = !oldIntraday || oldIntraday.samples !== intraday.samples || oldIntraday.signal !== intraday.signal;
 
-      if (!pcrChanged && !maxPainChanged && !priceChanged) continue;
+      if (!pcrChanged && !maxPainChanged && !priceChanged && !intradayChanged) continue;
 
       // Build updated tier3 evidence
       const updatedTier3 = {
