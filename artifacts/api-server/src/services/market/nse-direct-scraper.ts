@@ -472,6 +472,210 @@ export async function fetchOptionChainPcrFirecrawl(): Promise<{
   }
 }
 
+// ── NSE Option Chain FULL via Firecrawl v2 (with JS render wait) ─────────────
+// Scrapes the NSE option-chain HTML page with waitFor=8000 so the JS-rendered
+// option chain table is fully loaded. Extracts total CE/PE OI, volume, ATM IV,
+// spot price, and per-strike OI for max pain calculation.
+//
+// This is the PRIMARY option chain source on EC2 where NSE's Akamai bot protection
+// blocks the /api/option-chain-v3 JSON endpoint (returns {} for non-browser clients).
+
+export async function fetchOptionChainFullFirecrawl(): Promise<{
+  pcr: number | null;
+  atmIv: number | null;
+  totalOi: number;
+  maxPainStrike: number | null;
+  maxPainDistancePct: number | null;
+  callOI: number;
+  putOI: number;
+  optionVolume: number;
+  atmGamma: number;
+  spotPrice: number | null;
+}> {
+  if (!FIRECRAWL_API_KEY) throw new Error("FIRECRAWL_API_KEY not set");
+
+  const res = await fetch("https://api.firecrawl.dev/v2/scrape", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${FIRECRAWL_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      url: "https://www.nseindia.com/option-chain",
+      formats: ["markdown"],
+      onlyMainContent: true,
+      waitFor: 8000,
+    }),
+    signal: AbortSignal.timeout(30_000),
+  });
+
+  if (!res.ok) throw new Error(`Firecrawl v2 option chain failed: ${res.status}`);
+  const fc = await res.json() as { success?: boolean; data?: { markdown?: string } };
+  const md = fc.data?.markdown ?? "";
+  if (!md) throw new Error("Firecrawl v2 returned empty markdown");
+
+  // Parse the Total row: | Total | CE_OI | ... | CE_Volume | ... | PE_Volume | ... | PE_OI | |
+  // The table header is: OI | Chng in OI | Volume | IV | LTP | ... | Strike | ... | IV | Volume | Chng in OI | OI
+  const totalMatch = md.match(/\|\s*Total\s*\|([^|]+)\|([^|]*)\|([^|]+)\|/);
+  let callOI = 0;
+  let putOI = 0;
+  let ceVolume = 0;
+  let peVolume = 0;
+  let pcr: number | null = null;
+
+  if (totalMatch) {
+    callOI = parseInt(totalMatch[1].replace(/,/g, "").trim(), 10) || 0;
+    ceVolume = parseInt(totalMatch[3].replace(/,/g, "").trim(), 10) || 0;
+  }
+
+  // Also parse PE OI and PE volume from the Total row (further right in the table)
+  // Total row format: | Total | CE_OI | - | CE_Vol | - | ... | - | PE_Vol | - | PE_OI | |
+  const totalParts = md.split("\n").find(l => l.includes("| Total |"))?.split("|").map(p => p.trim()) ?? [];
+  if (totalParts.length >= 22) {
+    // PE OI is the last numeric value before the trailing empty/chart column
+    for (let i = totalParts.length - 2; i >= 0; i--) {
+      const val = totalParts[i].replace(/,/g, "").trim();
+      if (/^\d+$/.test(val) && parseInt(val, 10) > 0) {
+        putOI = parseInt(val, 10);
+        break;
+      }
+    }
+    // PE Volume is the second-to-last numeric value
+    let foundPeOi = false;
+    for (let i = totalParts.length - 2; i >= 0; i--) {
+      const val = totalParts[i].replace(/,/g, "").trim();
+      if (/^\d+$/.test(val) && parseInt(val, 10) > 0) {
+        if (foundPeOi) {
+          peVolume = parseInt(val, 10);
+          break;
+        }
+        foundPeOi = true;
+      }
+    }
+  }
+
+  if (callOI > 0) {
+    pcr = putOI / callOI;
+  }
+
+  const totalOi = callOI + putOI;
+  const optionVolume = ceVolume + peVolume;
+
+  // Parse individual strike rows to find ATM IV, spot price, and max pain
+  // Row format: | chart_img | CE_OI | CE_ChngOI | CE_Vol | CE_IV | CE_LTP | ... | Strike | ... | PE_LTP | PE_IV | PE_Vol | PE_ChngOI | PE_OI | chart_img |
+  const strikes: { strike: number; ceOi: number; peOi: number; ceIv: number; peIv: number }[] = [];
+  let spotPrice: number | null = null;
+
+  for (const line of md.split("\n")) {
+    if (!line.startsWith("|") || line.includes("Total") || line.includes("CALLS") || line.includes("Strike Price")) continue;
+
+    const parts = line.split("|").map(p => p.trim().replace(/\[([^\]]+)\]\([^)]+\)/g, "$1").replace(/,/g, ""));
+    // Find the strike price column (format: "NNNNN.NN" or "NN,NNN.NN")
+    let strikeIdx = -1;
+    for (let i = 0; i < parts.length; i++) {
+      if (/^\d{4,6}\.\d{2}$/.test(parts[i])) {
+        strikeIdx = i;
+        break;
+      }
+    }
+    if (strikeIdx === -1) continue;
+
+    const strike = parseFloat(parts[strikeIdx]);
+    if (isNaN(strike) || strike <= 0) continue;
+
+    // CE OI is ~11 columns left of strike, PE OI is ~10 columns right
+    const ceOi = parseInt(parts[Math.max(0, strikeIdx - 11)] ?? "0", 10) || 0;
+    const ceIv = parseFloat(parts[Math.max(0, strikeIdx - 8)] ?? "0") || 0;
+    const peIv = parseFloat(parts[Math.min(parts.length - 1, strikeIdx + 8)] ?? "0") || 0;
+    const peOi = parseInt(parts[Math.min(parts.length - 1, strikeIdx + 11)] ?? "0", 10) || 0;
+
+    if (ceOi > 0 || peOi > 0) {
+      strikes.push({ strike, ceOi, peOi, ceIv, peIv });
+    }
+  }
+
+  // Spot price: try to extract from page content
+  const spotMatch = md.match(/NIFTY\s+50\s+Index[\s\S]*?(\d{2},\d{3}\.\d{2})/) ||
+                    md.match(/Underlying\s*Value\s*[:=]?\s*(\d{2},\d{3}\.\d{2})/i) ||
+                    md.match(/(\d{2},\d{3}\.\d{2})\s*[\d.]+%/);
+  if (spotMatch) {
+    spotPrice = parseFloat(spotMatch[1].replace(/,/g, ""));
+  }
+  // Fallback: use the ATM strike as approximate spot
+  if (!spotPrice && strikes.length > 0) {
+    // Find strike closest to the middle of the range
+    strikes.sort((a, b) => a.strike - b.strike);
+    const mid = strikes[Math.floor(strikes.length / 2)];
+    spotPrice = mid.strike;
+  }
+
+  // ATM IV: find strike closest to spot price
+  let atmIv: number | null = null;
+  let atmStrike = 0;
+  if (spotPrice && strikes.length > 0) {
+    let minDiff = Infinity;
+    for (const s of strikes) {
+      const diff = Math.abs(s.strike - spotPrice);
+      if (diff < minDiff) {
+        minDiff = diff;
+        atmIv = s.ceIv > 0 ? s.ceIv : s.peIv > 0 ? s.peIv : null;
+        atmStrike = s.strike;
+      }
+    }
+  }
+
+  // Max pain calculation
+  let maxPainStrike: number | null = null;
+  let maxPainDistancePct: number | null = null;
+  if (strikes.length > 0) {
+    let minPain = Infinity;
+    for (const candidate of strikes) {
+      let pain = 0;
+      for (const s of strikes) {
+        pain += s.ceOi * Math.max(0, candidate.strike - s.strike);
+        pain += s.peOi * Math.max(0, s.strike - candidate.strike);
+      }
+      if (pain < minPain) {
+        minPain = pain;
+        maxPainStrike = candidate.strike;
+      }
+    }
+    if (maxPainStrike !== null && maxPainStrike > 0 && spotPrice) {
+      maxPainDistancePct = ((spotPrice - maxPainStrike) / maxPainStrike) * 100;
+    }
+  }
+
+  // ATM gamma via Black-Scholes (import lazily to avoid circular deps)
+  let atmGamma = 0;
+  if (atmStrike > 0 && spotPrice && atmIv && atmIv > 0) {
+    try {
+      const { bsGamma } = await import("./tier3-signal.js");
+      const yearsToExpiry = (() => {
+        const now = new Date();
+        const day = now.getUTCDay();
+        let daysUntilThu = (4 - day + 7) % 7;
+        const ms = Math.max(daysUntilThu * 86400000, 2 * 3600000);
+        return ms / (365 * 86400000);
+      })();
+      atmGamma = bsGamma(spotPrice, atmStrike, atmIv / 100, yearsToExpiry);
+    } catch { /* tier3-signal not available */ }
+  }
+
+  logger.info({
+    pcr: pcr !== null ? pcr.toFixed(2) : "N/A",
+    callOI, putOI, optionVolume,
+    atmIv: atmIv ?? "N/A",
+    spotPrice: spotPrice ?? "N/A",
+    maxPainStrike: maxPainStrike ?? "N/A",
+    strikes: strikes.length,
+  }, "Firecrawl v2: full option chain parsed");
+
+  return {
+    pcr, atmIv, totalOi, maxPainStrike, maxPainDistancePct,
+    callOI, putOI, optionVolume, atmGamma, spotPrice,
+  };
+}
+
 // ── NSE allIndices via Firecrawl (for VIX, AD ratio, sectoral) ───────────────
 
 export async function fetchNseAllIndicesFirecrawl(): Promise<{

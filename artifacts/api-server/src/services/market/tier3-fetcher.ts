@@ -20,6 +20,7 @@ import {
   firecrawlFetchJson,
   fetchSGXNiftyFirecrawl,
   fetchOptionChainPcrFirecrawl,
+  fetchOptionChainFullFirecrawl,
   fetchNseAllIndicesFirecrawl,
   fetchPcrFromUpstox,
   fetchMaxPainFromNiftyInvest,
@@ -424,8 +425,39 @@ function yearsToWeeklyExpiry(): number {
 }
 
 async function fetchOptionChainFull(): Promise<OptionChainFull> {
-  // Firecrawl is PRIMARY via nseGet (works on EC2); NSE direct is fallback.
-  // Dedicated Firecrawl fallbacks (Upstox PCR + NiftyInvest Max Pain) if both fail.
+  // ── PRIMARY: Firecrawl v2 with JS render wait (works on EC2/cloud) ──────────
+  // NSE's Akamai bot protection blocks the /api/option-chain-v3 JSON endpoint
+  // for non-browser clients (returns {}). Firecrawl v2 with waitFor=8000 renders
+  // the HTML page with the JS-loaded option chain table, giving us full OI data.
+  try {
+    const chain = await fetchOptionChainFullFirecrawl();
+    if (chain.callOI > 0 && chain.putOI > 0) {
+      logger.info({
+        pcr: chain.pcr?.toFixed(2),
+        callOI: chain.callOI,
+        putOI: chain.putOI,
+        optionVolume: chain.optionVolume,
+        spotPrice: chain.spotPrice,
+      }, "tier3-fetcher: option chain from Firecrawl v2 (PRIMARY)");
+      return {
+        pcr: chain.pcr,
+        atmIv: chain.atmIv,
+        totalOi: chain.totalOi,
+        maxPainStrike: chain.maxPainStrike,
+        maxPainDistancePct: chain.maxPainDistancePct,
+        callOI: chain.callOI,
+        putOI: chain.putOI,
+        optionVolume: chain.optionVolume,
+        atmGamma: chain.atmGamma,
+        spotPrice: chain.spotPrice,
+      };
+    }
+    logger.warn({ callOI: chain.callOI, putOI: chain.putOI }, "tier3-fetcher: Firecrawl v2 returned zero OI — trying NSE direct");
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : err }, "tier3-fetcher: Firecrawl v2 option chain failed — trying NSE direct");
+  }
+
+  // ── FALLBACK 1: NSE direct API (works locally, blocked on EC2) ────────────
   if (USE_NSE_DIRECT) {
     try {
       interface OptionChainRecord {
