@@ -561,52 +561,71 @@ export async function fetchOptionChainFullFirecrawl(): Promise<{
   const totalOi = callOI + putOI;
   const optionVolume = ceVolume + peVolume;
 
-  // Parse individual strike rows to find ATM IV, spot price, and max pain
-  // Row format: | chart_img | CE_OI | CE_ChngOI | CE_Vol | CE_IV | CE_LTP | ... | Strike | ... | PE_LTP | PE_IV | PE_Vol | PE_ChngOI | PE_OI | chart_img |
+  // Parse individual strike rows using header-driven column detection.
+  // The NSE option chain table header looks like:
+  //   | | OI | Chng in OI | Volume | IV | LTP | Chng | Bid Qty | Bid | Ask | Ask Qty | Strike | Bid Qty | Bid | Ask | Ask Qty | Chng | LTP | IV | Volume | Chng in OI | OI | |
+  // We find the column indices from the header, then use them for all data rows.
   const strikes: { strike: number; ceOi: number; peOi: number; ceIv: number; peIv: number }[] = [];
   let spotPrice: number | null = null;
 
-  for (const line of md.split("\n")) {
-    if (!line.startsWith("|") || line.includes("Total") || line.includes("CALLS") || line.includes("Strike Price")) continue;
+  // Find header row to determine column indices
+  const lines = md.split("\n");
+  let ceOiCol = -1, ceIvCol = -1, strikeCol = -1, peIvCol = -1, peOiCol = -1;
+  for (const line of lines) {
+    if (line.includes("| OI |") && line.includes("Strike")) {
+      const headers = line.split("|").map(p => p.trim().toLowerCase());
+      for (let i = 0; i < headers.length; i++) {
+        if (headers[i] === "oi" && ceOiCol === -1) ceOiCol = i;
+        if (headers[i] === "iv" && ceIvCol === -1) ceIvCol = i;
+        if (headers[i] === "strike") strikeCol = i;
+        if (headers[i] === "iv" && ceIvCol !== -1 && i > strikeCol) peIvCol = i;
+        if (headers[i] === "oi" && ceOiCol !== -1 && i > strikeCol) peOiCol = i;
+      }
+      break;
+    }
+  }
+  // Fallback to known column positions if header not found
+  if (strikeCol === -1) { ceOiCol = 2; ceIvCol = 5; strikeCol = 12; peIvCol = 19; peOiCol = 22; }
+
+  for (const line of lines) {
+    if (!line.startsWith("|") || line.includes("Total") || line.includes("CALLS") || line.includes("Strike")) continue;
+    if (!line.includes("chart")) continue; // data rows have chart images
 
     const parts = line.split("|").map(p => p.trim().replace(/\[([^\]]+)\]\([^)]+\)/g, "$1").replace(/,/g, ""));
-    // Find the strike price column (format: "NNNNN.NN" or "NN,NNN.NN")
-    let strikeIdx = -1;
-    for (let i = 0; i < parts.length; i++) {
-      if (/^\d{4,6}\.\d{2}$/.test(parts[i])) {
-        strikeIdx = i;
-        break;
-      }
-    }
-    if (strikeIdx === -1) continue;
+    const strikeStr = parts[strikeCol] ?? "";
+    if (!/^\d{4,6}\.\d{2}$/.test(strikeStr)) continue;
 
-    const strike = parseFloat(parts[strikeIdx]);
+    const strike = parseFloat(strikeStr);
     if (isNaN(strike) || strike <= 0) continue;
 
-    // CE OI is ~11 columns left of strike, PE OI is ~10 columns right
-    const ceOi = parseInt(parts[Math.max(0, strikeIdx - 11)] ?? "0", 10) || 0;
-    const ceIv = parseFloat(parts[Math.max(0, strikeIdx - 8)] ?? "0") || 0;
-    const peIv = parseFloat(parts[Math.min(parts.length - 1, strikeIdx + 8)] ?? "0") || 0;
-    const peOi = parseInt(parts[Math.min(parts.length - 1, strikeIdx + 11)] ?? "0", 10) || 0;
+    const ceOi = parseInt(parts[ceOiCol] ?? "0", 10) || 0;
+    const ceIv = parseFloat(parts[ceIvCol] ?? "0") || 0;
+    const peIv = parseFloat(parts[peIvCol] ?? "0") || 0;
+    const peOi = parseInt(parts[peOiCol] ?? "0", 10) || 0;
 
     if (ceOi > 0 || peOi > 0) {
       strikes.push({ strike, ceOi, peOi, ceIv, peIv });
     }
   }
 
-  // Spot price: try to extract from page content
-  const spotMatch = md.match(/NIFTY\s+50\s+Index[\s\S]*?(\d{2},\d{3}\.\d{2})/) ||
-                    md.match(/Underlying\s*Value\s*[:=]?\s*(\d{2},\d{3}\.\d{2})/i) ||
-                    md.match(/(\d{2},\d{3}\.\d{2})\s*[\d.]+%/);
+  // Spot price: extract from page content
+  // The NSE page has "underlyingValue" or shows the NIFTY spot value near the top
+  const spotMatch = md.match(/underlying[^\d]*(\d{2},\d{3}\.\d{2})/i);
   if (spotMatch) {
     spotPrice = parseFloat(spotMatch[1].replace(/,/g, ""));
   }
-  // Fallback: use the ATM strike as approximate spot
+  // Fallback: use the strike with the highest combined OI as approximate spot (ATM)
   if (!spotPrice && strikes.length > 0) {
-    // Find strike closest to the middle of the range
-    strikes.sort((a, b) => a.strike - b.strike);
-    const mid = strikes[Math.floor(strikes.length / 2)];
-    spotPrice = mid.strike;
+    let maxOi = 0;
+    let atmStrikeVal = strikes[0]!.strike;
+    for (const s of strikes) {
+      const totalOi = s.ceOi + s.peOi;
+      if (totalOi > maxOi) {
+        maxOi = totalOi;
+        atmStrikeVal = s.strike;
+      }
+    }
+    spotPrice = atmStrikeVal;
   }
 
   // ATM IV: find strike closest to spot price
