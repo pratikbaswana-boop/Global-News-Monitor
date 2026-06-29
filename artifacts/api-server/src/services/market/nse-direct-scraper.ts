@@ -559,18 +559,28 @@ export async function fetchPcrFromUpstox(): Promise<{ pcr: number | null }> {
         url: "https://upstox.com/fno-discovery/open-interest-analysis/nifty-pcr/",
         formats: ["markdown"],
         onlyMainContent: true,
+        waitFor: 5000, // page is JS-rendered; PCR loads after initial paint
       }),
     });
     if (!res.ok) throw new Error(`Firecrawl Upstox PCR failed: ${res.status}`);
     const fc = await res.json() as { data?: { markdown?: string } };
     const md = fc.data?.markdown ?? "";
-    const match = md.match(/PCR[\s:=]+(\d+\.\d+)/i);
-    if (match) {
-      const pcr = parseFloat(match[1]);
-      logger.info({ pcr }, "Firecrawl: Upstox PCR parsed");
-      return { pcr };
+
+    // Try multiple PCR patterns (standalone, inline, FAQ sentence)
+    const patterns = [
+      /PCR\s*[:=]?\s*(\d+\.\d+)/i,              // "PCR 0.79" or "PCR: 0.79"
+      /has a PCR of (\d+\.\d+)/i,                // "has a PCR of 0.79"
+      /put.call ratio.*?is\s+(\d+\.\d+)/i,       // "put-call ratio is 0.79"
+    ];
+    for (const pattern of patterns) {
+      const match = md.match(pattern);
+      if (match) {
+        const pcr = parseFloat(match[1]);
+        logger.info({ pcr, pattern: pattern.source }, "Firecrawl: Upstox PCR parsed");
+        return { pcr };
+      }
     }
-    logger.warn("Firecrawl: Upstox PCR not found in markdown");
+    logger.warn({ markdownPreview: md.slice(0, 200).replace(/\s+/g, " ") }, "Firecrawl: Upstox PCR not found in markdown");
     return { pcr: null };
   } catch (err) {
     logger.warn({ err: err instanceof Error ? err.message : err }, "Upstox PCR Firecrawl fetch failed");

@@ -38,7 +38,9 @@ router.get("/broker/login-url", (req, res) => {
 // POST /broker/callback — Exchange request token for session
 router.post("/broker/callback", async (req, res) => {
   try {
-    const { requestToken, userId, apiKey, apiSecret } = req.body;
+    const { requestToken, userId } = req.body;
+    const apiKey = (req.body.apiKey ?? "").toString().trim();
+    const apiSecret = (req.body.apiSecret ?? "").toString().trim();
 
     if (!requestToken || !userId) {
       res.status(400).json({ error: "requestToken and userId are required" });
@@ -65,9 +67,11 @@ router.post("/broker/callback", async (req, res) => {
     });
   } catch (err) {
     logger.error({ err }, "broker callback failed");
-    res.status(500).json({
-      error: err instanceof Error ? err.message : "Failed to exchange request token",
-    });
+    const msg = err instanceof Error ? err.message : "Failed to exchange request token";
+    const userFriendly = msg.includes("Invalid \`checksum\`")
+      ? "Invalid API Key or API Secret. Make sure you're using the API Secret from kite.trade (not your Zerodha login password)."
+      : msg;
+    res.status(500).json({ error: userFriendly });
   }
 });
 

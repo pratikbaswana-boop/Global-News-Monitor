@@ -11,6 +11,7 @@
 // market-agent.ts and the ensemble layer.
 
 import { logger } from "../../lib/logger.js";
+import { bsGamma } from "./tier3-signal.js";
 import {
   fetchIndiaVix,
   fetchFiiDiiFlow,
@@ -63,6 +64,12 @@ export interface LiveSnapshot {
   openInterestChange: number;
   maxPainStrike: number | null;
   maxPainDistancePct: number | null;
+  // Microstructure inputs for the tier-3 intraday signal engine
+  callOI: number;
+  putOI: number;
+  optionVolume: number;
+  atmGamma: number;
+  spotPrice: number | null;
   fetchedAt: string;
 }
 
@@ -82,6 +89,13 @@ export interface Tier3Snapshot {
   putCallRatio: number | null;
   impliedVolPct: number | null;
   openInterestChange: number;
+
+  // --- Options microstructure (live, for intraday signal engine) ---
+  callOI: number;
+  putOI: number;
+  optionVolume: number;
+  atmGamma: number;
+  spotPrice: number | null;
 
   // --- Breadth (live) ---
   advanceCount: number | null;
@@ -384,21 +398,40 @@ export async function fetchSessionPriors(): Promise<SessionPriors> {
 
 // ── Live fetchers (called every 5min) ─────────────────────────────────────────
 
-async function fetchOptionChainFull(): Promise<{
+interface OptionChainFull {
   pcr: number | null;
   atmIv: number | null;
   totalOi: number;
   maxPainStrike: number | null;
   maxPainDistancePct: number | null;
-}> {
+  // Microstructure inputs for the tier-3 intraday signal engine
+  callOI: number;
+  putOI: number;
+  optionVolume: number;   // cumulative CE+PE total traded volume
+  atmGamma: number;       // Black-Scholes ATM gamma (0 when spot/IV unavailable)
+  spotPrice: number | null;
+}
+
+// Years to the nearest weekly NIFTY expiry (Thursday). Used only for ATM gamma.
+function yearsToWeeklyExpiry(): number {
+  const now = new Date();
+  const day = now.getUTCDay(); // 0=Sun..4=Thu
+  let daysUntilThu = (4 - day + 7) % 7;
+  if (daysUntilThu === 0) daysUntilThu = 0; // expiry day itself ≈ same-day
+  const ms = daysUntilThu * 24 * 60 * 60 * 1000;
+  // Floor at ~2 hours so same-day expiry doesn't blow gamma up to infinity.
+  return Math.max(ms, 2 * 60 * 60 * 1000) / (365 * 24 * 60 * 60 * 1000);
+}
+
+async function fetchOptionChainFull(): Promise<OptionChainFull> {
   // Firecrawl is PRIMARY via nseGet (works on EC2); NSE direct is fallback.
   // Dedicated Firecrawl fallbacks (Upstox PCR + NiftyInvest Max Pain) if both fail.
   if (USE_NSE_DIRECT) {
     try {
       interface OptionChainRecord {
         strikePrice: number;
-        CE?: { openInterest?: number; impliedVolatility?: number };
-        PE?: { openInterest?: number };
+        CE?: { openInterest?: number; impliedVolatility?: number; totalTradedVolume?: number };
+        PE?: { openInterest?: number; totalTradedVolume?: number };
       }
       interface OptionChainResponse {
         records?: { underlyingValue?: number; data?: OptionChainRecord[] };
@@ -421,6 +454,8 @@ async function fetchOptionChainFull(): Promise<{
       const data = raw.filtered?.data ?? raw.records?.data ?? [];
 
       let atmIv = 0;
+      let atmStrike = 0;
+      let optionVolume = 0;
       if (underlying > 0 && data.length > 0) {
         let minDiff = Infinity;
         for (const rec of data) {
@@ -428,9 +463,16 @@ async function fetchOptionChainFull(): Promise<{
           if (diff < minDiff) {
             minDiff = diff;
             atmIv = rec.CE?.impliedVolatility ?? 0;
+            atmStrike = rec.strikePrice;
           }
+          optionVolume += (rec.CE?.totalTradedVolume ?? 0) + (rec.PE?.totalTradedVolume ?? 0);
         }
       }
+
+      // ATM gamma via Black-Scholes (IV reported as a percentage → decimal).
+      const atmGamma = atmStrike > 0
+        ? bsGamma(underlying, atmStrike, atmIv / 100, yearsToWeeklyExpiry())
+        : 0;
 
       let maxPainStrike: number | null = null;
       let maxPainDistancePct: number | null = null;
@@ -452,7 +494,11 @@ async function fetchOptionChainFull(): Promise<{
       }
 
       const totalOi = ceTotOi + peTotOi;
-      return { pcr, atmIv, totalOi, maxPainStrike, maxPainDistancePct };
+      return {
+        pcr, atmIv, totalOi, maxPainStrike, maxPainDistancePct,
+        callOI: ceTotOi, putOI: peTotOi, optionVolume, atmGamma,
+        spotPrice: underlying > 0 ? underlying : null,
+      };
     } catch (err) {
       logger.warn({ err: err instanceof Error ? err.message : err }, "tier3-fetcher: NSE direct option chain failed — trying Firecrawl");
     }
@@ -463,11 +509,36 @@ async function fetchOptionChainFull(): Promise<{
       fetchPcrFromUpstox(),
       fetchMaxPainFromNiftyInvest(),
     ]);
-    return { pcr, atmIv: null, totalOi: 0, maxPainStrike, maxPainDistancePct };
+    return {
+      pcr, atmIv: null, totalOi: 0, maxPainStrike, maxPainDistancePct,
+      callOI: 0, putOI: 0, optionVolume: 0, atmGamma: 0, spotPrice: null,
+    };
   } catch (err) {
     logger.warn({ err: err instanceof Error ? err.message : err }, "tier3-fetcher: Upstox/NiftyInvest fallback failed");
-    return { pcr: null, atmIv: null, totalOi: 0, maxPainStrike: null, maxPainDistancePct: null };
   }
+
+  // Tertiary fallback: scrape NSE option chain page directly via Firecrawl
+  try {
+    const chain = await fetchOptionChainPcrFirecrawl();
+    if (chain.pcr !== null) {
+      logger.info({ pcr: chain.pcr.toFixed(2) }, "tier3-fetcher: NSE option chain page PCR parsed");
+      return {
+        pcr: chain.pcr,
+        atmIv: chain.atmIv,
+        totalOi: chain.totalOi,
+        maxPainStrike: chain.maxPainStrike,
+        maxPainDistancePct: chain.maxPainDistancePct,
+        callOI: 0, putOI: 0, optionVolume: 0, atmGamma: 0, spotPrice: null,
+      };
+    }
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : err }, "tier3-fetcher: NSE option chain page fallback failed");
+  }
+
+  return {
+    pcr: null, atmIv: null, totalOi: 0, maxPainStrike: null, maxPainDistancePct: null,
+    callOI: 0, putOI: 0, optionVolume: 0, atmGamma: 0, spotPrice: null,
+  };
 }
 
 async function fetchInrUsdFull(): Promise<{ rate: number; change5dPct: number }> {
@@ -585,7 +656,7 @@ export async function fetchLiveSnapshot(): Promise<LiveSnapshot> {
     fetchYield10Y(),
   ]);
 
-  const optData = optDirect ?? { pcr: null, atmIv: null, totalOi: 0, maxPainStrike: null as number | null, maxPainDistancePct: null as number | null };
+  const optData = optDirect; // fetchOptionChainFull always returns a full (possibly-empty) shape
   const fxData = inrUsd.status === "fulfilled" ? inrUsd.value : { rate: 83.5, change5dPct: 0 };
   const crudeData = crude.status === "fulfilled" ? crude.value : { price: 82.0, change5dPct: 0 };
   const yieldData = yield10y.status === "fulfilled" ? yield10y.value : { yield: 7.0, change5dBps: 0 };
@@ -615,6 +686,11 @@ export async function fetchLiveSnapshot(): Promise<LiveSnapshot> {
     openInterestChange: oiChange,
     maxPainStrike: optData.maxPainStrike ?? null,
     maxPainDistancePct: optData.maxPainDistancePct ?? null,
+    callOI: optData.callOI,
+    putOI: optData.putOI,
+    optionVolume: optData.optionVolume,
+    atmGamma: optData.atmGamma,
+    spotPrice: optData.spotPrice,
     fetchedAt: new Date().toISOString(),
   };
 }
@@ -698,6 +774,12 @@ export async function fetchTier3Snapshot(): Promise<Tier3Snapshot> {
     putCallRatio: live.putCallRatio,
     impliedVolPct: live.impliedVolPct,
     openInterestChange: live.openInterestChange,
+
+    callOI: live.callOI,
+    putOI: live.putOI,
+    optionVolume: live.optionVolume,
+    atmGamma: live.atmGamma,
+    spotPrice: live.spotPrice,
 
     advanceCount: live.advanceCount,
     declineCount: live.declineCount,

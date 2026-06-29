@@ -4,6 +4,7 @@ import { logger } from "../../lib/logger.js";
 import { placeOrder, type PlaceOrderParams } from "./orders.js";
 import { getMargins, syncPortfolio } from "./portfolio.js";
 import { getKiteClientForUser } from "./kite-client.js";
+import type { IntradaySignal } from "../market/tier3-signal.js";
 import { randomUUID } from "crypto";
 
 // Asset symbol → Kite trading symbol mapping
@@ -164,10 +165,11 @@ function selectBestOption(
 }
 
 /**
- * Derive option signal (BUY_CALL / BUY_PUT / NO_TRADE) from snapshot tier-3 data.
+ * Base option signal (BUY_CALL / BUY_PUT / NO_TRADE) from snapshot tier-3 data.
  * Mirrors deriveOptionSignal in intelligence.ts but only returns signal + strike.
+ * The Tier-3 microstructure gate (deriveOptionSignalFromSnapshot) is layered on top.
  */
-function deriveOptionSignalFromSnapshot(
+function deriveBaseOptionSignal(
   snapshot: typeof marketSnapshotsTable.$inferSelect
 ): { signal: "BUY_CALL" | "BUY_PUT" | "NO_TRADE"; suggestedStrike: number | null; reason: string } {
   const aiDirection = (snapshot.predictedDirection === "uncertain" ? "neutral" : snapshot.predictedDirection) as "up" | "down" | "neutral";
@@ -235,6 +237,45 @@ function deriveOptionSignalFromSnapshot(
   }
 
   return { signal: "NO_TRADE", reason: "AI direction neutral", suggestedStrike: null };
+}
+
+/**
+ * Derive the option signal, then GATE it with the Tier-3 intraday microstructure
+ * verdict (computed by the 30s scheduler refresh and persisted on tier3Evidence).
+ *
+ * The base AI/heuristic side is kept; the microstructure formula must independently
+ * agree (same side, ready, non-NONE) or the trade is suppressed. While the engine is
+ * still warming up (ready === false) or no verdict is present, the base signal passes
+ * through unchanged so we don't block the whole session on a cold buffer.
+ */
+function deriveOptionSignalFromSnapshot(
+  snapshot: typeof marketSnapshotsTable.$inferSelect
+): { signal: "BUY_CALL" | "BUY_PUT" | "NO_TRADE"; suggestedStrike: number | null; reason: string } {
+  const base = deriveBaseOptionSignal(snapshot);
+  if (base.signal === "NO_TRADE") return base;
+
+  const tier3Json = snapshot.tier3Evidence
+    ? (JSON.parse(snapshot.tier3Evidence) as Record<string, unknown>)
+    : {};
+  const intraday = tier3Json.intradaySignal as IntradaySignal | undefined;
+
+  // No verdict yet, or engine still warming up → let the base signal through.
+  if (!intraday || !intraday.ready) {
+    return { ...base, reason: `${base.reason} (tier-3 gate: ${intraday?.regime ?? "no-data"}, pass-through)` };
+  }
+
+  const wantSide = base.signal === "BUY_CALL" ? "CALL" : "PUT";
+  const detail = `D=${intraday.D.toFixed(2)} P=${intraday.P.toFixed(2)} ${intraday.regime} → ${intraday.signal}`;
+
+  if (intraday.signal !== wantSide) {
+    return {
+      signal: "NO_TRADE",
+      suggestedStrike: null,
+      reason: `Tier-3 microstructure gate blocked ${base.signal} (${detail})`,
+    };
+  }
+
+  return { ...base, reason: `${base.reason} ✓ tier-3 gate (${detail})` };
 }
 
 /**

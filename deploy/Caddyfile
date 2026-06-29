@@ -10,7 +10,7 @@
 
     # API → api-server container
     handle /api/* {
-        reverse_proxy api-server:3000 {
+        reverse_proxy gnm_api_prod:3000 {
             header_up X-Real-IP {remote_host}
             header_up X-Forwarded-For {remote_host}
             header_up X-Forwarded-Proto {scheme}
@@ -19,7 +19,7 @@
 
     # Everything else → static frontend
     handle {
-        reverse_proxy frontend:80
+        reverse_proxy gnm_frontend_prod:80
     }
 
     # Sensible request limits and security headers

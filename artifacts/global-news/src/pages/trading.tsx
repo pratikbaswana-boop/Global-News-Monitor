@@ -140,11 +140,13 @@ export default function TradingPage() {
   async function exchangeToken(requestToken: string) {
     setConnecting(true);
     setError(null);
+    const trimmedKey = apiKey.trim();
+    const trimmedSecret = apiSecret.trim();
     try {
       const res = await fetch(`${API_BASE}/broker/callback`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ requestToken, userId, apiKey, apiSecret }),
+        body: JSON.stringify({ requestToken, userId, apiKey: trimmedKey, apiSecret: trimmedSecret }),
       });
       if (!res.ok) {
         const err = await res.json();

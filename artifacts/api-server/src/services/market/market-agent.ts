@@ -516,7 +516,7 @@ export async function runMarketAgent(
   candleSummary: string,
   marketStats: string,
   lessons: string | null,
-  options: { force?: boolean; ohlcvCandles?: YahooOHLCV[] } = {},
+  options: { force?: boolean; ohlcvCandles?: YahooOHLCV[]; relevantNews?: string } = {},
 ): Promise<MarketSignal> {
   if (!options.force) {
     const cached = _cache.get(assetId);
@@ -586,6 +586,12 @@ export async function runMarketAgent(
     ? `Bank Nifty vs NIFTY delta: ${tier3.sectorDeltas.bank.toFixed(2)}% | Nifty IT vs NIFTY delta: ${tier3.sectorDeltas.it.toFixed(2)}%`
     : "Sectoral deltas unavailable";
 
+  // Per-asset raw news, already filtered to this instrument's market drivers and to
+  // the last-trading-day window (see stock-news.ts). Only relevant headlines reach here.
+  const newsBlock = options.relevantNews?.trim()
+    ? `\nDRIVER NEWS (last-trading-day window, filtered for this instrument):\n${options.relevantNews.trim()}\n`
+    : "";
+
   const context6h = `
 HORIZON: 6 hours (intraday)
 CURRENT SESSION DATA (use this, not historical closes):
@@ -608,7 +614,7 @@ HMM REGIME: ${currentRegime} (active for ${regimeAge} consecutive cycles)
 REGIME INSTRUCTION: If regime says RISK_OFF but live microstructure data is unavailable, rely on candle quality, price momentum, and geopolitical channels instead. Do not default to NEUTRAL just because NSE data is missing.
 ACTIVE GEOPOLITICAL CHANNELS (only channels with daysSinceTrigger <= 3 and decayedWeight > 0.3):
 ${activeChannelsRaw.filter(c => c.decayedWeight > 0.3).map(c => `- ${c.name}: weight ${c.decayedWeight.toFixed(2)}`).join("\n") || "- none active"}
-Return JSON: { "call": "BULLISH" | "BEARISH" | "NEUTRAL", "confidence": 0.0-1.0, "rationale": "string max 80 words" }
+${newsBlock}Return JSON: { "call": "BULLISH" | "BEARISH" | "NEUTRAL", "confidence": 0.0-1.0, "rationale": "string max 80 words" }
 `.trim();
 
   const context24h = `
@@ -635,7 +641,7 @@ HMM REGIME: ${currentRegime} (active for ${regimeAge} cycles)
 REGIME INSTRUCTION: If FII net is positive AND delivery % exceeds 38%, treat this as a potential regime transition away from RISK_OFF regardless of the HMM label. State this explicitly in your rationale.
 PRICED-IN CONTEXT:
 ${activeScenariosWithDecay.map(s => `- ${s.label}: ${s.alreadyTransmitted ? "[ALREADY TRANSMITTED to market on " + s.transmissionDate + ", decay factor " + s.decayFactor.toFixed(2) + "]" : "active"}`).join("\n") || "- no active scenarios"}
-Return JSON: { "call": "BULLISH" | "BEARISH" | "NEUTRAL", "confidence": 0.0-1.0, "rationale": "string max 80 words" }
+${newsBlock}Return JSON: { "call": "BULLISH" | "BEARISH" | "NEUTRAL", "confidence": 0.0-1.0, "rationale": "string max 80 words" }
 `.trim();
 
   const context72h = `

@@ -17,6 +17,8 @@ import { fetchRegimeFeatures, fetchNSEPriceData } from "./nse-direct-scraper.js"
 import { detectRegime } from "./hmm-regime.js";
 import { runMarketAgent } from "./market-agent.js";
 import { fetchSessionPriors, setSessionPriors, getSessionPriors, fetchTier3Snapshot } from "./tier3-fetcher.js";
+import { recordObservation, computeIntradaySignal, resetSignalState } from "./tier3-signal.js";
+import { getRelevantNewsByAsset } from "./stock-news.js";
 
 const ASSET_ID = "nse_market";
 const FIRST_RUN_DELAY_MS = 2 * 60 * 1000; // 2 min after startup
@@ -193,6 +195,12 @@ async function runEnsembleForAllAssets(window: Window): Promise<void> {
     sequenceSummary: last.sequenceSummary ?? "stored",
   };
 
+  // Per-asset raw news, filtered to each instrument's market drivers within the
+  // last-trading-day window. One DB query, reused across all assets this cycle.
+  const newsByAsset = await getRelevantNewsByAsset(
+    FORECAST_ASSETS.map(a => ({ id: a.id, name: a.name })),
+  );
+
   let ok = 0;
   let failed = 0;
   for (const asset of FORECAST_ASSETS) {
@@ -259,7 +267,7 @@ async function runEnsembleForAllAssets(window: Window): Promise<void> {
         candleSummary,
         marketStats,
         null,
-        { force: true, ohlcvCandles },
+        { force: true, ohlcvCandles, relevantNews: newsByAsset.get(asset.id) ?? "" },
       );
       ok++;
 
@@ -286,28 +294,100 @@ async function runEnsembleForAllAssets(window: Window): Promise<void> {
           const oldFlip = snapshot.flipConfirmed;
           const directionChanged = oldDirection !== signal.direction;
           const flipChanged = oldFlip !== signal.flipConfirmed;
+          const oldPriceScore = snapshot.priceScore ?? 0;
+          const priceScoreChanged = Math.abs(oldPriceScore - signal.priceScore) > 0.15;
+          const confidenceBoosted = (snapshot.predictedConfidence === "low" && (signal.confidence === "medium" || signal.confidence === "high"));
+          const isMaterialChange = directionChanged || flipChanged || priceScoreChanged || confidenceBoosted;
 
-          await db
-            .update(marketSnapshotsTable)
-            .set({
-              predictedDirection: signal.direction,
+          if (isMaterialChange) {
+            // Material change — create a NEW snapshot row so the signal executor
+            // sees it and historical tracking is preserved.
+            const now = new Date();
+            let resolveAfter: Date;
+            resolveAfter = new Date(now);
+            resolveAfter.setUTCHours(10, 0, 0, 0); // 15:30 IST market close
+            if (resolveAfter.getTime() <= now.getTime()) {
+              resolveAfter = new Date(resolveAfter.getTime() + 24 * 60 * 60 * 1000);
+              while (isWeekendForDate(resolveAfter)) {
+                resolveAfter = new Date(resolveAfter.getTime() + 24 * 60 * 60 * 1000);
+              }
+            }
+            const latestPrice = ohlcvCandles.length > 0 ? ohlcvCandles[ohlcvCandles.length - 1]!.close : null;
+
+            await db.insert(marketSnapshotsTable).values({
+              id: randomUUID(),
+              assetId: asset.id,
+              assetName: asset.name,
+              assetSymbol: asset.symbol,
+              predictedDirection: signal.direction === "uncertain" ? "neutral" : signal.direction,
+              predictedMagnitude: signal.magnitude,
               predictedConfidence: signal.confidence,
-              flipConfirmed: signal.flipConfirmed,
+              priceImpactEstimate: signal.priceImpactEstimate,
+              timeframe: "intraday",
+              bullScore: signal.bullScore.toString(),
+              bearScore: signal.bearScore.toString(),
+              dominantNarrative: signal.dominantNarrative,
+              verdict: signal.verdict,
+              triggerNewsSummary: signal.triggerNewsSummary,
+              assumptions: signal.assumptions,
+              triggerArticleIds: JSON.stringify([]),
+              resolveAfter,
+              ...(latestPrice !== null ? { realPriceAtSnapshot: latestPrice.toString() } : {}),
               priceScore: signal.priceScore,
+              flipConfirmed: signal.flipConfirmed,
               regimeAtSnapshot: signal.regime,
               tier3Evidence: JSON.stringify(signal.tier3Evidence),
+              candleTrustScore: signal.candleTrustScore,
+              regimeAge: signal.regimeAge,
+              ...(signal.candleFlags?.length ? { candleFlags: JSON.stringify(signal.candleFlags) } : {}),
+              ...(signal.channelDecaySummary?.length ? { channelDecaySummary: JSON.stringify(signal.channelDecaySummary) } : {}),
+              ...(signal.regimeProbabilities ? { regimeProbabilities: JSON.stringify(signal.regimeProbabilities) } : {}),
+              ...(signal.activeChannels?.length ? { activeChannels: JSON.stringify(signal.activeChannels) } : {}),
+              ...(signal.ensembleVotes?.length ? { ensembleVotes: JSON.stringify(signal.ensembleVotes) } : {}),
+              uncertaintyFlag: signal.uncertaintyFlag,
+              ...(signal.tier3Evidence?.maxPainStrike != null ? { maxPainStrike: signal.tier3Evidence.maxPainStrike.toString() } : {}),
+              ...(signal.tier3Evidence?.maxPainDistancePct != null ? { maxPainDistancePct: signal.tier3Evidence.maxPainDistancePct } : {}),
+              ...(signal.tier3Evidence?.sgxNiftyChangePct != null ? { sgxNiftyChangePct: signal.tier3Evidence.sgxNiftyChangePct } : {}),
+              ...(signal.tier3Evidence?.shortCoveringSignal != null ? { shortCoveringSignal: signal.tier3Evidence.shortCoveringSignal } : {}),
               ...(directionChanged || flipChanged ? { flipReason: directionChanged ? `Direction flipped to ${signal.direction}` : `Flip confirmed=${signal.flipConfirmed}` } : {}),
-            })
-            .where(eq(marketSnapshotsTable.id, snapshot.id));
+            });
 
-          logger.info({
-            assetId: asset.id,
-            oldDirection,
-            newDirection: signal.direction,
-            flip: signal.flipConfirmed,
-            priceScore: signal.priceScore.toFixed(3),
-            regime: signal.regime,
-          }, "market-scheduler: snapshot refreshed from ensemble");
+            logger.info({
+              assetId: asset.id,
+              oldDirection,
+              newDirection: signal.direction,
+              flip: signal.flipConfirmed,
+              priceScore: signal.priceScore.toFixed(3),
+              regime: signal.regime,
+              reason: directionChanged ? "direction" : flipChanged ? "flip" : priceScoreChanged ? "priceScore" : "confidence",
+            }, "market-scheduler: snapshot created from ensemble (material change)");
+          } else {
+            // No material change — update existing row, but refresh snapshotAt
+            // so the signal executor still sees it within its 30-minute window.
+            await db
+              .update(marketSnapshotsTable)
+              .set({
+                predictedDirection: signal.direction,
+                predictedConfidence: signal.confidence,
+                flipConfirmed: signal.flipConfirmed,
+                priceScore: signal.priceScore,
+                regimeAtSnapshot: signal.regime,
+                tier3Evidence: JSON.stringify(signal.tier3Evidence),
+                timeframe: "intraday",
+                snapshotAt: new Date(),
+                ...(directionChanged || flipChanged ? { flipReason: directionChanged ? `Direction flipped to ${signal.direction}` : `Flip confirmed=${signal.flipConfirmed}` } : {}),
+              })
+              .where(eq(marketSnapshotsTable.id, snapshot.id));
+
+            logger.info({
+              assetId: asset.id,
+              oldDirection,
+              newDirection: signal.direction,
+              flip: signal.flipConfirmed,
+              priceScore: signal.priceScore.toFixed(3),
+              regime: signal.regime,
+            }, "market-scheduler: snapshot refreshed from ensemble");
+          }
         } else {
           // No snapshot for today yet — create one so the UI has fresh data.
           const now = new Date();
@@ -331,7 +411,7 @@ async function runEnsembleForAllAssets(window: Window): Promise<void> {
             predictedMagnitude: signal.magnitude,
             predictedConfidence: signal.confidence,
             priceImpactEstimate: signal.priceImpactEstimate,
-            timeframe: "today",
+            timeframe: "intraday",
             bullScore: signal.bullScore.toString(),
             bearScore: signal.bearScore.toString(),
             dominantNarrative: signal.dominantNarrative,
@@ -405,6 +485,7 @@ async function onMarketOpen(): Promise<void> {
   try {
     const priors = await fetchSessionPriors();
     setSessionPriors(priors);
+    resetSignalState(); // drop any prior-session ticks from the intraday signal buffer
     _priorsLoadedFor = today;
     logger.info({
       fiiNet: priors.fiiNetFlowCrore,
@@ -527,19 +608,22 @@ async function refreshSnapshotTier3(): Promise<void> {
 
   // 1. Fetch fresh tier3 (PCR, Max Pain, VIX, ADR, etc.)
   const tier3 = await fetchTier3Snapshot();
-  const freshTier3Json = {
-    fiiNetCrore: tier3.fiiNetCrore,
-    fiiIsStale: tier3.fiiIsStale,
-    putCallRatio: tier3.putCallRatio,
-    advanceDeclineRatio: tier3.advanceDeclineRatio,
-    deliveryPct: tier3.deliveryPct,
-    indiaVix5dChange: tier3.indiaVix5dChange,
-    tier3Score: 0, // recalculated on read
-    maxPainStrike: tier3.maxPainStrike,
-    maxPainDistancePct: tier3.maxPainDistancePct,
-    sgxNiftyChangePct: tier3.sgxNiftyChangePct,
-    shortCoveringSignal: tier3.shortCoveringSignal,
-  };
+
+  // 1b. Feed the intraday microstructure signal engine one tick, then read its verdict.
+  // Only record when we actually have option-chain microstructure (spot + OI present);
+  // the Firecrawl fallbacks return zeros which would poison the rolling windows.
+  if (tier3.spotPrice && tier3.callOI > 0 && tier3.putOI > 0) {
+    recordObservation({
+      t: Date.now(),
+      price: tier3.spotPrice,
+      callOI: tier3.callOI,
+      putOI: tier3.putOI,
+      optionVolume: tier3.optionVolume,
+      atmIV: tier3.impliedVolPct ?? 0,
+      atmGamma: tier3.atmGamma,
+    });
+  }
+  const intraday = computeIntradaySignal();
 
   // 2. Fetch current prices for all assets (live intraday, not daily close)
   const prices = await Promise.all(
@@ -625,6 +709,7 @@ async function refreshSnapshotTier3(): Promise<void> {
         maxPainDistancePct: freshMaxPainDistance,
         sgxNiftyChangePct: tier3.sgxNiftyChangePct,
         shortCoveringSignal: tier3.shortCoveringSignal,
+        intradaySignal: intraday, // microstructure gate verdict — must be persisted for the executor to read it
       };
 
       await db
