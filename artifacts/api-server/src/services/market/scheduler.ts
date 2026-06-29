@@ -622,6 +622,18 @@ async function refreshSnapshotTier3(): Promise<void> {
       atmIV: tier3.impliedVolPct ?? 0,
       atmGamma: tier3.atmGamma,
     });
+    logger.info({
+      spotPrice: tier3.spotPrice,
+      callOI: tier3.callOI,
+      putOI: tier3.putOI,
+      atmIV: tier3.impliedVolPct ?? 0,
+    }, "market-scheduler: recordObservation called");
+  } else {
+    logger.warn({
+      spotPrice: tier3.spotPrice,
+      callOI: tier3.callOI,
+      putOI: tier3.putOI,
+    }, "market-scheduler: recordObservation SKIPPED (missing data)");
   }
   const intraday = computeIntradaySignal();
 
