@@ -73,6 +73,8 @@ export function recordObservation(obs: Tier3Observation): void {
   while (buf.length && buf[0]!.t < cutoff) buf.shift();
   const histCutoff = obs.t - LONG_WINDOW_MS;
   while (doRawHistory.length && doRawHistory[0]!.t < histCutoff) doRawHistory.shift();
+  // eslint-disable-next-line no-console
+  console.log(`[tier3-signal] recordObservation: buf.length=${buf.length}, t=${obs.t}, price=${obs.price}, callOI=${obs.callOI}, putOI=${obs.putOI}`);
 }
 
 // ── Math helpers ──────────────────────────────────────────────────────────────
