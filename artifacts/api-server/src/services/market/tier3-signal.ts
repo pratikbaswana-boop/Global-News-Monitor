@@ -17,7 +17,7 @@ const WINDOW_MS = 300_000;        // direction window n = 300s (5min)
 const IV_WINDOW_MS = 150_000;     // IV confirmation lookback = 2.5min
 const LONG_WINDOW_MS = 600_000;   // 10-min averages / Do scale percentile
 const BUFFER_MAX_MS = 750_000;    // keep ~12.5min of ticks
-const EMA_SPAN = 5;               // span = window/4 ≈ 5 ticks @ 30s
+const EMA_SPAN = 30;              // span ≈ 150s of smoothing (30 ticks @ 5s, was 5 @ 30s)
 const READY_FRACTION = 0.5;       // buffer must span ≥ 50% of WINDOW_MS to fire
 const DO_SCALE_FALLBACK = 0.02;   // Do normaliser before percentile history warms up
 const DO_SCALE_MIN_SAMPLES = 10;  // need this many Do_raw points for a real percentile

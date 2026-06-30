@@ -19,6 +19,7 @@ import { runMarketAgent } from "./market-agent.js";
 import { fetchSessionPriors, setSessionPriors, getSessionPriors, fetchTier3Snapshot } from "./tier3-fetcher.js";
 import { recordObservation, computeIntradaySignal, resetSignalState } from "./tier3-signal.js";
 import { getRelevantNewsByAsset } from "./stock-news.js";
+import { fetchKiteOptionChain } from "../kite/kite-option-chain.js";
 
 const ASSET_ID = "nse_market";
 const FIRST_RUN_DELAY_MS = 2 * 60 * 1000; // 2 min after startup
@@ -592,7 +593,7 @@ export function startMarketScheduler(): void {
 // Refreshes existing market_snapshots with live tier3 + current price so the UI
 // option signal reacts intraday without waiting for the next ensemble cycle.
 
-const TIER3_REFRESH_MS = 30_000; // 30 seconds
+const TIER3_REFRESH_MS = 5_000; // 5 seconds — Kite API gives real-time data
 
 function startTier3RefreshTimer(): void {
   logger.info({ intervalMs: TIER3_REFRESH_MS }, "market-scheduler: tier3 refresh timer starting");
@@ -605,17 +606,57 @@ function startTier3RefreshTimer(): void {
   }, TIER3_REFRESH_MS);
 }
 
+// Counter to run the full tier3 snapshot (Firecrawl) every 6th tick (30s) while
+// the Kite option chain runs every 5s for the intraday signal observation.
+let refreshTick = 0;
+// Cache the last full tier3 snapshot so 5s ticks between Firecrawl fetches still
+// have PCR/VIX/ADR data for the DB update.
+let lastTier3: Awaited<ReturnType<typeof fetchTier3Snapshot>> | null = null;
+
 async function refreshSnapshotTier3(): Promise<void> {
   const window = currentWindow();
   if (window === "closed") return; // only refresh during market hours
 
-  // 1. Fetch fresh tier3 (PCR, Max Pain, VIX, ADR, etc.)
-  const tier3 = await fetchTier3Snapshot();
+  refreshTick++;
 
-  // 1b. Feed the intraday microstructure signal engine one tick, then read its verdict.
-  // Only record when we actually have option-chain microstructure (spot + OI present);
-  // the Firecrawl fallbacks return zeros which would poison the rolling windows.
-  if (tier3.spotPrice && tier3.callOI > 0 && tier3.putOI > 0) {
+  // ── PRIMARY: Kite real-time option chain (every 5s) ───────────────────────
+  // Try Kite first for the intraday signal observation — it's millisecond-latency
+  // official API data, far better than 30s Firecrawl scraping.
+  let kiteObs = await fetchKiteOptionChain();
+
+  // ── Full tier3 snapshot (every 30s = every 6th tick) for PCR/VIX/ADR ──────
+  // This fetches broader market data (VIX, ADR, sector deltas, FII/DII) that Kite
+  // doesn't provide. Run it less frequently to avoid hammering Firecrawl.
+  if (refreshTick % 6 === 1) {
+    try {
+      lastTier3 = await fetchTier3Snapshot();
+    } catch (err) {
+      logger.warn({ err: err instanceof Error ? err.message : err }, "market-scheduler: tier3 snapshot fetch failed, using cached");
+    }
+  }
+  const tier3 = lastTier3;
+
+  // ── Feed the intraday signal engine ──────────────────────────────────────
+  // Prefer Kite data; fall back to Firecrawl tier3 if Kite unavailable.
+  if (kiteObs) {
+    recordObservation({
+      t: Date.now(),
+      price: kiteObs.spotPrice,
+      callOI: kiteObs.callOI,
+      putOI: kiteObs.putOI,
+      optionVolume: kiteObs.optionVolume,
+      atmIV: kiteObs.atmIV,
+      atmGamma: kiteObs.atmGamma,
+    });
+    logger.info({
+      source: "kite",
+      spotPrice: kiteObs.spotPrice,
+      callOI: kiteObs.callOI,
+      putOI: kiteObs.putOI,
+      atmIV: kiteObs.atmIV.toFixed(2),
+    }, "market-scheduler: recordObservation called (Kite)");
+  } else if (tier3 && tier3.spotPrice && tier3.callOI > 0 && tier3.putOI > 0) {
+    // Fallback: Firecrawl-based tier3 data
     recordObservation({
       t: Date.now(),
       price: tier3.spotPrice,
@@ -626,17 +667,14 @@ async function refreshSnapshotTier3(): Promise<void> {
       atmGamma: tier3.atmGamma,
     });
     logger.info({
+      source: "firecrawl",
       spotPrice: tier3.spotPrice,
       callOI: tier3.callOI,
       putOI: tier3.putOI,
       atmIV: tier3.impliedVolPct ?? 0,
-    }, "market-scheduler: recordObservation called");
+    }, "market-scheduler: recordObservation called (Firecrawl fallback)");
   } else {
-    logger.warn({
-      spotPrice: tier3.spotPrice,
-      callOI: tier3.callOI,
-      putOI: tier3.putOI,
-    }, "market-scheduler: recordObservation SKIPPED (missing data)");
+    logger.warn("market-scheduler: recordObservation SKIPPED (no Kite or Firecrawl data)");
   }
   const intraday = computeIntradaySignal();
 
@@ -696,10 +734,14 @@ async function refreshSnapshotTier3(): Promise<void> {
       if (rows.length === 0) continue; // no snapshot yet — ensemble cycle will create it
       const snapshot = rows[0]!;
 
+      // Use Kite data for PCR/maxPain when available, fall back to tier3
+      const effectivePcr = kiteObs?.pcr ?? tier3?.putCallRatio ?? null;
+      const effectiveMaxPainStrike = kiteObs?.maxPainStrike ?? tier3?.maxPainStrike ?? null;
+
       // Compute fresh max pain distance using current price
       let freshMaxPainDistance: number | null = null;
-      if (tier3.maxPainStrike !== null && priceInfo.price > 0) {
-        freshMaxPainDistance = ((priceInfo.price - tier3.maxPainStrike) / tier3.maxPainStrike) * 100;
+      if (effectiveMaxPainStrike !== null && priceInfo.price > 0) {
+        freshMaxPainDistance = ((priceInfo.price - effectiveMaxPainStrike) / effectiveMaxPainStrike) * 100;
       }
 
       // Only update if something materially changed
@@ -708,7 +750,7 @@ async function refreshSnapshotTier3(): Promise<void> {
       const oldMaxPain = snapshot.maxPainDistancePct ?? null;
       const oldPrice = snapshot.realPriceAtSnapshot !== null ? parseFloat(snapshot.realPriceAtSnapshot) : null;
 
-      const pcrChanged = oldPcr === null || tier3.putCallRatio === null || Math.abs(tier3.putCallRatio - oldPcr) > 0.02;
+      const pcrChanged = oldPcr === null || effectivePcr === null || Math.abs(effectivePcr - oldPcr) > 0.02;
       const maxPainChanged = oldMaxPain === null || freshMaxPainDistance === null || Math.abs(freshMaxPainDistance - oldMaxPain) > 0.10;
       const priceChanged = oldPrice === null || Math.abs(priceInfo.price - oldPrice) / oldPrice > 0.001;
       // Always update if intraday signal has new samples (buffer growing or verdict changed)
@@ -717,16 +759,16 @@ async function refreshSnapshotTier3(): Promise<void> {
 
       if (!pcrChanged && !maxPainChanged && !priceChanged && !intradayChanged) continue;
 
-      // Build updated tier3 evidence
+      // Build updated tier3 evidence — merge old with new, preferring Kite data
       const updatedTier3 = {
         ...oldTier3,
-        putCallRatio: tier3.putCallRatio,
-        advanceDeclineRatio: tier3.advanceDeclineRatio,
-        indiaVix5dChange: tier3.indiaVix5dChange,
-        maxPainStrike: tier3.maxPainStrike,
+        putCallRatio: effectivePcr,
+        advanceDeclineRatio: tier3?.advanceDeclineRatio ?? oldTier3.advanceDeclineRatio,
+        indiaVix5dChange: tier3?.indiaVix5dChange ?? oldTier3.indiaVix5dChange,
+        maxPainStrike: effectiveMaxPainStrike,
         maxPainDistancePct: freshMaxPainDistance,
-        sgxNiftyChangePct: tier3.sgxNiftyChangePct,
-        shortCoveringSignal: tier3.shortCoveringSignal,
+        sgxNiftyChangePct: tier3?.sgxNiftyChangePct ?? oldTier3.sgxNiftyChangePct,
+        shortCoveringSignal: tier3?.shortCoveringSignal ?? oldTier3.shortCoveringSignal,
         intradaySignal: intraday, // microstructure gate verdict — must be persisted for the executor to read it
       };
 
@@ -742,7 +784,7 @@ async function refreshSnapshotTier3(): Promise<void> {
       logger.info({
         assetId: asset.id,
         oldPcr: oldPcr !== null ? oldPcr.toFixed(3) : "null",
-        newPcr: tier3.putCallRatio !== null ? tier3.putCallRatio.toFixed(3) : "null",
+        newPcr: effectivePcr !== null ? effectivePcr.toFixed(3) : "null",
         oldMaxPain: oldMaxPain !== null ? oldMaxPain.toFixed(3) : "null",
         newMaxPain: freshMaxPainDistance !== null ? freshMaxPainDistance.toFixed(3) : "null",
         oldPrice: oldPrice !== null ? oldPrice.toFixed(2) : "null",
