@@ -701,8 +701,9 @@ export async function fetchNseAllIndicesFirecrawl(): Promise<{
   vix: number | null;
   advances: number | null;
   declines: number | null;
-  bankNifty: number | null;
-  niftyIt: number | null;
+  bankNiftyPctChange: number | null;
+  niftyItPctChange: number | null;
+  nifty50PctChange: number | null;
   nifty50: number | null;
 }> {
   try {
@@ -745,26 +746,28 @@ export async function fetchNseAllIndicesFirecrawl(): Promise<{
     let vix: number | null = null;
     let advances: number | null = null;
     let declines: number | null = null;
-    let bankNifty: number | null = null;
-    let niftyIt: number | null = null;
+    let bankNiftyPctChange: number | null = null;
+    let niftyItPctChange: number | null = null;
+    let nifty50PctChange: number | null = null;
     let nifty50: number | null = null;
 
     for (const item of data) {
       const sym = (item.indexSymbol ?? "").toUpperCase();
       if (sym === "INDIA VIX") vix = parseFloat(String(item.last ?? "0"));
-      if (sym === "NIFTY BANK") bankNifty = parseFloat(String(item.last ?? "0"));
-      if (sym === "NIFTY IT") niftyIt = parseFloat(String(item.last ?? "0"));
+      if (sym === "NIFTY BANK") bankNiftyPctChange = parseFloat(String(item.percentChange ?? "0"));
+      if (sym === "NIFTY IT") niftyItPctChange = parseFloat(String(item.percentChange ?? "0"));
       if (sym === "NIFTY 50") {
         nifty50 = parseFloat(String(item.last ?? "0"));
+        nifty50PctChange = parseFloat(String(item.percentChange ?? "0"));
         advances = parseInt(String(item.advances ?? "0"), 10) || null;
         declines = parseInt(String(item.declines ?? "0"), 10) || null;
       }
     }
 
-    return { vix, advances, declines, bankNifty, niftyIt, nifty50 };
+    return { vix, advances, declines, bankNiftyPctChange, niftyItPctChange, nifty50PctChange, nifty50 };
   } catch (err) {
     logger.warn({ err: err instanceof Error ? err.message : err }, "allIndices Firecrawl fetch failed");
-    return { vix: null, advances: null, declines: null, bankNifty: null, niftyIt: null, nifty50: null };
+    return { vix: null, advances: null, declines: null, bankNiftyPctChange: null, niftyItPctChange: null, nifty50PctChange: null, nifty50: null };
   }
 }
 

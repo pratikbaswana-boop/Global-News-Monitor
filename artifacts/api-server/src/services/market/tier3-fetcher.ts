@@ -649,19 +649,19 @@ export async function fetchLiveSnapshot(): Promise<LiveSnapshot> {
       decline: allIdx.declines,
       ratio: allIdx.declines > 0 ? allIdx.advances / allIdx.declines : 0,
     };
-    // Derive sectoral deltas from bankNifty and niftyIt vs nifty50
-    if (allIdx.nifty50 && allIdx.bankNifty && allIdx.niftyIt) {
-      const nifty50Pct = 0;
-      const bankPct = ((allIdx.bankNifty - allIdx.nifty50) / allIdx.nifty50) * 100;
-      const itPct = ((allIdx.niftyIt - allIdx.nifty50) / allIdx.nifty50) * 100;
+    // Derive sectoral deltas from percentChange values (vs previous close)
+    if (allIdx.nifty50PctChange !== null && allIdx.bankNiftyPctChange !== null && allIdx.niftyItPctChange !== null) {
+      const nifty50Pct = allIdx.nifty50PctChange;
+      const bankPct = allIdx.bankNiftyPctChange;
+      const itPct = allIdx.niftyItPctChange;
       sectorData = {
         nifty50PctChange: nifty50Pct,
         bankPctChange: bankPct,
         itPctChange: itPct,
         pharmaPctChange: 0,
         autoPctChange: 0,
-        bank: bankPct,
-        it: itPct,
+        bank: bankPct - nifty50Pct,  // how much Bank Nifty is outperforming NIFTY today
+        it: itPct - nifty50Pct,
         pharma: 0,
         auto: 0,
       };
