@@ -724,7 +724,9 @@ async function executeSignalForUser(
   direction: "up" | "down"
 ): Promise<ExecutionResult> {
   const pref = await getUserTradePreference(userId, snapshot.assetId);
-  if (pref?.useOptions) {
+  // Index assets (nifty50, sensex) can only be traded via options — force options path.
+  const isIndexAsset = snapshot.assetId === "nifty50" || snapshot.assetId === "sensex";
+  if (pref?.useOptions || isIndexAsset) {
     return executeOptionSignalForUser(userId, account, snapshot);
   }
   return executeSpotSignalForUser(userId, account, snapshot, tradingsymbol, exchange, direction);
