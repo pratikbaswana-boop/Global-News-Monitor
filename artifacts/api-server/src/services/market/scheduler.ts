@@ -544,7 +544,9 @@ async function runCycle(): Promise<void> {
     await onMarketOpen();
   }
   // Ensure priors exist on cold start mid-day so live cycles can compose them.
-  if (!getSessionPriors()) {
+  // BUT do not call onMarketOpen again if already loaded today — that would
+  // reset the intraday signal buffer and lose accumulated observations.
+  if (!getSessionPriors() && _priorsLoadedFor !== todayIstDateKey()) {
     await onMarketOpen();
   }
 
