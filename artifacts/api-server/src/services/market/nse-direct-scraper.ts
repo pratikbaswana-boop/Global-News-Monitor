@@ -29,6 +29,8 @@ export async function firecrawlFetchJson<T>(url: string): Promise<T> {
       url,
       formats: ["markdown"],
       onlyMainContent: false,
+      maxAge: 0,
+      storeInCache: false,
     }),
   });
 
@@ -330,6 +332,8 @@ export async function fetchSGXNiftyFirecrawl(): Promise<{ changePct: number | nu
       body: JSON.stringify({
         url: "https://www.sgxnifty.org/",
         formats: ["markdown"],
+        maxAge: 0,
+        storeInCache: false,
       }),
     });
     if (!res.ok) throw new Error(`Firecrawl SGX failed: ${res.status}`);
@@ -376,6 +380,8 @@ export async function fetchOptionChainPcrFirecrawl(): Promise<{
         formats: ["markdown"],
         onlyMainContent: true,
         waitFor: 3000,
+        maxAge: 0,
+        storeInCache: false,
       }),
     });
     if (!res.ok) throw new Error(`Firecrawl option chain failed: ${res.status}`);
@@ -505,6 +511,8 @@ export async function fetchOptionChainFullFirecrawl(): Promise<{
       formats: ["markdown"],
       onlyMainContent: true,
       waitFor: 8000,
+      maxAge: 0,
+      storeInCache: false,
     }),
     signal: AbortSignal.timeout(30_000),
   });
@@ -716,6 +724,8 @@ export async function fetchNseAllIndicesFirecrawl(): Promise<{
       body: JSON.stringify({
         url: "https://www.nseindia.com/api/allIndices",
         formats: ["markdown"],
+        maxAge: 0,
+        storeInCache: false,
       }),
     });
     if (!res.ok) throw new Error(`Firecrawl allIndices failed: ${res.status}`);
@@ -785,7 +795,9 @@ export async function fetchPcrFromUpstox(): Promise<{ pcr: number | null }> {
         url: "https://upstox.com/fno-discovery/open-interest-analysis/nifty-pcr/",
         formats: ["markdown"],
         onlyMainContent: true,
-        waitFor: 5000, // page is JS-rendered; PCR loads after initial paint
+        waitFor: 5000,
+        maxAge: 0,
+        storeInCache: false,
       }),
     });
     if (!res.ok) throw new Error(`Firecrawl Upstox PCR failed: ${res.status}`);
@@ -831,6 +843,8 @@ export async function fetchMaxPainFromNiftyInvest(): Promise<{
         url: "https://niftyinvest.com/max-pain/NIFTY",
         formats: ["markdown"],
         onlyMainContent: true,
+        maxAge: 0,
+        storeInCache: false,
       }),
     });
     if (!res.ok) throw new Error(`Firecrawl NiftyInvest Max Pain failed: ${res.status}`);
