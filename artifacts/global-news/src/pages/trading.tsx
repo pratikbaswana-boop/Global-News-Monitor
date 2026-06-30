@@ -123,25 +123,35 @@ export default function TradingPage() {
   const [configuringAsset, setConfiguringAsset] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Handle Kite OAuth callback redirect
+  // Handle Kite OAuth callback redirect (full-page redirect flow for mobile)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const requestToken = params.get("request_token");
     const status = params.get("status");
 
-    if (requestToken && status === "success" && userId && apiKey && apiSecret) {
-      // Auto-exchange after redirect
-      exchangeToken(requestToken);
+    if (requestToken && status === "success" && userId) {
+      // Restore credentials from sessionStorage (saved before redirect to Kite)
+      const savedKey = sessionStorage.getItem("kite_api_key") || "";
+      const savedSecret = sessionStorage.getItem("kite_api_secret") || "";
+      if (savedKey && savedSecret) {
+        setApiKey(savedKey);
+        setApiSecret(savedSecret);
+        exchangeTokenWithCreds(requestToken, savedKey, savedSecret);
+      }
       // Clean URL
       window.history.replaceState({}, document.title, window.location.pathname);
     }
-  }, [userId, apiKey, apiSecret]);
+  }, [userId]);
 
   async function exchangeToken(requestToken: string) {
-    setConnecting(true);
-    setError(null);
     const trimmedKey = apiKey.trim();
     const trimmedSecret = apiSecret.trim();
+    await exchangeTokenWithCreds(requestToken, trimmedKey, trimmedSecret);
+  }
+
+  async function exchangeTokenWithCreds(requestToken: string, trimmedKey: string, trimmedSecret: string) {
+    setConnecting(true);
+    setError(null);
     try {
       const res = await fetch(`${API_BASE}/broker/callback`, {
         method: "POST",
@@ -156,6 +166,8 @@ export default function TradingPage() {
       await refetchPrefs();
       setApiKey("");
       setApiSecret("");
+      sessionStorage.removeItem("kite_api_key");
+      sessionStorage.removeItem("kite_api_secret");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Connection failed");
     } finally {
@@ -176,7 +188,20 @@ export default function TradingPage() {
       if (!urlRes.ok) throw new Error("Failed to get login URL");
       const { loginUrl } = await urlRes.json();
 
-      // 2. Open Kite login in popup
+      // Save credentials to sessionStorage so we can retrieve them after redirect
+      sessionStorage.setItem("kite_api_key", apiKey.trim());
+      sessionStorage.setItem("kite_api_secret", apiSecret.trim());
+
+      // 2. Detect mobile — popup polling doesn't work on mobile browsers
+      const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+
+      if (isMobile) {
+        // Full-page redirect flow for mobile
+        window.location.href = loginUrl;
+        return;
+      }
+
+      // 3. Open Kite login in popup (desktop)
       const popup = window.open(loginUrl, "kite_oauth", "width=500,height=600");
       if (!popup) {
         // Fallback: redirect full page
@@ -184,12 +209,14 @@ export default function TradingPage() {
         return;
       }
 
-      // 3. Poll for redirect
+      // 4. Poll for redirect
       const interval = setInterval(() => {
         try {
           if (popup.closed) {
             clearInterval(interval);
             setConnecting(false);
+            sessionStorage.removeItem("kite_api_key");
+            sessionStorage.removeItem("kite_api_secret");
             return;
           }
           const popupUrl = popup.location.href;
