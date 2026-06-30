@@ -294,7 +294,10 @@ interface YahooOHLCV {
 
 async function fetchYahooOHLCV(symbol: string, days = 25): Promise<YahooOHLCV[] | null> {
   try {
-    const yahooSymbol = symbol.endsWith(".NS") ? symbol : `${symbol}.NS`;
+    // Index symbols (^NSEI, ^BSESN) and futures (GC=F, SI=F) must not get .NS suffix
+    const yahooSymbol = symbol.startsWith("^") || symbol.includes("=") || symbol.endsWith(".NS")
+      ? symbol
+      : `${symbol}.NS`;
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?interval=1d&range=${Math.ceil(days * 1.5)}d`;
     let json: {
       chart?: {
@@ -591,6 +594,11 @@ export async function runMarketAgent(
   const newsBlock = options.relevantNews?.trim()
     ? `\nDRIVER NEWS (last-trading-day window, filtered for this instrument):\n${options.relevantNews.trim()}\n`
     : "";
+  if (newsBlock) {
+    logger.info({ assetId, newsPreview: newsBlock.slice(0, 200) }, "market-agent: news injected into prompt");
+  } else {
+    logger.warn({ assetId }, "market-agent: no news block for prompt");
+  }
 
   const context6h = `
 HORIZON: 6 hours (intraday)
@@ -599,10 +607,10 @@ CURRENT SESSION DATA (use this, not historical closes):
 - Current price vs open: ${sessionOpenPrice > 0 ? (((latestCandle?.close ?? 0) - sessionOpenPrice) / sessionOpenPrice * 100).toFixed(2) : "0"}%
 - Candle trust score: ${candleTrust.trustScore.toFixed(2)} (1.0=clean, <0.5=flagged)
 - Candle flags: ${candleTrust.flags.length > 0 ? candleTrust.flags.join(", ") : "none"}
-- Live put/call ratio: ${tier3.putCallRatio !== null ? tier3.putCallRatio.toFixed(2) + " (below 0.8=bullish, above 1.1=bearish)" : "unavailable — NSE direct API disabled on this server"}
-- Advance/decline ratio: ${tier3.advanceDeclineRatio !== null ? tier3.advanceDeclineRatio.toFixed(2) + " (above 1.5=bullish breadth)" : "unavailable — NSE direct API disabled on this server"}
-- India VIX: ${tier3.indiaVix !== null ? tier3.indiaVix.toFixed(1) + " (5d change: " + (tier3.indiaVix5dChange !== null && tier3.indiaVix5dChange > 0 ? "+" : "") + (tier3.indiaVix5dChange !== null ? tier3.indiaVix5dChange.toFixed(1) : "N/A") + ")" : "unavailable — NSE direct API disabled on this server"}
-- Live implied volatility: ${tier3.impliedVolPct !== null ? tier3.impliedVolPct.toFixed(1) + "%" : "unavailable — NSE direct API disabled on this server"}
+- Live put/call ratio: ${tier3.putCallRatio !== null ? tier3.putCallRatio.toFixed(2) + " (below 0.8=bullish, above 1.1=bearish)" : "unavailable"}
+- Advance/decline ratio: ${tier3.advanceDeclineRatio !== null ? tier3.advanceDeclineRatio.toFixed(2) + " (above 1.5=bullish breadth)" : "unavailable"}
+- India VIX: ${tier3.indiaVix !== null ? tier3.indiaVix.toFixed(1) + " (5d change: " + (tier3.indiaVix5dChange !== null && tier3.indiaVix5dChange > 0 ? "+" : "") + (tier3.indiaVix5dChange !== null ? tier3.indiaVix5dChange.toFixed(1) : "N/A") + ")" : "unavailable"}
+- Live implied volatility: ${tier3.impliedVolPct !== null ? tier3.impliedVolPct.toFixed(1) + "%" : "unavailable"}
 - Max pain strike: ${tier3.maxPainStrike !== null ? tier3.maxPainStrike.toFixed(0) + " (distance: " + (tier3.maxPainDistancePct !== null ? (tier3.maxPainDistancePct > 0 ? "+" : "") + tier3.maxPainDistancePct.toFixed(2) + "%" : "N/A") + ")" : "unavailable"}
 - SGX Nifty pre-market: ${tier3.sgxNiftyChangePct !== null ? (tier3.sgxNiftyChangePct > 0 ? "+" : "") + tier3.sgxNiftyChangePct.toFixed(2) + "%" : "unavailable"}
 - Short covering signal: ${tier3.shortCoveringSignal} (${tier3.shortCoveringSignal === "covering" ? "high PCR + falling OI + falling VIX = shorts buying back, bullish" : tier3.shortCoveringSignal === "unwinding" ? "low PCR + rising OI + rising VIX = fresh shorts, bearish" : "no clear short covering pattern"})
@@ -614,7 +622,8 @@ HMM REGIME: ${currentRegime} (active for ${regimeAge} consecutive cycles)
 REGIME INSTRUCTION: If regime says RISK_OFF but live microstructure data is unavailable, rely on candle quality, price momentum, and geopolitical channels instead. Do not default to NEUTRAL just because NSE data is missing.
 ACTIVE GEOPOLITICAL CHANNELS (only channels with daysSinceTrigger <= 3 and decayedWeight > 0.3):
 ${activeChannelsRaw.filter(c => c.decayedWeight > 0.3).map(c => `- ${c.name}: weight ${c.decayedWeight.toFixed(2)}`).join("\n") || "- none active"}
-${newsBlock}Return JSON: { "call": "BULLISH" | "BEARISH" | "NEUTRAL", "confidence": 0.0-1.0, "rationale": "string max 80 words" }
+${newsBlock}NEWS INSTRUCTION: You MUST reference specific headlines from the DRIVER NEWS section in your rationale. If news contradicts the quantitative signals, state the conflict explicitly and reduce confidence. If no news block is present, say so.
+Return JSON: { "call": "BULLISH" | "BEARISH" | "NEUTRAL", "confidence": 0.0-1.0, "rationale": "string max 80 words, MUST mention at least one news headline if present" }
 `.trim();
 
   const context24h = `
@@ -624,11 +633,11 @@ YESTERDAY'S CLOSE DATA:
 - SENSEX close: ${yesterdayClose.sensex.toFixed(2)}
 - Session return: ${yesterdayClose.returnPct.toFixed(2)}%
 INSTITUTIONAL CONVICTION (this is the primary signal for this window):
-- FII net flow: ${tier3.fiiDataDate ? "₹" + tier3.fiiNetCrore.toFixed(0) + " crore" + (tier3.fiiIsStale ? " [WARNING: stale data]" : "") : "unavailable — NSE direct API disabled on this server"}
-- DII net flow: ${tier3.fiiDataDate ? "₹" + tier3.diiNetCrore.toFixed(0) + " crore" : "unavailable — NSE direct API disabled on this server"}
+- FII net flow: ${tier3.fiiDataDate ? "₹" + tier3.fiiNetCrore.toFixed(0) + " crore" + (tier3.fiiIsStale ? " [WARNING: stale data]" : "") : "unavailable"}
+- DII net flow: ${tier3.fiiDataDate ? "₹" + tier3.diiNetCrore.toFixed(0) + " crore" : "unavailable"}
 - Delivery %: ${tier3.deliveryPct !== null ? tier3.deliveryPct.toFixed(1) + "%" : "not yet available (intraday)"}
 - Open interest change: ${tier3.openInterestChange > 0 ? "+" : ""}${tier3.openInterestChange.toFixed(1)}% (positive=new positions=conviction)
-- Put/call ratio: ${tier3.putCallRatio !== null ? tier3.putCallRatio.toFixed(2) : "unavailable — NSE direct API disabled"}
+- Put/call ratio: ${tier3.putCallRatio !== null ? tier3.putCallRatio.toFixed(2) : "unavailable"}
 - Short covering assessment: ${tier3.shortCoveringSignal} (${tier3.shortCoveringSignal === "covering" ? "bullish — shorts are trapped, no sellers left" : tier3.shortCoveringSignal === "unwinding" ? "bearish — fresh shorts entering" : "neutral — no clear pattern"})
 - Max pain pin level: ${tier3.maxPainStrike !== null ? tier3.maxPainStrike.toFixed(0) : "unavailable"} (market makers may pull price toward this at expiry)
 MACRO (secondary signal):
@@ -641,7 +650,8 @@ HMM REGIME: ${currentRegime} (active for ${regimeAge} cycles)
 REGIME INSTRUCTION: If FII net is positive AND delivery % exceeds 38%, treat this as a potential regime transition away from RISK_OFF regardless of the HMM label. State this explicitly in your rationale.
 PRICED-IN CONTEXT:
 ${activeScenariosWithDecay.map(s => `- ${s.label}: ${s.alreadyTransmitted ? "[ALREADY TRANSMITTED to market on " + s.transmissionDate + ", decay factor " + s.decayFactor.toFixed(2) + "]" : "active"}`).join("\n") || "- no active scenarios"}
-${newsBlock}Return JSON: { "call": "BULLISH" | "BEARISH" | "NEUTRAL", "confidence": 0.0-1.0, "rationale": "string max 80 words" }
+${newsBlock}NEWS INSTRUCTION: You MUST reference specific headlines from the DRIVER NEWS section in your rationale. If news contradicts the quantitative signals, state the conflict explicitly and reduce confidence.
+Return JSON: { "call": "BULLISH" | "BEARISH" | "NEUTRAL", "confidence": 0.0-1.0, "rationale": "string max 80 words, MUST mention at least one news headline if present" }
 `.trim();
 
   const context72h = `
@@ -651,17 +661,18 @@ MACRO STRUCTURAL SIGNALS:
 - Brent crude: $${tier3.crudeBrent.toFixed(1)} (5d change: ${tier3.crude5dChangePct > 0 ? "+" : ""}${tier3.crude5dChangePct.toFixed(1)}%)
 - INR/USD 5d trend: ${tier3.inrUsd5dChangePct > 0 ? "INR weakening +" : "INR strengthening "}${Math.abs(tier3.inrUsd5dChangePct).toFixed(2)}%
 - 10Y yield 5d trend: ${tier3.yield10Y5dChangeBps > 0 ? "rising +" : "falling "}${Math.abs(tier3.yield10Y5dChangeBps).toFixed(0)} bps
-- India VIX 5d change: ${tier3.indiaVix5dChange !== null ? (tier3.indiaVix5dChange > 0 ? "+" : "") + tier3.indiaVix5dChange.toFixed(1) + " points" : "unavailable — NSE direct API disabled"}
+- India VIX 5d change: ${tier3.indiaVix5dChange !== null ? (tier3.indiaVix5dChange > 0 ? "+" : "") + tier3.indiaVix5dChange.toFixed(1) + " points" : "unavailable"}
 OPTIONS STRUCTURE (3-day view):
-- Put/call ratio: ${tier3.putCallRatio !== null ? tier3.putCallRatio.toFixed(2) : "unavailable — NSE direct API disabled"}
-- Implied volatility: ${tier3.impliedVolPct !== null ? tier3.impliedVolPct.toFixed(1) + "%" : "unavailable — NSE direct API disabled"}
+- Put/call ratio: ${tier3.putCallRatio !== null ? tier3.putCallRatio.toFixed(2) : "unavailable"}
+- Implied volatility: ${tier3.impliedVolPct !== null ? tier3.impliedVolPct.toFixed(1) + "%" : "unavailable"}
 - OI change trend: ${tier3.openInterestChange > 0 ? "building" : "unwinding"} (${tier3.openInterestChange > 0 ? "+" : ""}${tier3.openInterestChange.toFixed(1)}%)
 - Max pain strike: ${tier3.maxPainStrike !== null ? tier3.maxPainStrike.toFixed(0) : "unavailable"} (if price >1.5% away, expect pin toward expiry)
 - Short covering signal: ${tier3.shortCoveringSignal} (structural view: covering rallies can extend 1.5-2%)
 ACTIVE GEOPOLITICAL SCENARIOS (structural, 72h view):
 ${activeScenariosWithDecay.map(s => `- ${s.label} (prob: ${(s.probability * 100).toFixed(0)}%, channel: ${s.channel}, decay: ${s.decayFactor.toFixed(2)})`).join("\n") || "- none"}
 HMM REGIME: ${currentRegime} (${regimeAge} cycles). Weight this at 30% of your reasoning. Macro signals above are 70%.
-Return JSON: { "call": "BULLISH" | "BEARISH" | "NEUTRAL", "confidence": 0.0-1.0, "rationale": "string max 80 words" }
+${newsBlock}NEWS INSTRUCTION: You MUST reference specific headlines from the DRIVER NEWS section in your rationale. If news contradicts the quantitative signals, state the conflict explicitly and reduce confidence.
+Return JSON: { "call": "BULLISH" | "BEARISH" | "NEUTRAL", "confidence": 0.0-1.0, "rationale": "string max 80 words, MUST mention at least one news headline if present" }
 `.trim();
 
   // ── Run ensemble with separate contexts (Change 4) ─────────────────────────

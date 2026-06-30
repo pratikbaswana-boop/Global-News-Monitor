@@ -964,7 +964,10 @@ export interface DailyClose {
 }
 
 export async function fetchNSEPriceData(symbol: string, days = 35): Promise<DailyClose[]> {
-  const yahooSymbol = symbol.endsWith(".NS") ? symbol : `${symbol}.NS`;
+  // Index symbols (^NSEI, ^BSESN) and futures (GC=F, SI=F) must not get .NS suffix
+  const yahooSymbol = symbol.startsWith("^") || symbol.includes("=") || symbol.endsWith(".NS")
+    ? symbol
+    : `${symbol}.NS`;
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?interval=1d&range=${Math.ceil(days * 1.5)}d`;
 
   interface YahooTS {
