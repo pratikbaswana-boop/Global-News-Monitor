@@ -481,6 +481,7 @@ function isWeekendForDate(d: Date): boolean {
 
 async function onMarketOpen(): Promise<void> {
   const today = todayIstDateKey();
+  logger.info({ today, priorsLoadedFor: _priorsLoadedFor, hasPriors: !!getSessionPriors() }, "market-scheduler: onMarketOpen called");
   if (_priorsLoadedFor === today) return; // already loaded for this session
   try {
     const priors = await fetchSessionPriors();
