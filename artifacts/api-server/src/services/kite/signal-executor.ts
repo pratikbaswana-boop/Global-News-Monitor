@@ -267,7 +267,10 @@ function deriveOptionSignalFromSnapshot(
   const wantSide = base.signal === "BUY_CALL" ? "CALL" : "PUT";
   const detail = `D=${intraday.D.toFixed(2)} P=${intraday.P.toFixed(2)} ${intraday.regime} → ${intraday.signal}`;
 
-  if (intraday.signal !== wantSide) {
+  // Only block when tier-3 ACTIVELY disagrees (opposite signal). Let NONE pass through
+  // so the AI signal isn't blocked just because microstructure is neutral.
+  const oppositeSide = wantSide === "CALL" ? "PUT" : "CALL";
+  if (intraday.signal === oppositeSide) {
     return {
       signal: "NO_TRADE",
       suggestedStrike: null,

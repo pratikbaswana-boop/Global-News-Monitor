@@ -26,7 +26,7 @@ const THETA_D = 0.30;
 const THETA_P_LOW = 0.30;
 const THETA_P_HIGH = 0.55;
 const K_FADE = 0.5;
-const TAU = 0.18;                 // deadzone
+const TAU = 0.08;                 // deadzone — lowered from 0.18 to allow more signals
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
