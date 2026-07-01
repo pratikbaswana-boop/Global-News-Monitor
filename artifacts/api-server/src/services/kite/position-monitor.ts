@@ -73,9 +73,10 @@ export async function monitorOpenPositions(): Promise<void> {
     .where(eq(signalExecutionsTable.status, "open"));
 
   if (openExecs.length === 0) {
-    logger.debug("position-monitor: no open executions");
     return;
   }
+
+  logger.info({ count: openExecs.length }, "position-monitor: checking open positions");
 
   // Group executions by userId to batch position fetches
   const byUser = new Map<string, typeof openExecs>();
@@ -181,6 +182,16 @@ export async function monitorOpenPositions(): Promise<void> {
             trailGapPct,
             hardStopPct
           );
+
+          logger.info({
+            userId,
+            symbol: exec.assetSymbol,
+            ltp: currentPrice,
+            entry: entryPrice,
+            peak: peakPrice,
+            stop: stopPrice.toFixed(2),
+            milestone: milestoneLevel,
+          }, "position-monitor: position checked");
 
           const shouldExit =
             direction === "up"
