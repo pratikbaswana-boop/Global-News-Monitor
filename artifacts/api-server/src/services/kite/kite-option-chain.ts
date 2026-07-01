@@ -197,6 +197,24 @@ async function getNiftyOptionInstruments(kite: KiteConnect): Promise<NfoInstrume
 }
 
 /**
+ * Get the nearest available NIFTY weekly expiry from Kite's instruments list.
+ * Falls back to computed nearest Thursday if instruments haven't been cached yet.
+ * Exported so the signal executor can build correct option symbols.
+ */
+export async function getNearestExpiry(): Promise<Date> {
+  if (instrumentsCache && instrumentsCache.length > 0) {
+    const availableExpiries = [...new Set(instrumentsCache.map((i) => i.expiry))].sort();
+    const todayStr = formatExpiryDate(new Date());
+    const nearest = availableExpiries.find((e) => e >= todayStr) ?? availableExpiries[availableExpiries.length - 1]!;
+    // Parse YYYY-MM-DD into a Date at midnight UTC
+    const [y, m, d] = nearest.split("-").map(Number);
+    return new Date(Date.UTC(y!, m! - 1, d!));
+  }
+  // Fallback: compute nearest Thursday
+  return getNearestWeeklyExpiry();
+}
+
+/**
  * Get the nearest weekly expiry date (Thursday).
  */
 function getNearestWeeklyExpiry(): Date {

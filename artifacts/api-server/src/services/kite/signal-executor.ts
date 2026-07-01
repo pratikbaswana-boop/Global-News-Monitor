@@ -4,6 +4,7 @@ import { logger } from "../../lib/logger.js";
 import { placeOrder, type PlaceOrderParams } from "./orders.js";
 import { getMargins, syncPortfolio } from "./portfolio.js";
 import { getKiteClientForUser } from "./kite-client.js";
+import { getNearestExpiry } from "./kite-option-chain.js";
 import type { IntradaySignal } from "../market/tier3-signal.js";
 import { randomUUID } from "crypto";
 
@@ -586,8 +587,8 @@ async function executeOptionSignalForUser(
     return { executed: false, reason: optionSig.reason };
   }
 
-  // Build 5 strike candidates
-  const expiry = getNearestWeeklyExpiry();
+  // Build 5 strike candidates — use real Kite expiry, not computed Thursday
+  const expiry = await getNearestExpiry();
   const candidates = buildStrikeCandidates(optionSig.suggestedStrike, optionSig.signal, expiry);
 
   // Fetch live premiums
