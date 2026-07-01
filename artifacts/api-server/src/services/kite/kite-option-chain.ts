@@ -164,14 +164,31 @@ async function getNiftyOptionInstruments(kite: KiteConnect): Promise<NfoInstrume
 
   const niftyOptions = allInstruments
     .filter((inst) => inst["name"] === "NIFTY" && (inst["instrument_type"] === "CE" || inst["instrument_type"] === "PE"))
-    .map((inst) => ({
-      instrument_token: Number(inst["instrument_token"]),
-      tradingsymbol: String(inst["tradingsymbol"]),
-      strike: Number(inst["strike"]),
-      instrument_type: inst["instrument_type"] as "CE" | "PE",
-      expiry: String(inst["expiry"]),
-      name: String(inst["name"]),
-    }));
+    .map((inst) => {
+      // KiteConnect v5 returns expiry as Date object or string — normalize to YYYY-MM-DD
+      const rawExpiry = inst["expiry"];
+      let expiryStr: string;
+      if (rawExpiry instanceof Date) {
+        expiryStr = `${rawExpiry.getFullYear()}-${String(rawExpiry.getMonth() + 1).padStart(2, "0")}-${String(rawExpiry.getDate()).padStart(2, "0")}`;
+      } else if (typeof rawExpiry === "string" && rawExpiry.includes("-")) {
+        // Already YYYY-MM-DD format
+        expiryStr = rawExpiry.slice(0, 10);
+      } else if (typeof rawExpiry === "string") {
+        // Parse date string like "Tue Jul 07 2026"
+        const d = new Date(rawExpiry);
+        expiryStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      } else {
+        expiryStr = String(rawExpiry);
+      }
+      return {
+        instrument_token: Number(inst["instrument_token"]),
+        tradingsymbol: String(inst["tradingsymbol"]),
+        strike: Number(inst["strike"]),
+        instrument_type: inst["instrument_type"] as "CE" | "PE",
+        expiry: expiryStr,
+        name: String(inst["name"]),
+      };
+    });
 
   instrumentsCache = niftyOptions;
   instrumentsCacheTime = now;
