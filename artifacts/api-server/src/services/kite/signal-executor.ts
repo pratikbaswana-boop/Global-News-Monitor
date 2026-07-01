@@ -666,11 +666,12 @@ async function executeOptionSignalForUser(
     return { executed: false, reason: "Already holding option position" };
   }
 
-  // Product/order type
+  // Product/order type — use LIMIT for options (Kite API doesn't allow MARKET
+  // orders without market protection for options)
   const product = (pref.defaultProduct ?? account.defaultProduct ?? "MIS") as "CNC" | "MIS" | "NRML";
-  const orderType = (pref.defaultOrderType ?? account.defaultOrderType ?? "MARKET") as "MARKET" | "LIMIT" | "SL" | "SL-M";
+  const orderType: "MARKET" | "LIMIT" | "SL" | "SL-M" = "LIMIT";
 
-  // Place order
+  // Place order — LIMIT at slight premium above LTP to ensure fill
   const orderParams: PlaceOrderParams = {
     exchange,
     tradingsymbol: optionSymbol,
@@ -681,8 +682,9 @@ async function executeOptionSignalForUser(
     tag: `auto-${snapshot.assetId.slice(0, 3)}`,
   };
 
-  if (orderParams.orderType === "LIMIT" && premium > 0) {
-    orderParams.price = Math.round(premium * 1.005 * 100) / 100;
+  if (premium > 0) {
+    // Place limit order 1% above LTP for quick fill
+    orderParams.price = Math.round(premium * 1.01 * 100) / 100;
   }
 
   const orderResult = await placeOrder(userId, orderParams);
