@@ -48,11 +48,11 @@ function getNearestWeeklyExpiry(): Date {
 }
 
 function formatExpiryForSymbol(expiry: Date): string {
-  const day = String(expiry.getDate()).padStart(2, "0");
-  const monthNames = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
-  const month = monthNames[expiry.getMonth()];
-  const year = String(expiry.getFullYear()).slice(-2);
-  return `${day}${month}${year}`;
+  // Kite format: YYMMDD (e.g. 26707 for 2026-07-07)
+  const yy = String(expiry.getFullYear()).slice(-2);
+  const mm = String(expiry.getMonth() + 1).padStart(2, "0");
+  const dd = String(expiry.getDate()).padStart(2, "0");
+  return `${yy}${mm}${dd}`;
 }
 
 function buildOptionSymbol(
