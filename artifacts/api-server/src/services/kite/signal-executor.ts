@@ -24,7 +24,7 @@ interface ExecutionResult {
 }
 
 // ── Option Trading Constants ────────────────────────────────────────────────
-const NIFTY_LOT_SIZE = 75;
+const NIFTY_LOT_SIZE = 65;
 const MIN_OPTION_PREMIUM = 5;
 const MAX_OPTION_PREMIUM = 400;
 const MAX_OPTION_LOTS = 20;
