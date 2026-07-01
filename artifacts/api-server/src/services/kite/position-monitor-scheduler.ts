@@ -19,7 +19,7 @@ function currentWindow(): "pre-market" | "open" | "closed" {
   return "closed";
 }
 
-const CHECK_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
+const CHECK_INTERVAL_MS = 5_000; // 5 seconds — options move fast, money at stake
 
 async function runCheck(): Promise<void> {
   const window = currentWindow();
