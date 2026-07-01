@@ -678,7 +678,7 @@ async function executeOptionSignalForUser(
     quantity,
     orderType,
     product,
-    tag: `auto-option-${snapshot.assetId}-${snapshot.id}`,
+    tag: `auto-${snapshot.assetId.slice(0, 3)}`,
   };
 
   if (orderParams.orderType === "LIMIT" && premium > 0) {
