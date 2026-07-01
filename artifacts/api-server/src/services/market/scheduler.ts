@@ -637,7 +637,9 @@ async function refreshSnapshotTier3(): Promise<void> {
   const tier3 = lastTier3;
 
   // ── Feed the intraday signal engine ──────────────────────────────────────
-  // Prefer Kite data; fall back to Firecrawl tier3 if Kite unavailable.
+  // Prefer Kite data (fresh every 5s); fall back to Firecrawl tier3 only when
+  // we have a freshly fetched snapshot (every 6th tick). Feeding stale cached
+  // Firecrawl data every 5s would poison the buffer with duplicate OI values.
   if (kiteObs) {
     recordObservation({
       t: Date.now(),
@@ -655,8 +657,8 @@ async function refreshSnapshotTier3(): Promise<void> {
       putOI: kiteObs.putOI,
       atmIV: kiteObs.atmIV.toFixed(2),
     }, "market-scheduler: recordObservation called (Kite)");
-  } else if (tier3 && tier3.spotPrice && tier3.callOI > 0 && tier3.putOI > 0) {
-    // Fallback: Firecrawl-based tier3 data
+  } else if (tier3 && tier3.spotPrice && tier3.callOI > 0 && tier3.putOI > 0 && refreshTick % 6 === 1) {
+    // Only feed Firecrawl data when it's freshly fetched (every 6th tick = 30s)
     recordObservation({
       t: Date.now(),
       price: tier3.spotPrice,
@@ -673,8 +675,11 @@ async function refreshSnapshotTier3(): Promise<void> {
       putOI: tier3.putOI,
       atmIV: tier3.impliedVolPct ?? 0,
     }, "market-scheduler: recordObservation called (Firecrawl fallback)");
+  } else if (!kiteObs && refreshTick % 6 !== 1) {
+    // Kite failed and we don't have fresh Firecrawl data — skip to avoid poisoning buffer
+    logger.warn("market-scheduler: recordObservation SKIPPED (Kite unavailable, waiting for fresh Firecrawl data)");
   } else {
-    logger.warn("market-scheduler: recordObservation SKIPPED (no Kite or Firecrawl data)");
+    logger.warn("market-scheduler: recordObservation SKIPPED (no data)");
   }
   const intraday = computeIntradaySignal();
 

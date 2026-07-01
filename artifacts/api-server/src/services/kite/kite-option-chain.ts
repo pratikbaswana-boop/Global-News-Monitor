@@ -9,7 +9,7 @@
 
 import { KiteConnect } from "kiteconnect";
 import { db, brokerAccountsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { eq, and, desc } from "drizzle-orm";
 import { logger } from "../../lib/logger.js";
 import { bsGamma } from "../market/tier3-signal.js";
 
@@ -38,50 +38,88 @@ let instrumentsCacheTime = 0;
 const INSTRUMENTS_CACHE_MS = 6 * 60 * 60 * 1000; // 6 hours
 
 /**
- * Get a Kite client using the global data user's access token, or any other
- * valid token. This is used for fetching market data (not trade execution).
+ * Get a Kite client for fetching market data. Priority:
+ *   1. User whose api_key matches KITE_API_KEY (the premium/global account)
+ *   2. The configured global data user (pratikjat2811@gmail.com)
+ *   3. Any active user with a non-expired token
+ *
+ * The api_key used to create the client MUST match the api_key that was used
+ * to generate the access_token — otherwise Kite returns "Incorrect api_key".
  */
 export async function getGlobalKiteClient(): Promise<KiteConnect | null> {
   try {
-    // Try the global data user first
-    let rows = await db
-      .select()
-      .from(brokerAccountsTable)
-      .where(eq(brokerAccountsTable.userId, GLOBAL_DATA_USER_ID))
-      .limit(1);
+    const now = new Date();
 
-    // If global user has no valid token, try any active user
-    if (!rows.length || !rows[0]?.accessToken || !rows[0]?.isActive ||
-        (rows[0]?.expiresAt && new Date() > rows[0].expiresAt)) {
-      logger.warn("kite-option-chain: global data user has no valid token, trying any active user");
-      rows = await db
+    // 1. Prefer the user whose api_key matches the global KITE_API_KEY
+    if (KITE_API_KEY) {
+      const rows = await db
         .select()
         .from(brokerAccountsTable)
-        .where(eq(brokerAccountsTable.isActive, true))
+        .where(
+          and(
+            eq(brokerAccountsTable.apiKey, KITE_API_KEY),
+            eq(brokerAccountsTable.isActive, true)
+          )
+        )
+        .orderBy(desc(brokerAccountsTable.expiresAt))
         .limit(1);
 
-      if (!rows.length || !rows[0]?.accessToken) {
-        logger.warn("kite-option-chain: no valid Kite access token found in any broker account");
-        return null;
-      }
-
-      // Check expiry for fallback user
-      if (rows[0]?.expiresAt && new Date() > rows[0].expiresAt) {
-        logger.warn("kite-option-chain: fallback user token also expired");
-        return null;
+      if (rows.length && rows[0]?.accessToken &&
+          (!rows[0]?.expiresAt || rows[0].expiresAt > now)) {
+        const account = rows[0]!;
+        const kite = new KiteConnect({ api_key: KITE_API_KEY });
+        kite.setAccessToken(account.accessToken!);
+        logger.info({ userId: account.userId }, "kite-option-chain: using global API key user");
+        return kite;
       }
     }
 
-    const account = rows[0]!;
-    const apiKey = account.apiKey ?? KITE_API_KEY;
-    if (!apiKey) {
-      logger.warn("kite-option-chain: no API key available");
-      return null;
+    // 2. Try the configured global data user
+    const globalRows = await db
+      .select()
+      .from(brokerAccountsTable)
+      .where(
+        and(
+          eq(brokerAccountsTable.userId, GLOBAL_DATA_USER_ID),
+          eq(brokerAccountsTable.isActive, true)
+        )
+      )
+      .limit(1);
+
+    if (globalRows.length && globalRows[0]?.accessToken &&
+        (!globalRows[0]?.expiresAt || globalRows[0].expiresAt > now)) {
+      const account = globalRows[0]!;
+      const apiKey = account.apiKey ?? KITE_API_KEY;
+      if (apiKey) {
+        const kite = new KiteConnect({ api_key: apiKey });
+        kite.setAccessToken(account.accessToken!);
+        logger.info({ userId: account.userId }, "kite-option-chain: using global data user");
+        return kite;
+      }
     }
 
-    const kite = new KiteConnect({ api_key: apiKey });
-    kite.setAccessToken(account.accessToken!);
-    return kite;
+    // 3. Fallback: any active user with a non-expired token, most recent first
+    logger.warn("kite-option-chain: global user unavailable, trying any active user");
+    const rows = await db
+      .select()
+      .from(brokerAccountsTable)
+      .where(eq(brokerAccountsTable.isActive, true))
+      .orderBy(desc(brokerAccountsTable.expiresAt))
+      .limit(5);
+
+    for (const account of rows) {
+      if (!account.accessToken) continue;
+      if (account.expiresAt && account.expiresAt <= now) continue;
+      const apiKey = account.apiKey ?? KITE_API_KEY;
+      if (!apiKey) continue;
+      const kite = new KiteConnect({ api_key: apiKey });
+      kite.setAccessToken(account.accessToken);
+      logger.info({ userId: account.userId }, "kite-option-chain: using fallback user");
+      return kite;
+    }
+
+    logger.warn("kite-option-chain: no valid Kite access token found in any broker account");
+    return null;
   } catch (err) {
     logger.error({ err }, "kite-option-chain: failed to get global Kite client");
     return null;
