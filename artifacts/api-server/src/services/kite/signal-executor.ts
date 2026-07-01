@@ -48,9 +48,9 @@ function getNearestWeeklyExpiry(): Date {
 }
 
 function formatExpiryForSymbol(expiry: Date): string {
-  // Kite format: YYMMDD (e.g. 26707 for 2026-07-07)
+  // Kite format: YY + M (no zero-pad) + DD (e.g. 26707 for 2026-07-07)
   const yy = String(expiry.getFullYear()).slice(-2);
-  const mm = String(expiry.getMonth() + 1).padStart(2, "0");
+  const mm = String(expiry.getMonth() + 1); // no zero-pad for month
   const dd = String(expiry.getDate()).padStart(2, "0");
   return `${yy}${mm}${dd}`;
 }
