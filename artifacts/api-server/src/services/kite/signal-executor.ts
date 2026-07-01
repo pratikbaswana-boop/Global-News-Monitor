@@ -109,10 +109,15 @@ async function fetchOptionQuotes(
   candidates: { symbol: string; strike: number; deltaEstimate: number }[]
 ): Promise<OptionCandidate[]> {
   const kite = await getKiteClientForUser(userId);
-  if (!kite) return [];
+  if (!kite) {
+    logger.warn({ userId, count: candidates.length }, "signal-executor: no Kite client for fetchOptionQuotes");
+    return [];
+  }
 
   const instruments = candidates.map((c) => `NFO:${c.symbol}`);
+  logger.info({ userId, instruments }, "signal-executor: fetching option quotes");
   const quotes = await kite.getQuote(instruments);
+  logger.info({ userId, quoteKeys: Object.keys(quotes as Record<string, unknown>) }, "signal-executor: received quotes");
 
   const results: OptionCandidate[] = [];
   for (const c of candidates) {
