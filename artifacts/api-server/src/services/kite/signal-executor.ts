@@ -683,8 +683,9 @@ async function executeOptionSignalForUser(
   };
 
   if (premium > 0) {
-    // Place limit order 1% above LTP for quick fill
-    orderParams.price = Math.round(premium * 1.01 * 100) / 100;
+    // Place limit order 1% above LTP, rounded to nearest tick size (0.05)
+    const rawPrice = premium * 1.01;
+    orderParams.price = Math.round(rawPrice / 0.05) * 0.05;
   }
 
   const orderResult = await placeOrder(userId, orderParams);
