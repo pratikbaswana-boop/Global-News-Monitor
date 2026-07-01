@@ -25,7 +25,7 @@ interface ExecutionResult {
 
 // ── Option Trading Constants ────────────────────────────────────────────────
 const NIFTY_LOT_SIZE = 75;
-const MIN_OPTION_PREMIUM = 30;
+const MIN_OPTION_PREMIUM = 5;
 const MAX_OPTION_PREMIUM = 400;
 const MAX_OPTION_LOTS = 20;
 const OPTION_HARD_STOP_PCT = 30; // entry framework hard stop
@@ -84,18 +84,25 @@ function buildStrikeCandidates(
   const type = signal === "BUY_CALL" ? "CE" : "PE";
   const candidates: { symbol: string; strike: number; deltaEstimate: number }[] = [];
 
+  // Expanded to ±10 strikes so we can find affordable options even with low capital.
+  // Delta estimates decay with distance from ATM.
+  const offsets = [0, 50, 100, 150, 200, 250, 300, 350, 400, 450, 500];
+  const deltas  = [0.50, 0.35, 0.20, 0.12, 0.08, 0.05, 0.03, 0.02, 0.015, 0.01, 0.008];
+
   if (signal === "BUY_CALL") {
+    // ITM calls (lower strike) + OTM calls (higher strike)
     candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike - 100, type), strike: suggestedStrike - 100, deltaEstimate: 0.80 }); // 2 ITM
     candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike - 50,  type), strike: suggestedStrike - 50,  deltaEstimate: 0.65 }); // 1 ITM
-    candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike,       type), strike: suggestedStrike,       deltaEstimate: 0.50 }); // ATM
-    candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike + 50,  type), strike: suggestedStrike + 50,  deltaEstimate: 0.35 }); // 1 OTM
-    candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike + 100, type), strike: suggestedStrike + 100, deltaEstimate: 0.20 }); // 2 OTM
+    for (let i = 0; i < offsets.length; i++) {
+      candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike + offsets[i]!, type), strike: suggestedStrike + offsets[i]!, deltaEstimate: deltas[i]! });
+    }
   } else {
+    // ITM puts (higher strike) + OTM puts (lower strike)
     candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike + 100, type), strike: suggestedStrike + 100, deltaEstimate: 0.80 }); // 2 ITM
     candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike + 50,  type), strike: suggestedStrike + 50,  deltaEstimate: 0.65 }); // 1 ITM
-    candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike,       type), strike: suggestedStrike,       deltaEstimate: 0.50 }); // ATM
-    candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike - 50,  type), strike: suggestedStrike - 50,  deltaEstimate: 0.35 }); // 1 OTM
-    candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike - 100, type), strike: suggestedStrike - 100, deltaEstimate: 0.20 }); // 2 OTM
+    for (let i = 0; i < offsets.length; i++) {
+      candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike - offsets[i]!, type), strike: suggestedStrike - offsets[i]!, deltaEstimate: deltas[i]! });
+    }
   }
   return candidates;
 }
