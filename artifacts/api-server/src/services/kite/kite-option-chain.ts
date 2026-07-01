@@ -326,10 +326,20 @@ export async function fetchKiteOptionChain(): Promise<KiteOptionChainObservation
       return null;
     }
 
-    // 2. Get NIFTY option instruments for current expiry
+    // 2. Get NIFTY option instruments and find the nearest available expiry
     const instruments = await getNiftyOptionInstruments(kite);
-    const expiryDate = getNearestWeeklyExpiry();
-    const expiryStr = formatExpiryDate(expiryDate);
+
+    // Instead of computing the nearest Thursday ourselves (which may not match
+    // Kite's actual expiry list due to holidays or special expiries), find the
+    // nearest expiry date that actually exists in the instruments list.
+    const availableExpiries = [...new Set(instruments.map((i) => i.expiry))].sort();
+    if (availableExpiries.length === 0) {
+      logger.warn("kite-option-chain: no expiries available in instruments list");
+      return null;
+    }
+    const todayStr = formatExpiryDate(new Date());
+    const expiryStr = availableExpiries.find((e) => e >= todayStr) ?? availableExpiries[availableExpiries.length - 1]!;
+    logger.info({ expiryStr, availableCount: availableExpiries.length, firstFew: availableExpiries.slice(0, 5) }, "kite-option-chain: selected nearest expiry");
 
     const expiryInstruments = instruments.filter((i) => i.expiry === expiryStr);
     if (expiryInstruments.length === 0) {
