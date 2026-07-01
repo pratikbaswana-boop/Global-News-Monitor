@@ -137,7 +137,31 @@ async function getNiftyOptionInstruments(kite: KiteConnect): Promise<NfoInstrume
     return instrumentsCache;
   }
 
-  const allInstruments = await kite.getInstruments("NFO") as Array<Record<string, unknown>>;
+  const raw = await kite.getInstruments("NFO");
+  let allInstruments: Array<Record<string, unknown>>;
+
+  // KiteConnect v5 may return CSV string or parsed array — handle both
+  if (typeof raw === "string") {
+    logger.info("kite-option-chain: instruments returned as CSV string, parsing...");
+    const lines = raw.trim().split("\n");
+    const header = lines[0]!.split(",");
+    allInstruments = lines.slice(1).map((line) => {
+      const vals = line.split(",");
+      const row: Record<string, unknown> = {};
+      for (let i = 0; i < header.length; i++) {
+        row[header[i]!] = vals[i];
+      }
+      return row;
+    });
+  } else if (Array.isArray(raw)) {
+    allInstruments = raw as Array<Record<string, unknown>>;
+  } else {
+    logger.error({ type: typeof raw }, "kite-option-chain: unexpected instruments response type");
+    allInstruments = [];
+  }
+
+  logger.info({ total: allInstruments.length, sampleKeys: allInstruments[0] ? Object.keys(allInstruments[0]!) : [] }, "kite-option-chain: instruments fetched");
+
   const niftyOptions = allInstruments
     .filter((inst) => inst["name"] === "NIFTY" && (inst["instrument_type"] === "CE" || inst["instrument_type"] === "PE"))
     .map((inst) => ({
@@ -151,7 +175,7 @@ async function getNiftyOptionInstruments(kite: KiteConnect): Promise<NfoInstrume
 
   instrumentsCache = niftyOptions;
   instrumentsCacheTime = now;
-  logger.info({ count: niftyOptions.length }, "kite-option-chain: cached NIFTY option instruments");
+  logger.info({ count: niftyOptions.length, sampleExpiry: niftyOptions[0]?.expiry }, "kite-option-chain: cached NIFTY option instruments");
   return niftyOptions;
 }
 
