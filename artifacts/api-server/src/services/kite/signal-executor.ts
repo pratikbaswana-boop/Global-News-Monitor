@@ -769,8 +769,9 @@ async function executeSignalForUser(
   direction: "up" | "down"
 ): Promise<ExecutionResult> {
   const pref = await getUserTradePreference(userId, snapshot.assetId);
-  // Index assets (nifty50, sensex) can only be traded via options — force options path.
-  const isIndexAsset = snapshot.assetId === "nifty50" || snapshot.assetId === "sensex";
+  // Only NIFTY supports option trading via Kite. SENSEX options use a different
+  // instrument format (BFO:SENSEX) and strike interval — skip for now.
+  const isIndexAsset = snapshot.assetId === "nifty50";
   if (pref?.useOptions || isIndexAsset) {
     return executeOptionSignalForUser(userId, account, snapshot);
   }
