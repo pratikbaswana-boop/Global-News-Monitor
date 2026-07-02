@@ -172,9 +172,14 @@ export async function monitorOpenPositions(): Promise<void> {
             let kite = await getKiteClientForUser(userId);
             if (!kite) kite = await getGlobalKiteClient();
             if (kite) {
-              const quotes = await kite.getQuote([quoteKey]) as Record<string, any>;
-              const q = quotes[quoteKey] ?? {};
-              currentPrice = Number(q.last_price ?? 0);
+              // Wrap in timeout to prevent hanging when market is closed or API is slow
+              const quotePromise = kite.getQuote([quoteKey]) as Promise<Record<string, any>>;
+              const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000));
+              const quotes = await Promise.race([quotePromise, timeoutPromise]);
+              if (quotes) {
+                const q = quotes[quoteKey] ?? {};
+                currentPrice = Number(q.last_price ?? 0);
+              }
             }
           } catch (err) {
             logger.warn({ userId, execId: exec.id, symbol: exec.assetSymbol, err: err instanceof Error ? err.message : err }, "position-monitor: quote fetch failed, falling back to position last_price");
