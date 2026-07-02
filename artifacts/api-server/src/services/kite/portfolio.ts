@@ -17,8 +17,31 @@ export async function getMargins(appUserId: string): Promise<MarginsSummary | nu
   const kite = await getKiteClientForUser(appUserId);
   if (!kite) return null;
 
-  const margins = await kite.getMargins();
-  return margins as MarginsSummary;
+  const raw = await kite.getMargins() as Record<string, any>;
+  const eq = raw?.equity ?? {};
+  const avail = eq.available ?? {};
+  const used = eq.used ?? {};
+  return {
+    equity: {
+      net: eq.net ?? 0,
+      available: {
+        cash: avail.cash ?? 0,
+        collateral: avail.collateral ?? 0,
+        intradayPayin: avail.intraday_payin ?? avail.intradayPayin ?? 0,
+        liveBalance: avail.live_balance ?? avail.liveBalance ?? 0,
+        openingBalance: avail.opening_balance ?? avail.openingBalance ?? 0,
+      },
+      used: {
+        m2mRealised: used.m2m_realised ?? used.m2mRealised ?? 0,
+        m2mUnrealised: used.m2m_unrealised ?? used.m2mUnrealised ?? 0,
+        span: used.span ?? 0,
+        exposure: used.exposure ?? 0,
+        optionPremium: used.option_premium ?? used.optionPremium ?? 0,
+        holdingSales: used.holding_sales ?? used.holdingSales ?? 0,
+      },
+    },
+    commodity: raw?.commodity,
+  };
 }
 
 export async function getHoldings(appUserId: string): Promise<unknown[]> {
