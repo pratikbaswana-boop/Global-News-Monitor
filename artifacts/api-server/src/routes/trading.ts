@@ -100,7 +100,14 @@ router.get("/trading/orders", async (req, res) => {
       return;
     }
 
-    const orders = await getOrders(userId);
+    const orders = await Promise.race([
+      getOrders(userId),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 10000)),
+    ]);
+    if (!orders) {
+      res.status(503).json({ error: "Orders fetch timed out" });
+      return;
+    }
     res.json({ orders });
   } catch (err) {
     logger.error({ err }, "get orders failed");
@@ -262,7 +269,10 @@ router.post("/trading/margins/check", async (req, res) => {
 // GET /trading/market-data — NIFTY spot, IV, OI, PCR from global paid Kite client
 router.get("/trading/market-data", async (_req, res) => {
   try {
-    const chain = await fetchKiteOptionChain();
+    const chain = await Promise.race([
+      fetchKiteOptionChain(),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 10000)),
+    ]);
     if (!chain) {
       res.status(503).json({ error: "Market data unavailable" });
       return;
