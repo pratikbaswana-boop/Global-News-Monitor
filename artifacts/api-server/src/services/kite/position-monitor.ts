@@ -255,7 +255,8 @@ export async function monitorOpenPositions(): Promise<void> {
               tradingsymbol: exec.assetSymbol,
               transactionType: direction === "up" ? "SELL" : "BUY",
               quantity: exec.quantity,
-              orderType: "MARKET",
+              orderType: "LIMIT",
+              price: Math.round((currentPrice * 0.99) / 0.05) * 0.05,
               product: (exec.product ?? "MIS") as "CNC" | "MIS" | "NRML",
               tag: `exit-${exec.id.slice(0, 14)}`,
             });
