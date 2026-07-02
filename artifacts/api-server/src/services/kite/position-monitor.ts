@@ -257,7 +257,7 @@ export async function monitorOpenPositions(): Promise<void> {
               quantity: exec.quantity,
               orderType: "MARKET",
               product: (exec.product ?? "MIS") as "CNC" | "MIS" | "NRML",
-              tag: `trailing-exit-${exec.id.slice(0, 8)}`,
+              tag: `exit-${exec.id.slice(0, 14)}`,
             });
 
             const realisedPnl =
