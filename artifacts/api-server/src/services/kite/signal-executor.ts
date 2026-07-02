@@ -3,8 +3,7 @@ import { eq, desc, and, gt, or } from "drizzle-orm";
 import { logger } from "../../lib/logger.js";
 import { placeOrder, type PlaceOrderParams } from "./orders.js";
 import { getMargins, syncPortfolio } from "./portfolio.js";
-import { getKiteClientForUser } from "./kite-client.js";
-import { getNearestExpiry } from "./kite-option-chain.js";
+import { getGlobalKiteClient, getNearestExpiry } from "./kite-option-chain.js";
 import type { IntradaySignal } from "../market/tier3-signal.js";
 import { randomUUID } from "crypto";
 
@@ -126,9 +125,11 @@ async function fetchOptionQuotes(
   userId: string,
   candidates: { symbol: string; strike: number; deltaEstimate: number }[]
 ): Promise<OptionCandidate[]> {
-  const kite = await getKiteClientForUser(userId);
+  // Use global (paid) Kite client for market data — user's own client may be
+  // a free Personal app that doesn't have quote permissions.
+  const kite = await getGlobalKiteClient();
   if (!kite) {
-    logger.warn({ userId, count: candidates.length }, "signal-executor: no Kite client for fetchOptionQuotes");
+    logger.warn({ userId, count: candidates.length }, "signal-executor: no global Kite client for fetchOptionQuotes");
     return [];
   }
 
