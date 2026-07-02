@@ -1,5 +1,7 @@
 import { Router } from "express";
 import { logger } from "../lib/logger.js";
+import { db, signalExecutionsTable } from "@workspace/db";
+import { eq, desc, and } from "drizzle-orm";
 import {
   placeOrder,
   cancelOrder,
@@ -16,6 +18,8 @@ import {
   syncPortfolio,
   checkOrderMargin,
 } from "../services/kite/portfolio.js";
+import { fetchKiteOptionChain, getGlobalKiteClient } from "../services/kite/kite-option-chain.js";
+import { getKiteClientForUser } from "../services/kite/kite-client.js";
 
 const router = Router();
 
@@ -252,6 +256,109 @@ router.post("/trading/margins/check", async (req, res) => {
   } catch (err) {
     logger.error({ err }, "margin check failed");
     res.status(500).json({ error: err instanceof Error ? err.message : "Margin check failed" });
+  }
+});
+
+// GET /trading/market-data — NIFTY spot, IV, OI, PCR from global paid Kite client
+router.get("/trading/market-data", async (_req, res) => {
+  try {
+    const chain = await fetchKiteOptionChain();
+    if (!chain) {
+      res.status(503).json({ error: "Market data unavailable" });
+      return;
+    }
+    res.json(chain);
+  } catch (err) {
+    logger.error({ err }, "market-data fetch failed");
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to fetch market data" });
+  }
+});
+
+// GET /trading/executions — User's signal executions with current premium and PnL
+router.get("/trading/executions", async (req, res) => {
+  try {
+    const userId = req.query.userId as string;
+    const status = (req.query.status as string) || "all";
+
+    if (!userId) {
+      res.status(400).json({ error: "userId query param is required" });
+      return;
+    }
+
+    const conditions = [eq(signalExecutionsTable.userId, userId)];
+    if (status === "open") {
+      conditions.push(eq(signalExecutionsTable.status, "open"));
+    } else if (status === "closed") {
+      conditions.push(eq(signalExecutionsTable.status, "closed"));
+    }
+
+    const execs = await db
+      .select()
+      .from(signalExecutionsTable)
+      .where(and(...conditions))
+      .orderBy(desc(signalExecutionsTable.executedAt))
+      .limit(50);
+
+    // Fetch current LTP for open positions via global client
+    let quotesMap: Record<string, number> = {};
+    const openExecs = execs.filter((e) => e.status === "open");
+    if (openExecs.length > 0) {
+      try {
+        const kite = await getGlobalKiteClient();
+        if (kite) {
+          const quoteKeys = openExecs.map((e) => {
+            const isOption = e.assetSymbol.startsWith("NIFTY") &&
+              (e.assetSymbol.endsWith("CE") || e.assetSymbol.endsWith("PE"));
+            const exchange = isOption ? "NFO" : "NSE";
+            return `${exchange}:${e.assetSymbol}`;
+          });
+          const quotes = await Promise.race([
+            kite.getQuote(quoteKeys) as Promise<Record<string, any>>,
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+          ]);
+          if (quotes) {
+            for (const e of openExecs) {
+              const isOption = e.assetSymbol.startsWith("NIFTY") &&
+                (e.assetSymbol.endsWith("CE") || e.assetSymbol.endsWith("PE"));
+              const exchange = isOption ? "NFO" : "NSE";
+              const key = `${exchange}:${e.assetSymbol}`;
+              const q = quotes[key];
+              if (q) quotesMap[e.assetSymbol] = Number(q.last_price ?? 0);
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn({ err: err instanceof Error ? err.message : err }, "executions: quote fetch failed");
+      }
+    }
+
+    // Enrich executions with current price and unrealized PnL
+    const enriched = execs.map((e) => {
+      const entryPrice = Number(e.entryPrice ?? 0);
+      const currentPrice = quotesMap[e.assetSymbol] ?? 0;
+      const qty = e.quantity;
+      let unrealizedPnl: number | null = null;
+      if (currentPrice > 0 && entryPrice > 0) {
+        unrealizedPnl = e.direction === "up"
+          ? (currentPrice - entryPrice) * qty
+          : (entryPrice - currentPrice) * qty;
+      }
+      return {
+        ...e,
+        entryPrice: entryPrice,
+        currentPrice: currentPrice > 0 ? currentPrice : null,
+        unrealizedPnl: unrealizedPnl !== null ? Number(unrealizedPnl.toFixed(2)) : null,
+        realisedPnl: e.realisedPnl ? Number(e.realisedPnl) : null,
+        highestPriceReached: e.highestPriceReached ? Number(e.highestPriceReached) : null,
+        stopLossPrice: e.stopLossPrice ? Number(e.stopLossPrice) : null,
+        exitPrice: e.exitPrice ? Number(e.exitPrice) : null,
+      };
+    });
+
+    res.json({ executions: enriched });
+  } catch (err) {
+    logger.error({ err }, "get executions failed");
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to fetch executions" });
   }
 });
 

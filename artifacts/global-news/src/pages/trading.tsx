@@ -21,7 +21,14 @@ import {
   Loader2,
   Unplug,
   Wallet,
+  Activity,
+  BarChart3,
+  History,
+  Target,
+  ArrowUpRight,
+  ArrowDownRight,
 } from "lucide-react";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 interface BrokerStatus {
   connected: boolean;
@@ -55,6 +62,146 @@ interface TradePreferencesResponse {
 }
 
 const API_BASE = "/api";
+
+interface MarketData {
+  spotPrice: number;
+  callOI: number;
+  putOI: number;
+  optionVolume: number;
+  atmIV: number;
+  atmGamma: number;
+  pcr: number;
+  maxPainStrike: number | null;
+  source: string;
+}
+
+interface Execution {
+  id: string;
+  assetSymbol: string;
+  direction: string;
+  quantity: number;
+  entryPrice: number;
+  currentPrice: number | null;
+  unrealizedPnl: number | null;
+  realisedPnl: number | null;
+  highestPriceReached: number | null;
+  stopLossPrice: number | null;
+  exitPrice: number | null;
+  exitStrategy: string | null;
+  exitReason: string | null;
+  status: string;
+  notes: string | null;
+  executedAt: string;
+  closedAt: string | null;
+}
+
+interface OrderInfo {
+  order_id: string;
+  tradingsymbol: string;
+  exchange: string;
+  transaction_type: string;
+  order_type: string;
+  product: string;
+  status: string;
+  quantity: number;
+  price: number;
+  average_price: number;
+  filled_quantity: number;
+  status_message: string | null;
+  order_timestamp: string;
+}
+
+function useMarketData() {
+  const [data, setData] = useState<MarketData | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const fetchData = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/trading/market-data`);
+      if (res.ok) {
+        setData(await res.json());
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchData();
+    const interval = setInterval(fetchData, 10000);
+    return () => clearInterval(interval);
+  }, [fetchData]);
+
+  return { data, loading, refetch: fetchData };
+}
+
+function useExecutions(userId: string | undefined) {
+  const [data, setData] = useState<{ executions: Execution[] } | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const fetchData = useCallback(async () => {
+    if (!userId) return;
+    try {
+      const res = await fetch(`${API_BASE}/trading/executions?userId=${encodeURIComponent(userId)}`);
+      if (res.ok) {
+        setData(await res.json());
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoading(false);
+    }
+  }, [userId]);
+
+  useEffect(() => {
+    fetchData();
+    const interval = setInterval(fetchData, 5000);
+    return () => clearInterval(interval);
+  }, [fetchData]);
+
+  return { data, loading, refetch: fetchData };
+}
+
+function useOrders(userId: string | undefined) {
+  const [data, setData] = useState<{ orders: OrderInfo[] } | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const fetchData = useCallback(async () => {
+    if (!userId) return;
+    try {
+      const res = await fetch(`${API_BASE}/trading/orders?userId=${encodeURIComponent(userId)}`);
+      if (res.ok) {
+        setData(await res.json());
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoading(false);
+    }
+  }, [userId]);
+
+  useEffect(() => {
+    fetchData();
+    const interval = setInterval(fetchData, 10000);
+    return () => clearInterval(interval);
+  }, [fetchData]);
+
+  return { data, loading, refetch: fetchData };
+}
+
+function formatNumber(n: number | null | undefined, decimals = 2): string {
+  if (n === null || n === undefined) return "—";
+  return n.toLocaleString("en-IN", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+}
+
+function formatPnl(n: number | null | undefined): { text: string; color: string } {
+  if (n === null || n === undefined) return { text: "—", color: "text-muted-foreground" };
+  const text = (n >= 0 ? "+" : "") + formatNumber(n);
+  const color = n >= 0 ? "text-emerald-400" : "text-red-400";
+  return { text, color };
+}
 
 function useBrokerStatus(userId: string | undefined) {
   const [status, setStatus] = useState<BrokerStatus | null>(null);
@@ -114,6 +261,9 @@ export default function TradingPage() {
 
   const { status: brokerStatus, loading: statusLoading, refetch: refetchStatus } = useBrokerStatus(userId);
   const { data: prefsData, loading: prefsLoading, refetch: refetchPrefs } = useTradePreferences(userId);
+  const { data: marketData, loading: marketLoading } = useMarketData();
+  const { data: execData, loading: execLoading } = useExecutions(userId);
+  const { data: ordersData, loading: ordersLoading } = useOrders(userId);
 
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
@@ -682,6 +832,292 @@ export default function TradingPage() {
                 </Card>
               )}
             </div>
+          </div>
+
+          {/* Market Data + Trading Dashboard */}
+          <div className="space-y-6">
+            {/* NIFTY Market Data */}
+            <Card className="bg-[#10131b] border-border/20 shadow-none rounded-lg">
+              <CardHeader className="pb-3 border-b border-border/20">
+                <CardTitle className="text-[11px] font-bold uppercase tracking-[0.12em] flex items-center gap-2 text-muted-foreground">
+                  <BarChart3 className="h-4 w-4 text-primary" />
+                  NIFTY Market Data
+                </CardTitle>
+                <CardDescription className="text-xs text-muted-foreground/60">
+                  Real-time data from global Kite Connect (paid)
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="p-4">
+                {marketLoading ? (
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    {[...Array(4)].map((_, i) => <Skeleton key={i} className="h-16 bg-muted/30 rounded-lg" />)}
+                  </div>
+                ) : marketData ? (
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <div className="rounded-lg bg-[#0c0e14] border border-border/10 p-3">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Spot Price</p>
+                      <p className="text-lg font-bold text-primary font-mono">{formatNumber(marketData.spotPrice, 0)}</p>
+                    </div>
+                    <div className="rounded-lg bg-[#0c0e14] border border-border/10 p-3">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">ATM IV</p>
+                      <p className="text-lg font-bold font-mono">{formatNumber(marketData.atmIV, 1)}%</p>
+                    </div>
+                    <div className="rounded-lg bg-[#0c0e14] border border-border/10 p-3">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">PCR</p>
+                      <p className={`text-lg font-bold font-mono ${marketData.pcr > 1 ? "text-emerald-400" : "text-red-400"}`}>{formatNumber(marketData.pcr, 3)}</p>
+                    </div>
+                    <div className="rounded-lg bg-[#0c0e14] border border-border/10 p-3">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Max Pain</p>
+                      <p className="text-lg font-bold font-mono">{formatNumber(marketData.maxPainStrike, 0)}</p>
+                    </div>
+                    <div className="rounded-lg bg-[#0c0e14] border border-border/10 p-3">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Call OI</p>
+                      <p className="text-sm font-mono text-red-400">{(marketData.callOI / 1000000).toFixed(2)}M</p>
+                    </div>
+                    <div className="rounded-lg bg-[#0c0e14] border border-border/10 p-3">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Put OI</p>
+                      <p className="text-sm font-mono text-emerald-400">{(marketData.putOI / 1000000).toFixed(2)}M</p>
+                    </div>
+                    <div className="rounded-lg bg-[#0c0e14] border border-border/10 p-3">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Volume</p>
+                      <p className="text-sm font-mono">{(marketData.optionVolume / 1000000).toFixed(2)}M</p>
+                    </div>
+                    <div className="rounded-lg bg-[#0c0e14] border border-border/10 p-3">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Gamma</p>
+                      <p className="text-sm font-mono">{formatNumber(marketData.atmGamma, 6)}</p>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground text-center py-4">Market data unavailable</p>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Active Trades + History Tabs */}
+            {isConnected && (
+              <Tabs defaultValue="active" className="w-full">
+                <TabsList className="bg-[#10131b] border border-border/20">
+                  <TabsTrigger value="active" className="data-[state=active]:bg-primary/10 data-[state=active]:text-primary">
+                    <Activity className="h-3 w-3 mr-1" /> Active Trades
+                  </TabsTrigger>
+                  <TabsTrigger value="history" className="data-[state=active]:bg-primary/10 data-[state=active]:text-primary">
+                    <History className="h-3 w-3 mr-1" /> Trade History
+                  </TabsTrigger>
+                  <TabsTrigger value="orders" className="data-[state=active]:bg-primary/10 data-[state=active]:text-primary">
+                    <Target className="h-3 w-3 mr-1" /> Orders
+                  </TabsTrigger>
+                </TabsList>
+
+                {/* Active Trades */}
+                <TabsContent value="active" className="mt-4">
+                  <Card className="bg-[#10131b] border-border/20 shadow-none rounded-lg">
+                    <CardContent className="p-4">
+                      {execLoading ? (
+                        <div className="space-y-2">
+                          {[...Array(3)].map((_, i) => <Skeleton key={i} className="h-12 bg-muted/30 rounded-lg" />)}
+                        </div>
+                      ) : (() => {
+                        const openExecs = execData?.executions.filter((e) => e.status === "open") ?? [];
+                        if (openExecs.length === 0) {
+                          return (
+                            <div className="flex flex-col items-center justify-center py-8 text-center text-muted-foreground">
+                              <Activity className="h-8 w-8 mb-2 text-muted-foreground/30" />
+                              <p className="text-sm">No active trades</p>
+                            </div>
+                          );
+                        }
+                        return (
+                          <div className="space-y-2">
+                            {openExecs.map((exec) => {
+                              const pnl = formatPnl(exec.unrealizedPnl);
+                              const pnlPct = exec.entryPrice > 0 && exec.currentPrice
+                                ? ((exec.currentPrice - exec.entryPrice) / exec.entryPrice) * 100
+                                : null;
+                              return (
+                                <div key={exec.id} className="rounded-lg border border-border/10 bg-[#0c0e14] p-3">
+                                  <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-3">
+                                      <div className={`h-8 w-8 rounded-md flex items-center justify-center ${exec.direction === "up" ? "bg-emerald-500/10 text-emerald-400" : "bg-red-500/10 text-red-400"}`}>
+                                        {exec.direction === "up" ? <ArrowUpRight className="h-4 w-4" /> : <ArrowDownRight className="h-4 w-4" />}
+                                      </div>
+                                      <div>
+                                        <p className="text-sm font-mono font-medium">{exec.assetSymbol}</p>
+                                        <p className="text-[10px] text-muted-foreground">
+                                          Qty: {exec.quantity} · Entry: ₹{formatNumber(exec.entryPrice)}
+                                        </p>
+                                      </div>
+                                    </div>
+                                    <div className="text-right">
+                                      <p className={`text-sm font-mono font-bold ${pnl.color}`}>{pnl.text}</p>
+                                      {pnlPct !== null && (
+                                        <p className={`text-[10px] ${pnlPct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                          {pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(1)}%
+                                        </p>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <div className="grid grid-cols-4 gap-2 mt-2 text-[10px]">
+                                    <div>
+                                      <span className="text-muted-foreground">Current: </span>
+                                      <span className="font-mono">₹{formatNumber(exec.currentPrice)}</span>
+                                    </div>
+                                    <div>
+                                      <span className="text-muted-foreground">Peak: </span>
+                                      <span className="font-mono">₹{formatNumber(exec.highestPriceReached)}</span>
+                                    </div>
+                                    <div>
+                                      <span className="text-muted-foreground">Stop: </span>
+                                      <span className="font-mono text-red-400">₹{formatNumber(exec.stopLossPrice)}</span>
+                                    </div>
+                                    <div>
+                                      <span className="text-muted-foreground">Strategy: </span>
+                                      <span className="font-mono">{exec.exitStrategy?.replace(/_/g, " ") ?? "—"}</span>
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        );
+                      })()}
+                    </CardContent>
+                  </Card>
+                </TabsContent>
+
+                {/* Trade History */}
+                <TabsContent value="history" className="mt-4">
+                  <Card className="bg-[#10131b] border-border/20 shadow-none rounded-lg">
+                    <CardContent className="p-4">
+                      {execLoading ? (
+                        <div className="space-y-2">
+                          {[...Array(3)].map((_, i) => <Skeleton key={i} className="h-12 bg-muted/30 rounded-lg" />)}
+                        </div>
+                      ) : (() => {
+                        const closedExecs = execData?.executions.filter((e) => e.status === "closed") ?? [];
+                        if (closedExecs.length === 0) {
+                          return (
+                            <div className="flex flex-col items-center justify-center py-8 text-center text-muted-foreground">
+                              <History className="h-8 w-8 mb-2 text-muted-foreground/30" />
+                              <p className="text-sm">No closed trades yet</p>
+                            </div>
+                          );
+                        }
+                        const totalPnl = closedExecs.reduce((sum, e) => sum + (e.realisedPnl ?? 0), 0);
+                        const totalPnlFmt = formatPnl(totalPnl);
+                        return (
+                          <div className="space-y-3">
+                            <div className="flex items-center justify-between p-3 rounded-lg bg-[#0c0e14] border border-border/10">
+                              <span className="text-xs text-muted-foreground">Total Realised PnL</span>
+                              <span className={`text-sm font-mono font-bold ${totalPnlFmt.color}`}>{totalPnlFmt.text}</span>
+                            </div>
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-xs">
+                                <thead>
+                                  <tr className="text-muted-foreground border-b border-border/10">
+                                    <th className="text-left py-2 px-2">Symbol</th>
+                                    <th className="text-right py-2 px-2">Qty</th>
+                                    <th className="text-right py-2 px-2">Entry</th>
+                                    <th className="text-right py-2 px-2">Exit</th>
+                                    <th className="text-right py-2 px-2">PnL</th>
+                                    <th className="text-center py-2 px-2">Reason</th>
+                                    <th className="text-right py-2 px-2">Time</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {closedExecs.map((exec) => {
+                                    const pnl = formatPnl(exec.realisedPnl);
+                                    return (
+                                      <tr key={exec.id} className="border-b border-border/5 hover:bg-muted/5">
+                                        <td className="py-2 px-2 font-mono">{exec.assetSymbol}</td>
+                                        <td className="py-2 px-2 text-right font-mono">{exec.quantity}</td>
+                                        <td className="py-2 px-2 text-right font-mono">₹{formatNumber(exec.entryPrice)}</td>
+                                        <td className="py-2 px-2 text-right font-mono">₹{formatNumber(exec.exitPrice)}</td>
+                                        <td className={`py-2 px-2 text-right font-mono font-bold ${pnl.color}`}>{pnl.text}</td>
+                                        <td className="py-2 px-2 text-center">
+                                          <Badge variant="outline" className="text-[9px]">{exec.exitReason ?? "—"}</Badge>
+                                        </td>
+                                        <td className="py-2 px-2 text-right text-muted-foreground text-[10px]">
+                                          {exec.closedAt ? new Date(exec.closedAt).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "—"}
+                                        </td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </CardContent>
+                  </Card>
+                </TabsContent>
+
+                {/* Order History */}
+                <TabsContent value="orders" className="mt-4">
+                  <Card className="bg-[#10131b] border-border/20 shadow-none rounded-lg">
+                    <CardContent className="p-4">
+                      {ordersLoading ? (
+                        <div className="space-y-2">
+                          {[...Array(3)].map((_, i) => <Skeleton key={i} className="h-12 bg-muted/30 rounded-lg" />)}
+                        </div>
+                      ) : (() => {
+                        const orders = ordersData?.orders ?? [];
+                        if (orders.length === 0) {
+                          return (
+                            <div className="flex flex-col items-center justify-center py-8 text-center text-muted-foreground">
+                              <Target className="h-8 w-8 mb-2 text-muted-foreground/30" />
+                              <p className="text-sm">No orders yet</p>
+                            </div>
+                          );
+                        }
+                        return (
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-xs">
+                              <thead>
+                                <tr className="text-muted-foreground border-b border-border/10">
+                                  <th className="text-left py-2 px-2">Symbol</th>
+                                  <th className="text-center py-2 px-2">Type</th>
+                                  <th className="text-right py-2 px-2">Qty</th>
+                                  <th className="text-right py-2 px-2">Price</th>
+                                  <th className="text-center py-2 px-2">Status</th>
+                                  <th className="text-right py-2 px-2">Time</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {orders.slice(0, 20).map((order) => (
+                                  <tr key={order.order_id} className="border-b border-border/5 hover:bg-muted/5">
+                                    <td className="py-2 px-2 font-mono">{order.tradingsymbol}</td>
+                                    <td className="py-2 px-2 text-center">
+                                      <Badge variant="outline" className={`text-[9px] ${order.transaction_type === "BUY" ? "text-emerald-400 border-emerald-500/30" : "text-red-400 border-red-500/30"}`}>
+                                        {order.transaction_type}
+                                      </Badge>
+                                    </td>
+                                    <td className="py-2 px-2 text-right font-mono">{order.filled_quantity}/{order.quantity}</td>
+                                    <td className="py-2 px-2 text-right font-mono">₹{formatNumber(order.average_price || order.price)}</td>
+                                    <td className="py-2 px-2 text-center">
+                                      <Badge variant="outline" className={`text-[9px] ${
+                                        order.status === "COMPLETE" ? "text-emerald-400 border-emerald-500/30" :
+                                        order.status === "REJECTED" || order.status === "CANCELLED" ? "text-red-400 border-red-500/30" :
+                                        "text-yellow-400 border-yellow-500/30"
+                                      }`}>
+                                        {order.status}
+                                      </Badge>
+                                    </td>
+                                    <td className="py-2 px-2 text-right text-muted-foreground text-[10px]">
+                                      {order.order_timestamp ? new Date(order.order_timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "—"}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        );
+                      })()}
+                    </CardContent>
+                  </Card>
+                </TabsContent>
+              </Tabs>
+            )}
           </div>
         </div>
       </div>
