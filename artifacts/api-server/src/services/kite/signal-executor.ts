@@ -355,6 +355,17 @@ export async function processSignalForAutoTrade(snapshotId: string): Promise<voi
 
   for (const account of activeAccounts) {
     try {
+      // Skip if this user already has an execution for this snapshot
+      const existing = await db
+        .select({ id: signalExecutionsTable.id })
+        .from(signalExecutionsTable)
+        .where(and(
+          eq(signalExecutionsTable.signalSnapshotId, snapshotId),
+          eq(signalExecutionsTable.userId, account.userId)
+        ))
+        .limit(1);
+      if (existing.length > 0) continue;
+
       const result = await executeSignalForUser(
         account.userId,
         account,
@@ -804,14 +815,28 @@ export async function scanAndExecutePendingSignals(): Promise<void> {
     .orderBy(desc(marketSnapshotsTable.snapshotAt));
 
   for (const snapshot of snapshots) {
-    // Check if this snapshot has already been executed for any user
-    const executions = await db
-      .select({ id: signalExecutionsTable.id })
+    // Check which users already have an execution for this snapshot.
+    // processSignalForAutoTrade iterates all eligible users internally and
+    // skips users who already have an execution, so we call it for every
+    // snapshot that has at least one user without an execution.
+    const existingExecs = await db
+      .select({ userId: signalExecutionsTable.userId })
       .from(signalExecutionsTable)
-      .where(eq(signalExecutionsTable.signalSnapshotId, snapshot.id))
-      .limit(1);
+      .where(eq(signalExecutionsTable.signalSnapshotId, snapshot.id));
 
-    if (executions.length === 0) {
+    // Find all active auto-trade accounts
+    const activeAccounts = await db
+      .select({ userId: brokerAccountsTable.userId })
+      .from(brokerAccountsTable)
+      .where(and(
+        eq(brokerAccountsTable.isActive, true),
+        eq(brokerAccountsTable.autoTradeEnabled, true)
+      ));
+
+    const usersWithExec = new Set(existingExecs.map(e => e.userId));
+    const hasUnprocessedUsers = activeAccounts.some(a => !usersWithExec.has(a.userId));
+
+    if (hasUnprocessedUsers) {
       await processSignalForAutoTrade(snapshot.id);
     }
   }
