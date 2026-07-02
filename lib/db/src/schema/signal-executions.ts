@@ -24,7 +24,8 @@ export const signalExecutionsTable = pgTable("signal_executions", {
   exitStrategy: text("exit_strategy"), // fixed_target | trailing_ratchet
   product: text("product"), // MIS | CNC | NRML
   gttTriggerId: text("gtt_trigger_id"), // Kite GTT trigger ID for bracket
-  exitReason: text("exit_reason"), // target_hit | stop_loss | manual | eod_squareoff | trailing_stop
+  exitReason: text("exit_reason"), // target_hit | stop_loss | manual | eod_squareoff | trailing_stop | time_stop
+  notes: text("notes"), // JSON blob for far OTM config (delta, milestoneStep, timeStop, etc.)
   executedAt: timestamp("executed_at", { withTimezone: true }).notNull().defaultNow(),
   closedAt: timestamp("closed_at", { withTimezone: true }),
 });

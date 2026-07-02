@@ -28,8 +28,19 @@ const NIFTY_LOT_SIZE = 65;
 const MIN_OPTION_PREMIUM = 5;
 const MAX_OPTION_PREMIUM = 400;
 const MAX_OPTION_LOTS = 20;
-const OPTION_HARD_STOP_PCT = 30; // entry framework hard stop
-const OPTION_TRAIL_GAP_PCT = 15; // entry framework trail gap
+// ── Stop-loss parameters by option moneyness ──────────────────────────────────
+// Far OTM options (delta < 0.15) move asymmetrically: slow on upside, fast on
+// downside due to theta decay. They need tighter stops and time-based exits.
+const OPTION_HARD_STOP_PCT = 30;       // ATM/ITM hard stop (30%)
+const OPTION_TRAIL_GAP_PCT = 15;       // ATM/ITM trail gap (15%)
+const OPTION_MILESTONE_STEP = 10;      // ATM/ITM milestone step (10%)
+
+const FAR_OTM_HARD_STOP_PCT = 15;      // Far OTM hard stop (15%)
+const FAR_OTM_TRAIL_GAP_PCT = 8;       // Far OTM trail gap (8%)
+const FAR_OTM_MILESTONE_STEP = 5;      // Far OTM milestone step (5%)
+const FAR_OTM_TIME_STOP_MS = 15 * 60 * 1000; // 15-min time stop for far OTM
+const FAR_OTM_DELTA_THRESHOLD = 0.15;  // delta < this → far OTM
+const FAR_OTM_MIN_GAIN_PCT = 5;        // must reach +5% within time stop window
 const NIFTY_STRIKE_INTERVAL = 50;
 
 function getNearestWeeklyExpiry(): Date {
@@ -692,6 +703,11 @@ async function executeOptionSignalForUser(
 
   // Record execution — for options we are always LONG, so direction = "up"
   const direction = "up";
+  // Determine if this is a far OTM option — use tighter stops if so
+  const isFarOTM = best.deltaEstimate < FAR_OTM_DELTA_THRESHOLD;
+  const hardStopPct = isFarOTM ? FAR_OTM_HARD_STOP_PCT : OPTION_HARD_STOP_PCT;
+  const trailGapPct = isFarOTM ? FAR_OTM_TRAIL_GAP_PCT : OPTION_TRAIL_GAP_PCT;
+
   const execValues: any = {
     id: randomUUID(),
     signalSnapshotId: snapshot.id,
@@ -704,13 +720,22 @@ async function executeOptionSignalForUser(
     quantity,
     entryPrice: String(premium),
     status: "open",
-    exitStrategy: "trailing_ratchet",
+    exitStrategy: isFarOTM ? "trailing_ratchet_far_otm" : "trailing_ratchet",
     product,
-    trailGapPct: String(OPTION_TRAIL_GAP_PCT),
+    trailGapPct: String(trailGapPct),
     highestPriceReached: String(premium),
     executedAt: new Date(),
     targetPrice: null,
-    stopLossPrice: String(premium * (1 - OPTION_HARD_STOP_PCT / 100)),
+    stopLossPrice: String(premium * (1 - hardStopPct / 100)),
+    notes: JSON.stringify({
+      deltaEstimate: best.deltaEstimate,
+      isFarOTM,
+      hardStopPct,
+      trailGapPct,
+      milestoneStep: isFarOTM ? FAR_OTM_MILESTONE_STEP : OPTION_MILESTONE_STEP,
+      timeStopMs: isFarOTM ? FAR_OTM_TIME_STOP_MS : null,
+      minGainPct: isFarOTM ? FAR_OTM_MIN_GAIN_PCT : null,
+    }),
   };
 
   await db.insert(signalExecutionsTable).values(execValues);

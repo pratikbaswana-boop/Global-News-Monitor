@@ -16,24 +16,26 @@ const ASSET_EXCHANGE_MAP: Record<string, string> = {
 /**
  * Compute the ratchet floor/ceiling for a given execution.
  *
- * Milestones every 10% of profit from entry.
+ * Milestones every `milestoneStep`% of profit from entry (10% for ATM/ITM,
+ * 5% for far OTM).
  * Floor = milestone_price * (1 - trailGapPct/100) for longs.
  * Ceiling = milestone_price * (1 + trailGapPct/100) for shorts.
- * Before first +10% milestone, uses the hard stopLossPct from entry.
+ * Before first milestone, uses the hard stopLossPct from entry.
  */
 function computeRatchetStop(
   entryPrice: number,
   peakPrice: number,
   direction: "up" | "down",
   trailGapPct: number,
-  hardStopPct: number
+  hardStopPct: number,
+  milestoneStep: number = 10
 ): { stopPrice: number; milestoneLevel: number } {
   const profitPct =
     direction === "up"
       ? ((peakPrice - entryPrice) / entryPrice) * 100
       : ((entryPrice - peakPrice) / entryPrice) * 100;
 
-  const milestoneLevel = Math.max(0, Math.floor(profitPct / 10) * 10);
+  const milestoneLevel = Math.max(0, Math.floor(profitPct / milestoneStep) * milestoneStep);
 
   let stopPrice: number;
   if (milestoneLevel === 0) {
@@ -160,6 +162,23 @@ export async function monitorOpenPositions(): Promise<void> {
             ? (Math.abs(entryPrice - Number(exec.stopLossPrice)) / entryPrice) * 100
             : 2.0);
 
+          // Parse far OTM config from notes (if present)
+          let milestoneStep = 10;
+          let timeStopMs: number | null = null;
+          let minGainPct: number | null = null;
+          let isFarOTM = false;
+          try {
+            if (exec.notes) {
+              const cfg = JSON.parse(exec.notes as string);
+              milestoneStep = cfg.milestoneStep ?? 10;
+              timeStopMs = cfg.timeStopMs ?? null;
+              minGainPct = cfg.minGainPct ?? null;
+              isFarOTM = cfg.isFarOTM ?? false;
+            }
+          } catch {
+            // notes might not be JSON for older executions
+          }
+
           // Update peak price (most favorable since entry)
           let peakPrice = Number(exec.highestPriceReached ?? entryPrice);
           if (direction === "up") {
@@ -180,8 +199,23 @@ export async function monitorOpenPositions(): Promise<void> {
             peakPrice,
             direction,
             trailGapPct,
-            hardStopPct
+            hardStopPct,
+            milestoneStep
           );
+
+          // ── Time-based stop for far OTM ──────────────────────────────────────
+          // If the option hasn't reached minGainPct within timeStopMs, exit.
+          // Theta decay silently kills far OTM premiums.
+          let timeStopHit = false;
+          if (timeStopMs !== null && minGainPct !== null) {
+            const elapsedMs = Date.now() - new Date(exec.executedAt).getTime();
+            const profitPct = direction === "up"
+              ? ((peakPrice - entryPrice) / entryPrice) * 100
+              : ((entryPrice - peakPrice) / entryPrice) * 100;
+            if (elapsedMs >= timeStopMs && profitPct < minGainPct) {
+              timeStopHit = true;
+            }
+          }
 
           logger.info({
             userId,
@@ -191,14 +225,17 @@ export async function monitorOpenPositions(): Promise<void> {
             peak: peakPrice,
             stop: stopPrice.toFixed(2),
             milestone: milestoneLevel,
+            isFarOTM,
+            timeStopHit,
           }, "position-monitor: position checked");
 
-          const shouldExit =
+          const shouldExit = timeStopHit ||
             direction === "up"
               ? currentPrice <= stopPrice
               : currentPrice >= stopPrice;
 
           if (shouldExit) {
+            const exitReason = timeStopHit ? "time_stop" : "trailing_stop";
             logger.info(
               {
                 userId,
@@ -208,8 +245,9 @@ export async function monitorOpenPositions(): Promise<void> {
                 stopPrice,
                 milestoneLevel,
                 direction,
+                exitReason,
               },
-              "position-monitor: ratchet stop hit, placing exit order"
+              "position-monitor: stop hit, placing exit order"
             );
 
             await placeOrder(userId, {
@@ -232,15 +270,15 @@ export async function monitorOpenPositions(): Promise<void> {
               .set({
                 status: "closed",
                 exitPrice: String(currentPrice),
-                exitReason: "trailing_stop",
+                exitReason,
                 closedAt: new Date(),
                 realisedPnl: String(realisedPnl.toFixed(2)),
               })
               .where(eq(signalExecutionsTable.id, exec.id));
 
             logger.info(
-              { userId, execId: exec.id, exitPrice: currentPrice, realisedPnl },
-              "position-monitor: execution closed via trailing ratchet"
+              { userId, execId: exec.id, exitPrice: currentPrice, realisedPnl, exitReason },
+              "position-monitor: execution closed"
             );
           }
         } catch (innerErr) {
