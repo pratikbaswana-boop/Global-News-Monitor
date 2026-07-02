@@ -597,13 +597,15 @@ const TIER3_REFRESH_MS = 5_000; // 5 seconds — Kite API gives real-time data
 
 function startTier3RefreshTimer(): void {
   logger.info({ intervalMs: TIER3_REFRESH_MS }, "market-scheduler: tier3 refresh timer starting");
-  setInterval(async () => {
+  const tick = async () => {
     try {
       await refreshSnapshotTier3();
     } catch (err) {
       logger.warn({ err: err instanceof Error ? err.message : err }, "market-scheduler: tier3 refresh failed");
     }
-  }, TIER3_REFRESH_MS);
+    setTimeout(tick, TIER3_REFRESH_MS);
+  };
+  setTimeout(tick, TIER3_REFRESH_MS);
 }
 
 // Counter to run the full tier3 snapshot (Firecrawl) every 6th tick (30s) while

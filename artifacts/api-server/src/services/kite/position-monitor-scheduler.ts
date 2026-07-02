@@ -43,11 +43,9 @@ async function runCheck(): Promise<void> {
 export function startPositionMonitorScheduler(): void {
   logger.info("position-monitor-scheduler: starting");
 
-  // Run immediately on startup (if market is open)
-  void runCheck();
-
-  // Then every 2 minutes
-  setInterval(() => {
-    void runCheck();
-  }, CHECK_INTERVAL_MS);
+  const tick = async () => {
+    await runCheck();
+    setTimeout(tick, CHECK_INTERVAL_MS);
+  };
+  void tick();
 }
