@@ -230,9 +230,9 @@ export async function monitorOpenPositions(): Promise<void> {
           }, "position-monitor: position checked");
 
           const shouldExit = timeStopHit ||
-            direction === "up"
+            (direction === "up"
               ? currentPrice <= stopPrice
-              : currentPrice >= stopPrice;
+              : currentPrice >= stopPrice);
 
           if (shouldExit) {
             const exitReason = timeStopHit ? "time_stop" : "trailing_stop";
