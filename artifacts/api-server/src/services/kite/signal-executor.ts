@@ -482,7 +482,7 @@ async function executeSpotSignalForUser(
     return { executed: false, reason: "Could not fetch margins" };
   }
 
-  const availableCash = margins.equity?.available?.cash ?? 0;
+  const availableCash = margins.equity?.available?.cash ?? margins.equity?.available?.liveBalance ?? 0;
   // Use per-asset risk setting if configured, else global account setting
   const riskPct = pref.maxRiskPerTradePct ?? account.maxRiskPerTradePct;
   const maxRiskAmount = availableCash * (riskPct / 100);
@@ -626,7 +626,7 @@ async function executeOptionSignalForUser(
   if (!margins) {
     return { executed: false, reason: "Could not fetch margins" };
   }
-  const availableCash = margins.equity?.available?.cash ?? 0;
+  const availableCash = margins.equity?.available?.cash ?? margins.equity?.available?.liveBalance ?? 0;
   const maxCapital = pref.maxCapitalPerTrade
     ? parseFloat(pref.maxCapitalPerTrade)
     : availableCash;

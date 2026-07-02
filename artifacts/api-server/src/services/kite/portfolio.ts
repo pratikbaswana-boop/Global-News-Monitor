@@ -7,7 +7,7 @@ import { randomUUID } from "crypto";
 export interface MarginsSummary {
   equity: {
     net: number;
-    available: { cash: number; collateral: number; intradayPayin: number };
+    available: { cash: number; collateral: number; intradayPayin: number; liveBalance: number; openingBalance: number };
     used: { m2mRealised: number; m2mUnrealised: number; span: number; exposure: number; optionPremium: number; holdingSales: number };
   };
   commodity?: Record<string, unknown>;
