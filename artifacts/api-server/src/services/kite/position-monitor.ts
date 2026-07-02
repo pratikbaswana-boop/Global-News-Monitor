@@ -126,15 +126,34 @@ export async function monitorOpenPositions(): Promise<void> {
 
           const posQty = Number((pos as any).quantity ?? 0);
           if (posQty === 0) {
+            // Position is gone — either our exit order filled or user manually squared off
+            let exitReason = "manual";
+            let exitPrice: number | null = null;
+            let realisedPnl: number | null = null;
+            try {
+              if (exec.notes) {
+                const n = JSON.parse(exec.notes as string);
+                if (n.exitReason) exitReason = n.exitReason;
+                if (n.exitOrderPrice) exitPrice = n.exitOrderPrice;
+              }
+            } catch {}
+            if (exitPrice !== null) {
+              realisedPnl = direction === "up"
+                ? (exitPrice - entryPrice) * exec.quantity
+                : (entryPrice - exitPrice) * exec.quantity;
+            }
+
             logger.info(
-              { userId, execId: exec.id, symbol: exec.assetSymbol },
+              { userId, execId: exec.id, symbol: exec.assetSymbol, exitReason, exitPrice, realisedPnl },
               "position-monitor: position quantity is zero, marking execution closed"
             );
             await db
               .update(signalExecutionsTable)
               .set({
                 status: "closed",
-                exitReason: "manual",
+                exitReason,
+                exitPrice: exitPrice !== null ? String(exitPrice) : undefined,
+                realisedPnl: realisedPnl !== null ? String(realisedPnl.toFixed(2)) : undefined,
                 closedAt: new Date(),
               })
               .where(eq(signalExecutionsTable.id, exec.id));
@@ -236,50 +255,71 @@ export async function monitorOpenPositions(): Promise<void> {
 
           if (shouldExit) {
             const exitReason = timeStopHit ? "time_stop" : "trailing_stop";
-            logger.info(
-              {
-                userId,
-                execId: exec.id,
-                symbol: exec.assetSymbol,
-                currentPrice,
-                stopPrice,
-                milestoneLevel,
-                direction,
-                exitReason,
-              },
-              "position-monitor: stop hit, placing exit order"
-            );
 
-            await placeOrder(userId, {
+            // Check if we already placed an exit order that hasn't filled yet
+            let existingNotes: any = {};
+            try {
+              existingNotes = exec.notes ? JSON.parse(exec.notes as string) : {};
+            } catch {}
+
+            const alreadyPlacedExit = existingNotes.exitOrderId !== undefined;
+            const exitAttempts = (existingNotes.exitAttempts ?? 0) as number;
+
+            if (alreadyPlacedExit) {
+              // Previous exit order didn't fill — cancel it and place a more aggressive one
+              logger.info(
+                { userId, execId: exec.id, symbol: exec.assetSymbol, prevOrderId: existingNotes.exitOrderId, attempt: exitAttempts + 1 },
+                "position-monitor: previous exit order unfilled, retrying with aggressive price"
+              );
+
+              // Cancel old order
+              try {
+                const { cancelOrder } = await import("./orders.js");
+                await cancelOrder(userId, existingNotes.exitOrderId);
+              } catch (err) {
+                logger.warn({ userId, orderId: existingNotes.exitOrderId, err }, "position-monitor: cancel old exit order failed, placing new anyway");
+              }
+            } else {
+              logger.info(
+                { userId, execId: exec.id, symbol: exec.assetSymbol, currentPrice, stopPrice, milestoneLevel, direction, exitReason },
+                "position-monitor: stop hit, placing exit order"
+              );
+            }
+
+            // Use progressively more aggressive price: 1% below LTP on first attempt,
+            // 3% below on second, 5% below on third+, rounded to tick size 0.05
+            const discountPct = exitAttempts === 0 ? 0.01 : exitAttempts === 1 ? 0.03 : 0.05;
+            const exitLimitPrice = Math.round((currentPrice * (1 - discountPct)) / 0.05) * 0.05;
+
+            const exitOrderResult = await placeOrder(userId, {
               exchange,
               tradingsymbol: exec.assetSymbol,
               transactionType: direction === "up" ? "SELL" : "BUY",
               quantity: exec.quantity,
               orderType: "LIMIT",
-              price: Math.round((currentPrice * 0.99) / 0.05) * 0.05,
+              price: exitLimitPrice,
               product: (exec.product ?? "MIS") as "CNC" | "MIS" | "NRML",
               tag: `exit-${exec.id.slice(0, 14)}`,
             });
 
-            const realisedPnl =
-              direction === "up"
-                ? (currentPrice - entryPrice) * exec.quantity
-                : (entryPrice - currentPrice) * exec.quantity;
+            // Update notes with exit order info — DON'T close execution yet.
+            // The monitor will close it when Kite position qty reaches 0.
+            const updatedNotes = {
+              ...existingNotes,
+              exitOrderId: exitOrderResult.kiteOrderId,
+              exitOrderPrice: exitLimitPrice,
+              exitAttempts: exitAttempts + 1,
+              exitReason,
+            };
 
             await db
               .update(signalExecutionsTable)
-              .set({
-                status: "closed",
-                exitPrice: String(currentPrice),
-                exitReason,
-                closedAt: new Date(),
-                realisedPnl: String(realisedPnl.toFixed(2)),
-              })
+              .set({ notes: JSON.stringify(updatedNotes) })
               .where(eq(signalExecutionsTable.id, exec.id));
 
             logger.info(
-              { userId, execId: exec.id, exitPrice: currentPrice, realisedPnl, exitReason },
-              "position-monitor: execution closed"
+              { userId, execId: exec.id, exitOrderId: exitOrderResult.kiteOrderId, exitLimitPrice, attempt: exitAttempts + 1, exitReason },
+              "position-monitor: exit order placed, waiting for fill"
             );
           }
         } catch (innerErr) {
