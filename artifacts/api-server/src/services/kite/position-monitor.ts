@@ -138,7 +138,8 @@ export async function monitorOpenPositions(): Promise<void> {
               }
             } catch {}
             if (exitPrice !== null) {
-              realisedPnl = direction === "up"
+              const entryPrice = Number(exec.entryPrice ?? 0);
+              realisedPnl = exec.direction === "up"
                 ? (exitPrice - entryPrice) * exec.quantity
                 : (entryPrice - exitPrice) * exec.quantity;
             }
