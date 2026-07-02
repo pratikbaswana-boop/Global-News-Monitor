@@ -3,6 +3,8 @@ import { eq } from "drizzle-orm";
 import { logger } from "../../lib/logger.js";
 import { placeOrder } from "./orders.js";
 import { getPositions } from "./portfolio.js";
+import { getGlobalKiteClient } from "./kite-option-chain.js";
+import { getKiteClientForUser } from "./kite-client.js";
 
 // Asset symbol -> exchange mapping (mirrored from signal-executor.ts)
 const ASSET_EXCHANGE_MAP: Record<string, string> = {
@@ -161,7 +163,26 @@ export async function monitorOpenPositions(): Promise<void> {
             continue;
           }
 
-          const currentPrice = Number((pos as any).last_price ?? 0);
+          // Fetch real-time LTP via quote API — getPositions() returns stale last_price
+          let currentPrice = 0;
+          try {
+            const quoteKey = `${exchange}:${exec.assetSymbol}`;
+            // Try user's own client first (has access to their instruments),
+            // fall back to global client for market data
+            let kite = await getKiteClientForUser(userId);
+            if (!kite) kite = await getGlobalKiteClient();
+            if (kite) {
+              const quotes = await kite.getQuote([quoteKey]) as Record<string, any>;
+              const q = quotes[quoteKey] ?? {};
+              currentPrice = Number(q.last_price ?? 0);
+            }
+          } catch (err) {
+            logger.warn({ userId, execId: exec.id, symbol: exec.assetSymbol, err: err instanceof Error ? err.message : err }, "position-monitor: quote fetch failed, falling back to position last_price");
+          }
+          if (currentPrice <= 0 || Number.isNaN(currentPrice)) {
+            // Fallback to stale position price if quote API failed
+            currentPrice = Number((pos as any).last_price ?? 0);
+          }
           if (currentPrice <= 0 || Number.isNaN(currentPrice)) {
             logger.warn(
               { userId, execId: exec.id, lastPrice: (pos as any).last_price },
