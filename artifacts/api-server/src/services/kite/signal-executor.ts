@@ -771,6 +771,10 @@ async function executeSignalForUser(
   const pref = await getUserTradePreference(userId, snapshot.assetId);
   // Only NIFTY supports option trading via Kite. SENSEX options use a different
   // instrument format (BFO:SENSEX) and strike interval — skip for now.
+  // SENSEX also can't be spot traded (it's an index), so skip entirely.
+  if (snapshot.assetId === "sensex") {
+    return { executed: false, reason: "SENSEX trading not supported yet" };
+  }
   const isIndexAsset = snapshot.assetId === "nifty50";
   if (pref?.useOptions || isIndexAsset) {
     return executeOptionSignalForUser(userId, account, snapshot);
