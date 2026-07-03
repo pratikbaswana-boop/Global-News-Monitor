@@ -638,9 +638,11 @@ async function executeOptionSignalForUser(
     return { executed: false, reason: "Could not fetch margins" };
   }
   const availableCash = margins.equity?.available?.cash || margins.equity?.available?.liveBalance || 0;
+  // Use 95% of available cash to leave buffer — Kite margin requirement is
+ // slightly higher than premium × qty, causing "Insufficient funds" rejections
   const maxCapital = pref.maxCapitalPerTrade
     ? parseFloat(pref.maxCapitalPerTrade)
-    : availableCash;
+    : availableCash * 0.95;
 
   if (maxCapital <= 0) {
     return { executed: false, reason: "No capital allocated for trade" };
