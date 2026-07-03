@@ -67,7 +67,7 @@ export async function getGlobalKiteClient(): Promise<KiteConnect | null> {
       if (rows.length && rows[0]?.accessToken &&
           (!rows[0]?.expiresAt || rows[0].expiresAt > now)) {
         const account = rows[0]!;
-        const kite = new KiteConnect({ api_key: KITE_API_KEY });
+        const kite = new KiteConnect({ api_key: KITE_API_KEY, timeout: 7000 });
         kite.setAccessToken(account.accessToken!);
         logger.info({ userId: account.userId }, "kite-option-chain: using global API key user");
         return kite;
@@ -91,7 +91,7 @@ export async function getGlobalKiteClient(): Promise<KiteConnect | null> {
       const account = globalRows[0]!;
       const apiKey = account.apiKey ?? KITE_API_KEY;
       if (apiKey) {
-        const kite = new KiteConnect({ api_key: apiKey });
+        const kite = new KiteConnect({ api_key: apiKey, timeout: 7000 });
         kite.setAccessToken(account.accessToken!);
         logger.info({ userId: account.userId }, "kite-option-chain: using global data user");
         return kite;
@@ -112,7 +112,7 @@ export async function getGlobalKiteClient(): Promise<KiteConnect | null> {
       if (account.expiresAt && account.expiresAt <= now) continue;
       const apiKey = account.apiKey ?? KITE_API_KEY;
       if (!apiKey) continue;
-      const kite = new KiteConnect({ api_key: apiKey });
+      const kite = new KiteConnect({ api_key: apiKey, timeout: 7000 });
       kite.setAccessToken(account.accessToken);
       logger.info({ userId: account.userId }, "kite-option-chain: using fallback user");
       return kite;

@@ -25,7 +25,7 @@ export function createKiteClient(creds?: KiteCredentials): KiteConnect {
     throw new Error("Kite API key is required");
   }
 
-  const client = new KiteConnect({ api_key: key });
+  const client = new KiteConnect({ api_key: key, timeout: 7000 });
   if (token) {
     client.setAccessToken(token);
   }
