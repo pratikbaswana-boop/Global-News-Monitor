@@ -434,8 +434,18 @@ export async function fetchKiteOptionChain(): Promise<KiteOptionChainObservation
     const T = yearsToWeeklyExpiry();
     let atmIV = 0;
     if (atmCallLtp > 0 && atmCallSymbol) {
+      logger.info({
+        T,
+        marketPrice: atmCallLtp,
+        strike: atmStrike,
+        spot: spotPrice,
+        atmCallSymbol: atmCallSymbol.tradingsymbol,
+      }, "kite-option-chain: DIAG solveIV inputs");
       const iv = solveIV(atmCallLtp, spotPrice, atmStrike, T, 0.065, true);
       atmIV = iv * 100; // convert to percentage
+      logger.info({ iv: atmIV.toFixed(4), rawSigma: iv.toFixed(6) }, "kite-option-chain: DIAG solveIV output");
+    } else {
+      logger.warn({ atmCallLtp, atmCallSymbol: atmCallSymbol?.tradingsymbol ?? null }, "kite-option-chain: DIAG solveIV skipped (no ATM call LTP)");
     }
 
     // 7. Compute ATM gamma from IV
@@ -444,6 +454,21 @@ export async function fetchKiteOptionChain(): Promise<KiteOptionChainObservation
       : 0;
 
     // 8. Compute PCR and max pain
+    // DIAG: dump strike-by-strike OI array before aggregation
+    const strikeOIArr = Array.from(strikeOIMap.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([strike, { ceOI, peOI }]) => ({ strike, ceOI, peOI }));
+    logger.info({
+      strikeCount: strikeOIArr.length,
+      minStrike: strikeOIArr[0]?.strike,
+      maxStrike: strikeOIArr[strikeOIArr.length - 1]?.strike,
+      totalCallOI: callOI,
+      totalPutOI: putOI,
+      first5: strikeOIArr.slice(0, 5),
+      last5: strikeOIArr.slice(-5),
+      atmStrikeOI: strikeOIArr.find((s) => s.strike === atmStrike),
+    }, "kite-option-chain: DIAG strike-by-strike OI (before PCR aggregation)");
+
     const pcr = callOI > 0 ? putOI / callOI : 0;
 
     let maxPainStrike: number | null = null;
