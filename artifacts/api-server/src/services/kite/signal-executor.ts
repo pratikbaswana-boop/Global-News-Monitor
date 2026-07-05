@@ -1,11 +1,20 @@
 import { db, brokerAccountsTable, brokerOrdersTable, brokerPositionsTable, signalExecutionsTable, marketSnapshotsTable, userTradePreferencesTable } from "@workspace/db";
-import { eq, desc, and, gt, or } from "drizzle-orm";
+import { eq, desc, and, gt } from "drizzle-orm";
 import { logger } from "../../lib/logger.js";
 import { placeOrder, type PlaceOrderParams } from "./orders.js";
 import { getMargins, syncPortfolio } from "./portfolio.js";
 import { getGlobalKiteClient, getNearestExpiry } from "./kite-option-chain.js";
-import type { IntradaySignal } from "../market/tier3-signal.js";
+import { peekLastSignal, type IntradaySignal } from "../market/tier3-signal.js";
 import { getHotContext } from "../market/hot-context.js";
+import { getLatestChainMetrics } from "./market-ticker.js";
+import {
+  canEnter,
+  markPendingEntry,
+  markOpen,
+  markFlat,
+  getPositionState,
+  getAllPositionStates,
+} from "./position-state.js";
 import { randomUUID } from "crypto";
 
 // Asset symbol → Kite trading symbol mapping
@@ -195,22 +204,54 @@ function selectBestOption(
  * Mirrors deriveOptionSignal in intelligence.ts but only returns signal + strike.
  * The Tier-3 microstructure gate (deriveOptionSignalFromSnapshot) is layered on top.
  */
+interface BaseSignalInput {
+  aiDirectionRaw: "up" | "down" | "neutral" | "uncertain";
+  maxPainDistancePct: number | null;
+  putCallRatio: number | null;
+  shortCoveringSignal: "none" | "covering" | "unwinding";
+  sgxNiftyChangePct: number | null;
+  realPrice: number | null;
+}
+
+/**
+ * Build the base-signal inputs from a persisted snapshot. Slow-path fields (direction,
+ * short-covering, SGX) prefer the in-memory hot context (R2), falling back to the
+ * snapshot columns before the first ensemble publish of the day.
+ */
+function baseInputFromSnapshot(snapshot: typeof marketSnapshotsTable.$inferSelect): BaseSignalInput {
+  const ctx = getHotContext(snapshot.assetId);
+  const tier3Json = snapshot.tier3Evidence ? JSON.parse(snapshot.tier3Evidence) as Record<string, unknown> : {};
+  const putCallRatio = typeof tier3Json.putCallRatio === "number" ? tier3Json.putCallRatio : null;
+  return {
+    aiDirectionRaw: (ctx?.direction ?? snapshot.predictedDirection) as BaseSignalInput["aiDirectionRaw"],
+    maxPainDistancePct: snapshot.maxPainDistancePct,
+    putCallRatio,
+    shortCoveringSignal: (ctx?.shortCoveringSignal ?? snapshot.shortCoveringSignal ?? "none") as "none" | "covering" | "unwinding",
+    sgxNiftyChangePct: ctx?.sgxNiftyChangePct ?? snapshot.sgxNiftyChangePct,
+    realPrice: snapshot.realPriceAtSnapshot ? parseFloat(snapshot.realPriceAtSnapshot) : null,
+  };
+}
+
+/** Snapshot-based base signal (used by the persisted-execution path + tests). */
 function deriveBaseOptionSignal(
   snapshot: typeof marketSnapshotsTable.$inferSelect
 ): { signal: "BUY_CALL" | "BUY_PUT" | "NO_TRADE"; suggestedStrike: number | null; reason: string } {
-  // R2: slow-path inputs (AI direction/confidence, SGX, short-covering) come from the
-  // in-memory hot context published by the 5-min ensemble cycle — no DB hop. Fall back
-  // to the snapshot columns before the first publish of the day.
-  const ctx = getHotContext(snapshot.assetId);
-  const rawDirection = ctx?.direction ?? snapshot.predictedDirection;
-  const aiDirection = (rawDirection === "uncertain" ? "neutral" : rawDirection) as "up" | "down" | "neutral";
-  const aiConfidence = (ctx?.confidence ?? snapshot.predictedConfidence) as "high" | "medium" | "low";
-  const maxPainDistancePct = snapshot.maxPainDistancePct;
-  const shortCoveringSignal = (ctx?.shortCoveringSignal ?? snapshot.shortCoveringSignal ?? "none") as "none" | "covering" | "unwinding";
-  const sgxNiftyChangePct = ctx?.sgxNiftyChangePct ?? snapshot.sgxNiftyChangePct;
-  const tier3Json = snapshot.tier3Evidence ? JSON.parse(snapshot.tier3Evidence) as Record<string, unknown> : {};
-  const putCallRatio = typeof tier3Json.putCallRatio === "number" ? tier3Json.putCallRatio : null;
-  const realPrice = snapshot.realPriceAtSnapshot ? parseFloat(snapshot.realPriceAtSnapshot) : null;
+  return deriveBaseFromInputs(baseInputFromSnapshot(snapshot));
+}
+
+/**
+ * The base AI/heuristic decision tree. Pure over its inputs — the SAME tree drives the
+ * persisted-snapshot path and the live in-memory edge evaluator, so both always agree.
+ */
+function deriveBaseFromInputs(
+  input: BaseSignalInput
+): { signal: "BUY_CALL" | "BUY_PUT" | "NO_TRADE"; suggestedStrike: number | null; reason: string } {
+  const aiDirection = (input.aiDirectionRaw === "uncertain" ? "neutral" : input.aiDirectionRaw) as "up" | "down" | "neutral";
+  const maxPainDistancePct = input.maxPainDistancePct;
+  const shortCoveringSignal = input.shortCoveringSignal;
+  const sgxNiftyChangePct = input.sgxNiftyChangePct;
+  const putCallRatio = input.putCallRatio;
+  const realPrice = input.realPrice;
 
   const hasMaxPain = maxPainDistancePct !== null;
   const hasPcr = putCallRatio !== null;
@@ -279,16 +320,11 @@ function deriveBaseOptionSignal(
  * still warming up (ready === false) or no verdict is present, the base signal passes
  * through unchanged so we don't block the whole session on a cold buffer.
  */
-function deriveOptionSignalFromSnapshot(
-  snapshot: typeof marketSnapshotsTable.$inferSelect
+function applyTier3Gate(
+  base: { signal: "BUY_CALL" | "BUY_PUT" | "NO_TRADE"; suggestedStrike: number | null; reason: string },
+  intraday: IntradaySignal | undefined
 ): { signal: "BUY_CALL" | "BUY_PUT" | "NO_TRADE"; suggestedStrike: number | null; reason: string } {
-  const base = deriveBaseOptionSignal(snapshot);
   if (base.signal === "NO_TRADE") return base;
-
-  const tier3Json = snapshot.tier3Evidence
-    ? (JSON.parse(snapshot.tier3Evidence) as Record<string, unknown>)
-    : {};
-  const intraday = tier3Json.intradaySignal as IntradaySignal | undefined;
 
   // No verdict yet, or engine still warming up → let the base signal through.
   if (!intraday || !intraday.ready) {
@@ -310,6 +346,45 @@ function deriveOptionSignalFromSnapshot(
   }
 
   return { ...base, reason: `${base.reason} ✓ tier-3 gate (${detail})` };
+}
+
+function deriveOptionSignalFromSnapshot(
+  snapshot: typeof marketSnapshotsTable.$inferSelect
+): { signal: "BUY_CALL" | "BUY_PUT" | "NO_TRADE"; suggestedStrike: number | null; reason: string } {
+  const base = deriveBaseOptionSignal(snapshot);
+  const tier3Json = snapshot.tier3Evidence
+    ? (JSON.parse(snapshot.tier3Evidence) as Record<string, unknown>)
+    : {};
+  const intraday = tier3Json.intradaySignal as IntradaySignal | undefined;
+  return applyTier3Gate(base, intraday);
+}
+
+/**
+ * Live, in-memory option side for the edge evaluator (R3). Uses the same base tree +
+ * tier-3 gate as the snapshot path, but sourced entirely from memory: slow inputs from
+ * the hot context, fast inputs (spot/PCR/maxPain) from the KiteTicker metrics, and the
+ * microstructure verdict from the intraday signal cache. No DB read on the hot path.
+ */
+export function computeLiveOptionSide(
+  assetId: string
+): { signal: "BUY_CALL" | "BUY_PUT" | "NO_TRADE"; suggestedStrike: number | null; reason: string } {
+  const ctx = getHotContext(assetId);
+  const metrics = getLatestChainMetrics();
+  const spot = metrics?.spotPrice ?? null;
+  const maxPainDistancePct =
+    metrics && metrics.maxPainStrike && spot && spot > 0
+      ? ((spot - metrics.maxPainStrike) / metrics.maxPainStrike) * 100
+      : null;
+
+  const base = deriveBaseFromInputs({
+    aiDirectionRaw: ctx?.direction ?? "neutral",
+    maxPainDistancePct,
+    putCallRatio: metrics?.pcr ?? null,
+    shortCoveringSignal: ctx?.shortCoveringSignal ?? "none",
+    sgxNiftyChangePct: ctx?.sgxNiftyChangePct ?? null,
+    realPrice: spot,
+  });
+  return applyTier3Gate(base, peekLastSignal());
 }
 
 /**
@@ -802,51 +877,111 @@ async function executeSignalForUser(
 }
 
 /**
- * Scan for recent snapshots that haven't been processed for auto-trade.
- * Called by the scheduler periodically.
+ * Reconcile the in-memory position-state machine against open signal_executions so it
+ * survives restarts and reflects position-monitor closes. States that no longer have an
+ * open execution move to FLAT (with cooldown); open executions with no live state are
+ * seeded to OPEN.
  */
-export async function scanAndExecutePendingSignals(): Promise<void> {
-  // Find snapshots from the last 30 minutes that haven't been auto-traded
-  const cutoff = new Date(Date.now() - 30 * 60 * 1000);
+export async function reconcilePositionStates(): Promise<void> {
+  const openExecs = await db
+    .select({ userId: signalExecutionsTable.userId, assetId: signalExecutionsTable.assetId })
+    .from(signalExecutionsTable)
+    .where(eq(signalExecutionsTable.status, "open"));
 
-  const snapshots = await db
-    .select()
-    .from(marketSnapshotsTable)
-    .where(and(
-      gt(marketSnapshotsTable.snapshotAt, cutoff),
-      or(
-        eq(marketSnapshotsTable.predictedDirection, "up"),
-        eq(marketSnapshotsTable.predictedDirection, "down"),
-        eq(marketSnapshotsTable.predictedDirection, "neutral")
-      )
-    ))
-    .orderBy(desc(marketSnapshotsTable.snapshotAt));
+  const openSet = new Set(openExecs.map((e) => `${e.userId}::${e.assetId}`));
 
-  for (const snapshot of snapshots) {
-    // Check which users already have an execution for this snapshot.
-    // processSignalForAutoTrade iterates all eligible users internally and
-    // skips users who already have an execution, so we call it for every
-    // snapshot that has at least one user without an execution.
-    const existingExecs = await db
-      .select({ userId: signalExecutionsTable.userId })
-      .from(signalExecutionsTable)
-      .where(eq(signalExecutionsTable.signalSnapshotId, snapshot.id));
-
-    // Find all active auto-trade accounts
-    const activeAccounts = await db
-      .select({ userId: brokerAccountsTable.userId })
-      .from(brokerAccountsTable)
-      .where(and(
-        eq(brokerAccountsTable.isActive, true),
-        eq(brokerAccountsTable.autoTradeEnabled, true)
-      ));
-
-    const usersWithExec = new Set(existingExecs.map(e => e.userId));
-    const hasUnprocessedUsers = activeAccounts.some(a => !usersWithExec.has(a.userId));
-
-    if (hasUnprocessedUsers) {
-      await processSignalForAutoTrade(snapshot.id);
+  for (const s of getAllPositionStates()) {
+    if ((s.state === "OPEN" || s.state === "PENDING_EXIT") && !openSet.has(`${s.userId}::${s.assetId}`)) {
+      markFlat(s.userId, s.assetId); // position closed elsewhere → flat + cooldown
     }
   }
+  for (const e of openExecs) {
+    if (getPositionState(e.userId, e.assetId).state === "FLAT") {
+      markOpen(e.userId, e.assetId, null); // seed after a restart
+    }
+  }
+}
+
+/**
+ * Shared per-user gated dispatch (R3). Iterates active auto-trade accounts and places at
+ * most one entry per user — but only when the state machine says canEnter. The state
+ * machine (not a "does an execution row already exist" DB scan) is what prevents the
+ * re-entry churn that produced 20 trades from a single direction. Called ONLY on a
+ * signal-side transition by the tick evaluator.
+ */
+async function dispatchToEligibleUsers(
+  assetId: string,
+  sideForState: "CALL" | "PUT" | null,
+  run: (
+    userId: string,
+    account: typeof brokerAccountsTable.$inferSelect,
+    snapshot: typeof marketSnapshotsTable.$inferSelect
+  ) => Promise<ExecutionResult>
+): Promise<void> {
+  // A recent snapshot supplies the execution-record FK + entry-price fields.
+  const cutoff = new Date(Date.now() - 30 * 60 * 1000);
+  const snapRows = await db
+    .select()
+    .from(marketSnapshotsTable)
+    .where(and(eq(marketSnapshotsTable.assetId, assetId), gt(marketSnapshotsTable.snapshotAt, cutoff)))
+    .orderBy(desc(marketSnapshotsTable.snapshotAt))
+    .limit(1);
+  if (snapRows.length === 0) {
+    logger.info({ assetId }, "signal-executor: edge fired but no recent snapshot to anchor execution");
+    return;
+  }
+  const snapshot = snapRows[0]!;
+
+  const activeAccounts = await db
+    .select()
+    .from(brokerAccountsTable)
+    .where(and(eq(brokerAccountsTable.isActive, true), eq(brokerAccountsTable.autoTradeEnabled, true)));
+  if (activeAccounts.length === 0) return;
+
+  for (const account of activeAccounts) {
+    if (!canEnter(account.userId, assetId)) continue;
+
+    markPendingEntry(account.userId, assetId, sideForState);
+    try {
+      const result = await run(account.userId, account, snapshot);
+      if (result.executed) {
+        markOpen(account.userId, assetId, sideForState);
+        logger.info({ userId: account.userId, assetId, orderId: result.orderId }, "signal-executor: edge entry executed");
+      } else {
+        // Declined (not actionable now) — revert to FLAT with no cooldown so a later
+        // edge can retry, but the same side can't churn without a new transition.
+        markFlat(account.userId, assetId, 0);
+        logger.info({ userId: account.userId, assetId, reason: result.reason }, "signal-executor: edge entry skipped");
+      }
+    } catch (err) {
+      markFlat(account.userId, assetId, 0);
+      logger.error({ userId: account.userId, assetId, err }, "signal-executor: edge entry failed");
+    }
+  }
+}
+
+/** Edge-triggered OPTION entry (NIFTY) — long CALL/PUT premium chosen by the executor. */
+export async function dispatchEntryForSide(assetId: string, side: "BUY_CALL" | "BUY_PUT"): Promise<void> {
+  const kiteSymbol = ASSET_KITE_MAP[assetId];
+  if (!kiteSymbol) {
+    logger.warn({ assetId }, "signal-executor: no Kite symbol mapping for asset");
+    return;
+  }
+  const sideShort = side === "BUY_CALL" ? "CALL" : "PUT";
+  await dispatchToEligibleUsers(assetId, sideShort, (userId, account, snapshot) =>
+    executeSignalForUser(userId, account, snapshot, kiteSymbol.tradingsymbol, kiteSymbol.exchange, "up")
+  );
+}
+
+/** Edge-triggered SPOT entry (non-index equities) on an AI-direction transition. */
+export async function dispatchSpotForDirection(assetId: string, direction: "up" | "down"): Promise<void> {
+  const kiteSymbol = ASSET_KITE_MAP[assetId];
+  if (!kiteSymbol) {
+    logger.warn({ assetId }, "signal-executor: no Kite symbol mapping for asset");
+    return;
+  }
+  await dispatchToEligibleUsers(assetId, null, (userId, account, snapshot) =>
+    executeSignalForUser(userId, account, snapshot, kiteSymbol.tradingsymbol, kiteSymbol.exchange, direction)
+  );
 }
 
