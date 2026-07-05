@@ -14,6 +14,7 @@ import { startTickEvaluator } from "./services/kite/tick-evaluator.js";
 import { startPositionMonitor } from "./services/kite/position-monitor.js";
 import { startTokenRefreshScheduler } from "./services/kite/token-refresh-scheduler.js";
 import { startMarketTicker } from "./services/kite/market-ticker.js";
+import { startEventLoopMonitor } from "./lib/event-loop-monitor.js";
 
 const rawPort = process.env["PORT"];
 
@@ -36,6 +37,10 @@ app.listen(port, (err) => {
   }
 
   logger.info({ port }, "Server listening");
+
+  // Probe main-loop latency continuously — tells us whether the Phase 1-3 worker-thread
+  // split (WORKER_THREADS_PLAN.md) is actually urgent. Runs regardless of the kill-switch.
+  startEventLoopMonitor();
 
   // Emergency kill-switch — when the OpenAI key is invalid or Bedrock quota
   // is exhausted, the embedding-heavy background jobs spin the event loop and
