@@ -17,7 +17,11 @@ const WINDOW_MS = 300_000;        // direction window n = 300s (5min)
 const IV_WINDOW_MS = 150_000;     // IV confirmation lookback = 2.5min
 const LONG_WINDOW_MS = 600_000;   // 10-min averages / Do scale percentile
 const BUFFER_MAX_MS = 750_000;    // keep ~12.5min of ticks
-const EMA_SPAN = 30;              // span ≈ 150s of smoothing (30 ticks @ 5s, was 5 @ 30s)
+// Time-constant for the direction EMA. Making the smoothing TIME-based (not sample-count
+// based) means the observation feed rate can change — per-tick-batch instead of the old
+// fixed 5s — without altering the ~150s smoothing the engine was tuned for.
+// 150s ≈ the old EMA_SPAN=30 at a 5s cadence.
+const EMA_TAU_MS = 150_000;
 const READY_FRACTION = 0.5;       // buffer must span ≥ 50% of WINDOW_MS to fire
 const DO_SCALE_FALLBACK = 0.02;   // Do normaliser before percentile history warms up
 const DO_SCALE_MIN_SAMPLES = 10;  // need this many Do_raw points for a real percentile
@@ -57,6 +61,7 @@ export interface IntradaySignal {
 
 let buf: Tier3Observation[] = [];
 let emaD: number | null = null;
+let lastEmaT: number | null = null; // timestamp of the observation the EMA last advanced to
 let doRawHistory: { t: number; val: number }[] = [];
 
 /** Push one observation; drop anything older than the buffer horizon. */
@@ -141,6 +146,7 @@ let lastSignal: IntradaySignal = { ...WARMUP };
 export function resetSignalState(): void {
   buf = [];
   emaD = null;
+  lastEmaT = null;
   doRawHistory = [];
   lastSignal = { ...WARMUP };
 }
@@ -203,8 +209,17 @@ function computeIntradaySignalCore(): IntradaySignal {
   const Do = clip(doRaw / doScale, -1, 1);
 
   const dInst = 0.4 * Dp + 0.6 * Do;
-  const alpha = 2 / (EMA_SPAN + 1);
-  emaD = emaD === null ? dInst : emaD + alpha * (dInst - emaD);
+  // Time-based EMA: alpha derived from the elapsed time since the EMA last advanced, so
+  // smoothing stays ~EMA_TAU_MS regardless of feed rate. Keyed on latest.t, so redundant
+  // compute calls with no new observation (dt=0 → alpha=0) leave the EMA unchanged.
+  if (emaD === null) {
+    emaD = dInst;
+  } else {
+    const dtMs = lastEmaT === null ? EMA_TAU_MS : Math.max(latest.t - lastEmaT, 0);
+    const alpha = 1 - Math.exp(-dtMs / EMA_TAU_MS);
+    emaD = emaD + alpha * (dInst - emaD);
+  }
+  lastEmaT = latest.t;
   const D = emaD;
 
   // ── 2. Power score P ────────────────────────────────────────────────────────

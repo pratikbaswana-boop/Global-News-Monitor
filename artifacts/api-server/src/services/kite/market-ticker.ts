@@ -34,8 +34,12 @@ import {
   type KiteOptionChainObservation,
 } from "./kite-option-chain.js";
 
-// Preserve the tier-3 buffer cadence that the D/P math was tuned for (was the 5s poll).
-const OBSERVATION_INTERVAL_MS = 5_000;
+// Minimum spacing between observations fed into the tier-3 buffer. Now that the direction
+// EMA is time-based (see tier3-signal.ts), the feed rate no longer changes the smoothing,
+// so we feed roughly per tick — capped at ~1s, matched to the evaluator's cadence (no
+// point sampling faster than we act, and it keeps realized-vol out of microstructure
+// noise). This drops edge-detection lag from ~6s (5s feed + 1s eval) to ~1-2s.
+const OBSERVATION_INTERVAL_MS = 1_000;
 // Re-resolve the chain when spot drifts this far from the current ATM strike.
 // 250 pts = 5 strikes; still leaves ≥10 strikes of coverage on each side of ATM.
 const RESOLVE_DRIFT_PTS = 250;

@@ -4,7 +4,7 @@ import { logger } from "../../lib/logger.js";
 import { placeOrder, type PlaceOrderParams } from "./orders.js";
 import { getMargins, syncPortfolio } from "./portfolio.js";
 import { getGlobalKiteClient, getNearestExpiry } from "./kite-option-chain.js";
-import { peekLastSignal, type IntradaySignal } from "../market/tier3-signal.js";
+import { computeIntradaySignal, type IntradaySignal } from "../market/tier3-signal.js";
 import { getHotContext } from "../market/hot-context.js";
 import { getLatestChainMetrics, getLtpBySymbol } from "./market-ticker.js";
 import { enqueueAudit } from "../../lib/audit-queue.js";
@@ -404,7 +404,10 @@ export function computeLiveOptionSide(
     sgxNiftyChangePct: ctx?.sgxNiftyChangePct ?? null,
     realPrice: spot,
   });
-  return applyTier3Gate(base, peekLastSignal());
+  // Compute the intraday verdict FRESH (not the cached value) so the edge is detected
+  // against the latest buffer state — this is what turns the faster feed into faster
+  // detection. computeIntradaySignal is idempotent w.r.t. redundant calls (time-based EMA).
+  return applyTier3Gate(base, computeIntradaySignal());
 }
 
 /**
