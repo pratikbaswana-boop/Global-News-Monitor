@@ -46,82 +46,103 @@ const INSTRUMENTS_CACHE_MS = 6 * 60 * 60 * 1000; // 6 hours
  * The api_key used to create the client MUST match the api_key that was used
  * to generate the access_token — otherwise Kite returns "Incorrect api_key".
  */
-export async function getGlobalKiteClient(): Promise<KiteConnect | null> {
-  try {
-    const now = new Date();
+/**
+ * Resolve the credentials (api_key + access_token) for the global market-data
+ * account, using the priority order documented on {@link getGlobalKiteClient}.
+ * Extracted so both the REST client and the KiteTicker WebSocket feed share the
+ * exact same account selection.
+ */
+async function resolveGlobalDataAccount(): Promise<{ apiKey: string; accessToken: string } | null> {
+  const now = new Date();
 
-    // 1. Prefer the user whose api_key matches the global KITE_API_KEY
-    if (KITE_API_KEY) {
-      const rows = await db
-        .select()
-        .from(brokerAccountsTable)
-        .where(
-          and(
-            eq(brokerAccountsTable.apiKey, KITE_API_KEY),
-            eq(brokerAccountsTable.isActive, true)
-          )
-        )
-        .orderBy(desc(brokerAccountsTable.expiresAt))
-        .limit(1);
-
-      if (rows.length && rows[0]?.accessToken &&
-          (!rows[0]?.expiresAt || rows[0].expiresAt > now)) {
-        const account = rows[0]!;
-        const kite = new KiteConnect({ api_key: KITE_API_KEY, timeout: 7000 });
-        kite.setAccessToken(account.accessToken!);
-        logger.info({ userId: account.userId }, "kite-option-chain: using global API key user");
-        return kite;
-      }
-    }
-
-    // 2. Try the configured global data user
-    const globalRows = await db
+  // 1. Prefer the user whose api_key matches the global KITE_API_KEY
+  if (KITE_API_KEY) {
+    const rows = await db
       .select()
       .from(brokerAccountsTable)
       .where(
         and(
-          eq(brokerAccountsTable.userId, GLOBAL_DATA_USER_ID),
+          eq(brokerAccountsTable.apiKey, KITE_API_KEY),
           eq(brokerAccountsTable.isActive, true)
         )
       )
+      .orderBy(desc(brokerAccountsTable.expiresAt))
       .limit(1);
 
-    if (globalRows.length && globalRows[0]?.accessToken &&
-        (!globalRows[0]?.expiresAt || globalRows[0].expiresAt > now)) {
-      const account = globalRows[0]!;
-      const apiKey = account.apiKey ?? KITE_API_KEY;
-      if (apiKey) {
-        const kite = new KiteConnect({ api_key: apiKey, timeout: 7000 });
-        kite.setAccessToken(account.accessToken!);
-        logger.info({ userId: account.userId }, "kite-option-chain: using global data user");
-        return kite;
-      }
+    if (rows.length && rows[0]?.accessToken &&
+        (!rows[0]?.expiresAt || rows[0].expiresAt > now)) {
+      const account = rows[0]!;
+      logger.info({ userId: account.userId }, "kite-option-chain: using global API key user");
+      return { apiKey: KITE_API_KEY, accessToken: account.accessToken! };
     }
+  }
 
-    // 3. Fallback: any active user with a non-expired token, most recent first
-    logger.warn("kite-option-chain: global user unavailable, trying any active user");
-    const rows = await db
-      .select()
-      .from(brokerAccountsTable)
-      .where(eq(brokerAccountsTable.isActive, true))
-      .orderBy(desc(brokerAccountsTable.expiresAt))
-      .limit(5);
+  // 2. Try the configured global data user
+  const globalRows = await db
+    .select()
+    .from(brokerAccountsTable)
+    .where(
+      and(
+        eq(brokerAccountsTable.userId, GLOBAL_DATA_USER_ID),
+        eq(brokerAccountsTable.isActive, true)
+      )
+    )
+    .limit(1);
 
-    for (const account of rows) {
-      if (!account.accessToken) continue;
-      if (account.expiresAt && account.expiresAt <= now) continue;
-      const apiKey = account.apiKey ?? KITE_API_KEY;
-      if (!apiKey) continue;
-      const kite = new KiteConnect({ api_key: apiKey, timeout: 7000 });
-      kite.setAccessToken(account.accessToken);
-      logger.info({ userId: account.userId }, "kite-option-chain: using fallback user");
-      return kite;
+  if (globalRows.length && globalRows[0]?.accessToken &&
+      (!globalRows[0]?.expiresAt || globalRows[0].expiresAt > now)) {
+    const account = globalRows[0]!;
+    const apiKey = account.apiKey ?? KITE_API_KEY;
+    if (apiKey) {
+      logger.info({ userId: account.userId }, "kite-option-chain: using global data user");
+      return { apiKey, accessToken: account.accessToken! };
     }
+  }
 
-    logger.warn("kite-option-chain: no valid Kite access token found in any broker account");
-    return null;
+  // 3. Fallback: any active user with a non-expired token, most recent first
+  logger.warn("kite-option-chain: global user unavailable, trying any active user");
+  const rows = await db
+    .select()
+    .from(brokerAccountsTable)
+    .where(eq(brokerAccountsTable.isActive, true))
+    .orderBy(desc(brokerAccountsTable.expiresAt))
+    .limit(5);
+
+  for (const account of rows) {
+    if (!account.accessToken) continue;
+    if (account.expiresAt && account.expiresAt <= now) continue;
+    const apiKey = account.apiKey ?? KITE_API_KEY;
+    if (!apiKey) continue;
+    logger.info({ userId: account.userId }, "kite-option-chain: using fallback user");
+    return { apiKey, accessToken: account.accessToken };
+  }
+
+  logger.warn("kite-option-chain: no valid Kite access token found in any broker account");
+  return null;
+}
+
+export async function getGlobalKiteClient(): Promise<KiteConnect | null> {
+  try {
+    const creds = await resolveGlobalDataAccount();
+    if (!creds) return null;
+    const kite = new KiteConnect({ api_key: creds.apiKey, timeout: 7000 });
+    kite.setAccessToken(creds.accessToken);
+    return kite;
   } catch (err) {
     logger.error({ err }, "kite-option-chain: failed to get global Kite client");
+    return null;
+  }
+}
+
+/**
+ * Credentials for the global market-data account — used to build the KiteTicker
+ * WebSocket feed (see market-ticker.ts). Same account selection as getGlobalKiteClient.
+ */
+export async function getGlobalDataCreds(): Promise<{ apiKey: string; accessToken: string } | null> {
+  try {
+    return await resolveGlobalDataAccount();
+  } catch (err) {
+    logger.error({ err }, "kite-option-chain: failed to resolve global data creds");
     return null;
   }
 }
@@ -323,9 +344,126 @@ export interface KiteOptionChainObservation {
   source: "kite";
 }
 
+// ── Live tick-fed chain metrics (WebSocket path) ─────────────────────────────
+// The KiteTicker feed pushes per-instrument ticks; we keep a token->tick map and
+// recompute the chain observation from it. These helpers are shared with the
+// legacy getQuote fetch so both paths produce identical results.
+
+/**
+ * The NIFTY 50 index instrument token on NSE, used to subscribe to spot.
+ * Well-known Kite token (256265); override via env if it ever changes.
+ */
+export const NIFTY_SPOT_TOKEN = Number(process.env["KITE_NIFTY_SPOT_TOKEN"] ?? 256265);
+
+export interface TickData {
+  ltp: number;
+  oi: number;
+  volume: number; // cumulative-for-day traded volume
+}
+
+export interface ResolvedChain {
+  expiryStr: string;
+  atmStrike: number;
+  relevantInstruments: NfoInstrument[];
+}
+
+/**
+ * Resolve the ATM-centred NIFTY option chain (nearest expiry + ±STRIKE_RANGE
+ * strikes) for a given spot price. Returns the instruments to subscribe/aggregate.
+ * Uses the cached instrument list, so it is cheap on repeat calls.
+ */
+export async function resolveNiftyChain(kite: KiteConnect, spotPrice: number): Promise<ResolvedChain | null> {
+  if (spotPrice <= 0) return null;
+
+  const instruments = await getNiftyOptionInstruments(kite);
+  const availableExpiries = [...new Set(instruments.map((i) => i.expiry))].sort();
+  if (availableExpiries.length === 0) return null;
+
+  const todayStr = formatExpiryDate(new Date());
+  const expiryStr = availableExpiries.find((e) => e >= todayStr) ?? availableExpiries[availableExpiries.length - 1]!;
+  const expiryInstruments = instruments.filter((i) => i.expiry === expiryStr);
+  if (expiryInstruments.length === 0) return null;
+
+  const atmStrike = Math.round(spotPrice / STRIKE_INTERVAL) * STRIKE_INTERVAL;
+  const minStrike = atmStrike - STRIKE_RANGE * STRIKE_INTERVAL;
+  const maxStrike = atmStrike + STRIKE_RANGE * STRIKE_INTERVAL;
+  const relevantInstruments = expiryInstruments.filter((i) => i.strike >= minStrike && i.strike <= maxStrike);
+  if (relevantInstruments.length === 0) return null;
+
+  return { expiryStr, atmStrike, relevantInstruments };
+}
+
+/**
+ * Compute the option-chain observation (OI/volume/IV/gamma/PCR/maxPain) from a
+ * live token->tick map. Pure — no I/O. Returns null if OI is incomplete.
+ * Identical math to the legacy getQuote aggregation (max pain preserved as the
+ * strike minimising strike×(ceOI+peOI)).
+ */
+export function computeChainMetrics(
+  tickMap: Map<number, TickData>,
+  chain: ResolvedChain,
+  spotPrice: number
+): KiteOptionChainObservation | null {
+  const { atmStrike, relevantInstruments } = chain;
+
+  let callOI = 0;
+  let putOI = 0;
+  let optionVolume = 0;
+  let atmCallLtp = 0;
+  const strikeOIMap = new Map<number, { ceOI: number; peOI: number }>();
+
+  for (const inst of relevantInstruments) {
+    const tick = tickMap.get(inst.instrument_token);
+    const oi = tick?.oi ?? 0;
+    const volume = tick?.volume ?? 0;
+    const ltp = tick?.ltp ?? 0;
+
+    if (inst.instrument_type === "CE") {
+      callOI += oi;
+      optionVolume += volume;
+      if (inst.strike === atmStrike) atmCallLtp = ltp;
+    } else {
+      putOI += oi;
+      optionVolume += volume;
+    }
+
+    const existing = strikeOIMap.get(inst.strike) ?? { ceOI: 0, peOI: 0 };
+    if (inst.instrument_type === "CE") existing.ceOI += oi;
+    else existing.peOI += oi;
+    strikeOIMap.set(inst.strike, existing);
+  }
+
+  if (callOI === 0 || putOI === 0) return null;
+
+  const T = yearsToWeeklyExpiry();
+  let atmIV = 0;
+  if (atmCallLtp > 0) {
+    atmIV = solveIV(atmCallLtp, spotPrice, atmStrike, T, 0.065, true) * 100; // percentage
+  }
+  const atmGamma = atmIV > 0 ? bsGamma(spotPrice, atmStrike, atmIV / 100, T) : 0;
+
+  const pcr = callOI > 0 ? putOI / callOI : 0;
+
+  let maxPainStrike: number | null = null;
+  let minPain = Infinity;
+  for (const [strike, { ceOI, peOI }] of strikeOIMap) {
+    const pain = strike * (ceOI + peOI);
+    if (pain < minPain) {
+      minPain = pain;
+      maxPainStrike = strike;
+    }
+  }
+
+  return { spotPrice, callOI, putOI, optionVolume, atmIV, atmGamma, pcr, maxPainStrike, source: "kite" };
+}
+
 /**
  * Fetch real-time NIFTY option chain data via Kite getQuote() API.
  * Returns null if Kite is unavailable or data is incomplete.
+ *
+ * Now a thin wrapper: resolves the chain, snapshots quotes into a tick map, and
+ * defers to computeChainMetrics() so it stays byte-identical to the WebSocket path.
+ * Still used by routes/trading.ts for on-demand fetches.
  */
 export async function fetchKiteOptionChain(): Promise<KiteOptionChainObservation | null> {
   const kite = await getGlobalKiteClient();
@@ -344,165 +482,45 @@ export async function fetchKiteOptionChain(): Promise<KiteOptionChainObservation
       return null;
     }
 
-    // 2. Get NIFTY option instruments and find the nearest available expiry
-    const instruments = await getNiftyOptionInstruments(kite);
-
-    // Instead of computing the nearest Thursday ourselves (which may not match
-    // Kite's actual expiry list due to holidays or special expiries), find the
-    // nearest expiry date that actually exists in the instruments list.
-    const availableExpiries = [...new Set(instruments.map((i) => i.expiry))].sort();
-    if (availableExpiries.length === 0) {
-      logger.warn("kite-option-chain: no expiries available in instruments list");
-      return null;
-    }
-    const todayStr = formatExpiryDate(new Date());
-    const expiryStr = availableExpiries.find((e) => e >= todayStr) ?? availableExpiries[availableExpiries.length - 1]!;
-    logger.info({ expiryStr, availableCount: availableExpiries.length, firstFew: availableExpiries.slice(0, 5) }, "kite-option-chain: selected nearest expiry");
-
-    const expiryInstruments = instruments.filter((i) => i.expiry === expiryStr);
-    if (expiryInstruments.length === 0) {
-      logger.warn({ expiryStr }, "kite-option-chain: no instruments found for current expiry");
+    // 2. Resolve the ATM-centred chain (nearest expiry + ±STRIKE_RANGE strikes)
+    const chain = await resolveNiftyChain(kite, spotPrice);
+    if (!chain) {
+      logger.warn({ spotPrice }, "kite-option-chain: could not resolve option chain");
       return null;
     }
 
-    // 3. Determine ATM strike and build instrument list (±STRIKE_RANGE strikes)
-    const atmStrike = Math.round(spotPrice / STRIKE_INTERVAL) * STRIKE_INTERVAL;
-    const minStrike = atmStrike - STRIKE_RANGE * STRIKE_INTERVAL;
-    const maxStrike = atmStrike + STRIKE_RANGE * STRIKE_INTERVAL;
-
-    const relevantInstruments = expiryInstruments.filter(
-      (i) => i.strike >= minStrike && i.strike <= maxStrike
-    );
-
-    if (relevantInstruments.length === 0) {
-      logger.warn({ atmStrike, minStrike, maxStrike, expiryStr }, "kite-option-chain: no instruments in strike range");
-      return null;
-    }
-
-    // 4. Fetch quotes for all relevant instruments
-    const instrumentKeys = relevantInstruments.map((i) => `NFO:${i.tradingsymbol}`);
+    // 3. Snapshot quotes into a token->tick map so aggregation shares code with
+    //    the WebSocket feed (guarantees identical PCR/maxPain/IV/gamma output).
+    const instrumentKeys = chain.relevantInstruments.map((i) => `NFO:${i.tradingsymbol}`);
     const quotes = await kite.getQuote(instrumentKeys) as Record<string, unknown>;
 
-    // 5. Aggregate OI and volume
-    let callOI = 0;
-    let putOI = 0;
-    let optionVolume = 0;
-    let atmCallLtp = 0;
-    let atmPutLtp = 0;
-    let atmCallSymbol: NfoInstrument | null = null;
-    let atmPutSymbol: NfoInstrument | null = null;
-
-    // For max pain calculation
-    const strikeOIMap = new Map<number, { ceOI: number; peOI: number }>();
-
-    for (const inst of relevantInstruments) {
-      const key = `NFO:${inst.tradingsymbol}`;
-      const quote = (quotes[key] ?? {}) as Record<string, unknown>;
-      const oi = Number(quote["oi"] ?? 0);
-      const volume = Number(quote["volume"] ?? 0);
-      const ltp = Number(quote["last_price"] ?? 0);
-
-      if (inst.instrument_type === "CE") {
-        callOI += oi;
-        optionVolume += volume;
-        if (inst.strike === atmStrike) {
-          atmCallLtp = ltp;
-          atmCallSymbol = inst;
-        }
-      } else {
-        putOI += oi;
-        optionVolume += volume;
-        if (inst.strike === atmStrike) {
-          atmPutLtp = ltp;
-          atmPutSymbol = inst;
-        }
-      }
-
-      // Accumulate OI per strike for max pain
-      const existing = strikeOIMap.get(inst.strike) ?? { ceOI: 0, peOI: 0 };
-      if (inst.instrument_type === "CE") existing.ceOI += oi;
-      else existing.peOI += oi;
-      strikeOIMap.set(inst.strike, existing);
+    const tickMap = new Map<number, TickData>();
+    for (const inst of chain.relevantInstruments) {
+      const quote = (quotes[`NFO:${inst.tradingsymbol}`] ?? {}) as Record<string, unknown>;
+      tickMap.set(inst.instrument_token, {
+        ltp: Number(quote["last_price"] ?? 0),
+        oi: Number(quote["oi"] ?? 0),
+        volume: Number(quote["volume"] ?? 0),
+      });
     }
 
-    if (callOI === 0 || putOI === 0) {
-      logger.warn({ callOI, putOI }, "kite-option-chain: zero OI from quotes");
+    // 4. Aggregate via the shared pure function
+    const result = computeChainMetrics(tickMap, chain, spotPrice);
+    if (!result) {
+      logger.warn("kite-option-chain: zero OI from quotes");
       return null;
     }
 
-    // 6. Compute ATM IV from call premium (Newton-Raphson)
-    const T = yearsToWeeklyExpiry();
-    let atmIV = 0;
-    if (atmCallLtp > 0 && atmCallSymbol) {
-      logger.info({
-        T,
-        marketPrice: atmCallLtp,
-        strike: atmStrike,
-        spot: spotPrice,
-        atmCallSymbol: atmCallSymbol.tradingsymbol,
-      }, "kite-option-chain: DIAG solveIV inputs");
-      const iv = solveIV(atmCallLtp, spotPrice, atmStrike, T, 0.065, true);
-      atmIV = iv * 100; // convert to percentage
-      logger.info({ iv: atmIV.toFixed(4), rawSigma: iv.toFixed(6) }, "kite-option-chain: DIAG solveIV output");
-    } else {
-      logger.warn({ atmCallLtp, atmCallSymbol: atmCallSymbol?.tradingsymbol ?? null }, "kite-option-chain: DIAG solveIV skipped (no ATM call LTP)");
-    }
-
-    // 7. Compute ATM gamma from IV
-    const atmGamma = atmIV > 0
-      ? bsGamma(spotPrice, atmStrike, atmIV / 100, T)
-      : 0;
-
-    // 8. Compute PCR and max pain
-    // DIAG: dump strike-by-strike OI array before aggregation
-    const strikeOIArr = Array.from(strikeOIMap.entries())
-      .sort((a, b) => a[0] - b[0])
-      .map(([strike, { ceOI, peOI }]) => ({ strike, ceOI, peOI }));
-    logger.info({
-      strikeCount: strikeOIArr.length,
-      minStrike: strikeOIArr[0]?.strike,
-      maxStrike: strikeOIArr[strikeOIArr.length - 1]?.strike,
-      totalCallOI: callOI,
-      totalPutOI: putOI,
-      first5: strikeOIArr.slice(0, 5),
-      last5: strikeOIArr.slice(-5),
-      atmStrikeOI: strikeOIArr.find((s) => s.strike === atmStrike),
-    }, "kite-option-chain: DIAG strike-by-strike OI (before PCR aggregation)");
-
-    const pcr = callOI > 0 ? putOI / callOI : 0;
-
-    let maxPainStrike: number | null = null;
-    let minPain = Infinity;
-    for (const [strike, { ceOI, peOI }] of strikeOIMap) {
-      const pain = strike * (ceOI + peOI);
-      if (pain < minPain) {
-        minPain = pain;
-        maxPainStrike = strike;
-      }
-    }
-
-    const result: KiteOptionChainObservation = {
-      spotPrice,
-      callOI,
-      putOI,
-      optionVolume,
-      atmIV,
-      atmGamma,
-      pcr,
-      maxPainStrike,
-      source: "kite",
-    };
-
     logger.info({
       spotPrice,
-      callOI,
-      putOI,
-      optionVolume,
-      atmIV: atmIV.toFixed(2),
-      atmGamma: atmGamma.toFixed(6),
-      pcr: pcr.toFixed(3),
-      maxPainStrike,
-      instruments: relevantInstruments.length,
+      callOI: result.callOI,
+      putOI: result.putOI,
+      optionVolume: result.optionVolume,
+      atmIV: result.atmIV.toFixed(2),
+      atmGamma: result.atmGamma.toFixed(6),
+      pcr: result.pcr.toFixed(3),
+      maxPainStrike: result.maxPainStrike,
+      instruments: chain.relevantInstruments.length,
     }, "kite-option-chain: fetched real-time option chain");
 
     return result;

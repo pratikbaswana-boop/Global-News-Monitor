@@ -13,6 +13,7 @@ import { startChannelRecalibrationScheduler } from "./services/graph/channel-rec
 import { startSignalExecutorScheduler } from "./services/kite/signal-executor-scheduler.js";
 import { startPositionMonitorScheduler } from "./services/kite/position-monitor-scheduler.js";
 import { startTokenRefreshScheduler } from "./services/kite/token-refresh-scheduler.js";
+import { startMarketTicker } from "./services/kite/market-ticker.js";
 
 const rawPort = process.env["PORT"];
 
@@ -61,6 +62,12 @@ app.listen(port, (err) => {
 
     // Phase 4: Start HMM market regime detection (runs hourly during IST market hours).
     startMarketScheduler();
+
+    // Phase 4-feed: Start the KiteTicker WebSocket market-data feed. Pushes NIFTY
+    // option-chain ticks into the tier-3 signal buffer, replacing the 5s REST poll.
+    startMarketTicker().catch((e) => {
+      logger.error({ err: e }, "Market ticker failed to start");
+    });
 
     // Phase 4a: Daily market signal snapshot at 09:00 IST.
     startMarketSignalScheduler();

@@ -17,9 +17,9 @@ import { fetchRegimeFeatures, fetchNSEPriceData } from "./nse-direct-scraper.js"
 import { detectRegime } from "./hmm-regime.js";
 import { runMarketAgent } from "./market-agent.js";
 import { fetchSessionPriors, setSessionPriors, getSessionPriors, fetchTier3Snapshot } from "./tier3-fetcher.js";
-import { recordObservation, computeIntradaySignal, resetSignalState } from "./tier3-signal.js";
+import { computeIntradaySignal, resetSignalState } from "./tier3-signal.js";
 import { getRelevantNewsByAsset } from "./stock-news.js";
-import { fetchKiteOptionChain } from "../kite/kite-option-chain.js";
+import { getLatestChainMetrics } from "../kite/market-ticker.js";
 
 const ASSET_ID = "nse_market";
 const FIRST_RUN_DELAY_MS = 2 * 60 * 1000; // 2 min after startup
@@ -621,14 +621,9 @@ async function refreshSnapshotTier3(): Promise<void> {
 
   refreshTick++;
 
-  // ── PRIMARY: Kite real-time option chain (every 5s) ───────────────────────
-  // Try Kite first for the intraday signal observation — it's millisecond-latency
-  // official API data, far better than 30s Firecrawl scraping.
-  let kiteObs = await fetchKiteOptionChain();
-
-  // ── Full tier3 snapshot (every 30s = every 6th tick) for PCR/VIX/ADR ──────
-  // This fetches broader market data (VIX, ADR, sector deltas, FII/DII) that Kite
-  // doesn't provide. Run it less frequently to avoid hammering Firecrawl.
+  // ── Broad-market tier3 snapshot (every 30s = every 6th tick) ──────────────
+  // Firecrawl fetch for VIX / ADR / sector deltas / FII-DII — data Kite doesn't
+  // provide. Run it less frequently to avoid hammering Firecrawl.
   if (refreshTick % 6 === 1) {
     try {
       lastTier3 = await fetchTier3Snapshot();
@@ -638,51 +633,11 @@ async function refreshSnapshotTier3(): Promise<void> {
   }
   const tier3 = lastTier3;
 
-  // ── Feed the intraday signal engine ──────────────────────────────────────
-  // Prefer Kite data (fresh every 5s); fall back to Firecrawl tier3 only when
-  // we have a freshly fetched snapshot (every 6th tick). Feeding stale cached
-  // Firecrawl data every 5s would poison the buffer with duplicate OI values.
-  if (kiteObs) {
-    recordObservation({
-      t: Date.now(),
-      price: kiteObs.spotPrice,
-      callOI: kiteObs.callOI,
-      putOI: kiteObs.putOI,
-      optionVolume: kiteObs.optionVolume,
-      atmIV: kiteObs.atmIV,
-      atmGamma: kiteObs.atmGamma,
-    });
-    logger.info({
-      source: "kite",
-      spotPrice: kiteObs.spotPrice,
-      callOI: kiteObs.callOI,
-      putOI: kiteObs.putOI,
-      atmIV: kiteObs.atmIV.toFixed(2),
-    }, "market-scheduler: recordObservation called (Kite)");
-  } else if (tier3 && tier3.spotPrice && tier3.callOI > 0 && tier3.putOI > 0 && refreshTick % 6 === 1) {
-    // Only feed Firecrawl data when it's freshly fetched (every 6th tick = 30s)
-    recordObservation({
-      t: Date.now(),
-      price: tier3.spotPrice,
-      callOI: tier3.callOI,
-      putOI: tier3.putOI,
-      optionVolume: tier3.optionVolume,
-      atmIV: tier3.impliedVolPct ?? 0,
-      atmGamma: tier3.atmGamma,
-    });
-    logger.info({
-      source: "firecrawl",
-      spotPrice: tier3.spotPrice,
-      callOI: tier3.callOI,
-      putOI: tier3.putOI,
-      atmIV: tier3.impliedVolPct ?? 0,
-    }, "market-scheduler: recordObservation called (Firecrawl fallback)");
-  } else if (!kiteObs && refreshTick % 6 !== 1) {
-    // Kite failed and we don't have fresh Firecrawl data — skip to avoid poisoning buffer
-    logger.warn("market-scheduler: recordObservation SKIPPED (Kite unavailable, waiting for fresh Firecrawl data)");
-  } else {
-    logger.warn("market-scheduler: recordObservation SKIPPED (no data)");
-  }
+  // ── Option-chain metrics now come from the KiteTicker WebSocket feed ──────
+  // market-ticker.ts recomputes PCR / maxPain / IV / gamma per tick and feeds the
+  // intraday signal buffer directly (recordObservation). Here we only read the
+  // latest metrics for the snapshot update and compute the current gate verdict.
+  const kiteObs = getLatestChainMetrics();
   const intraday = computeIntradaySignal();
 
   // 2. Fetch current prices for all assets (live intraday, not daily close)

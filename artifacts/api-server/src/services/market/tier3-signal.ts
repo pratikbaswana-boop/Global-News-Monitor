@@ -59,13 +59,6 @@ let buf: Tier3Observation[] = [];
 let emaD: number | null = null;
 let doRawHistory: { t: number; val: number }[] = [];
 
-/** Reset all rolling state (call at session open). */
-export function resetSignalState(): void {
-  buf = [];
-  emaD = null;
-  doRawHistory = [];
-}
-
 /** Push one observation; drop anything older than the buffer horizon. */
 export function recordObservation(obs: Tier3Observation): void {
   buf.push(obs);
@@ -140,9 +133,33 @@ const WARMUP: IntradaySignal = {
   signal: "NONE", signalRaw: 0, D: 0, P: 0, regime: "warmup", tilt: 0, ready: false, samples: 0,
 };
 
-// ── Core formula ──────────────────────────────────────────────────────────────
+// Last computed verdict, cached so the edge-triggered evaluator can read the
+// current signal without recomputing (see peekLastSignal()).
+let lastSignal: IntradaySignal = { ...WARMUP };
 
+/** Reset all rolling state (call at session open). */
+export function resetSignalState(): void {
+  buf = [];
+  emaD = null;
+  doRawHistory = [];
+  lastSignal = { ...WARMUP };
+}
+
+/** The most recent verdict from computeIntradaySignal() without recomputing. */
+export function peekLastSignal(): IntradaySignal {
+  return lastSignal;
+}
+
+/**
+ * Compute the intraday microstructure verdict from the rolling buffer, caching
+ * the result for peekLastSignal(). Pure w.r.t. inputs; only touches the cache.
+ */
 export function computeIntradaySignal(): IntradaySignal {
+  lastSignal = computeIntradaySignalCore();
+  return lastSignal;
+}
+
+function computeIntradaySignalCore(): IntradaySignal {
   if (buf.length < 3) return { ...WARMUP, samples: buf.length };
 
   const latest = buf[buf.length - 1]!;

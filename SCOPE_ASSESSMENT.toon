@@ -1,0 +1,53 @@
+scopeAssessment:
+  migrationGoal: Replace 5s REST-poll / DB-hop / level-triggered signal->execution pipeline with KiteTicker WebSocket push, in-process event-driven, edge-triggered design (write-behind audit + tick-driven exits with exchange-side SL backstop).
+  srcRoot: artifacts/api-server/src
+  basis: Read of every hot-path file surface + bodies of scheduler.tier3 loop, kite-option-chain fetch, signal-executor scan/dispatch, position-monitor, orders.placeOrder, bootstrap wiring.
+
+keyFindings[7]{id,finding}:
+  F1,"NfoInstrument already carries instrument_token (kite-option-chain.ts:28) -> the ~60 option tokens for full-mode subscription are already resolved in fetchKiteOptionChain steps 1-3."
+  F2,"orders.placeOrder already supports orderType SL / SL-M + triggerPrice (orders.ts:12,55) -> exchange-side SL backstop (R5) is a call, not new order infra."
+  F3,"An existing websocket.ts (125 lines) has a per-user KiteTicker with subscribe+setMode(full), order_update postback handling, and a STUB ticks handler (only debug-logs). Base to extend; but R1 needs a GLOBAL market-data feed keyed off getGlobalKiteClient, not per-user."
+  F4,"getGlobalKiteClient() (kite-option-chain.ts:49) yields the paid data account api_key+access_token -> construct the market-data KiteTicker from it."
+  F5,"scheduler.ts tier3 loop (598-804) is the R1/R2/R4 nexus: 5s timer -> fetchKiteOptionChain(getQuote) -> recordObservation -> computeIntradaySignal -> Yahoo price -> DB snapshot update with material-change gate. Becomes tick-driven feed + async write-behind."
+  F6,"signal-executor.scanAndExecutePendingSignals (802) is the level-triggered churn source: every 5s re-scans 30-min snapshot window and trades any user lacking an execution row. R3 replaces with edge-triggered dispatch + per-user position state machine."
+  F7,"Schedulers wired in index.ts:63-90 (market, signal-executor, position-monitor, token-refresh). Direct replacement rewires these entrypoints; token-refresh stays."
+
+categories:
+  complex[3]{path,requirement,changeType,reason}:
+    services/market/scheduler.ts,"R1,R2,R4",rewrite-hotpath,"Convert startTier3RefreshTimer/refreshSnapshotTier3 from 5s timer to tick-driven feed; publish slow-path context atomically; route snapshot writes through async write-behind queue; drop material-change gate on signal path."
+    services/kite/signal-executor.ts,"R2,R3,R4",rewrite-dispatch,"Replace scanAndExecutePendingSignals level scan with edge-triggered evaluator invoked in-process on ticks; add per-user position state machine + cooldown; read slow inputs from in-memory context not DB; persist executions via write-behind."
+    services/kite/position-monitor.ts,R5,rewrite-hotpath,"Evaluate ratchet on every tick of held instruments (currentPrice from tick map, not getQuote); place exchange-side SL-M backstop at hard-stop on entry; keep exit-order retry ladder."
+  medium[4]{path,requirement,changeType,reason}:
+    services/kite/websocket.ts,R1,extend,"Add a global market-data ticker (subscribe ~60 option tokens + NIFTY spot, full mode) with a real ticks handler that updates a live token->{ltp,oi,volume} map and emits tick events; keep order_update postback path."
+    services/kite/kite-option-chain.ts,R1,refactor,"Extract instrument/expiry/strike resolution (steps 1-3) into a reusable subscribe-list builder; move OI/volume/IV/gamma/PCR/maxPain aggregation (steps 4-8) into a pure function fed by the live tick map so it recomputes per relevant tick instead of per getQuote."
+    services/kite/orders.ts,R5,extend,"Add a thin helper to place/replace an SL-M protective order (uses existing SL-M support); expose cancel for backstop cleanup on exit."
+    services/market/tier3-signal.ts,"R1,R3",augment,"Pure-math engine stays; only its input arrives from tick handler. Add a light accessor (last IntradaySignal / state) so the edge-trigger can read current verdict without recompute. NO change to D/P/regime math."
+  simple[5]{path,requirement,changeType,reason}:
+    services/kite/signal-executor-scheduler.ts,R3,replace-or-remove,"5s poll loop removed under direct replacement; dispatch becomes event-driven. Keep only a market-window guard / safety heartbeat if needed."
+    services/kite/position-monitor-scheduler.ts,R5,replace-or-remove,"5s poll loop removed; monitoring becomes tick-driven. Keep a low-freq reconcile heartbeat as backstop-of-backstop."
+    src/index.ts,"R1,R3,R5",rewire,"Start the global market-data ticker + tick evaluator wiring; stop starting the removed 5s executor/monitor loops; keep token-refresh + market (ensemble) scheduler."
+    services/market/index.ts,R2,passthrough,"Re-export any new context publisher if scheduler.ts surface changes."
+    routes/broker.ts,R1,verify,"connectTickerForUser call on broker connect (line 58) must not conflict with the new global market-data ticker; confirm dedup."
+
+newFiles[5]{path,requirement,purpose}:
+  services/kite/market-ticker.ts,R1,"Global KiteTicker market-data feed: build subscribe list from resolved NIFTY option tokens + NIFTY spot, full mode, reconnect handling, maintain live token->{ltp,oi,volume} map, emit 'tick' events. (May absorb/extend websocket.ts instead of separate file - decide in pattern mapping.)"
+  services/market/hot-context.ts,R2,"Versioned immutable in-memory context object (ensemble direction, HMM regime, FlipGuard, session priors). Atomic swap on 5-min scheduler update; zero-lock reads on hot path."
+  services/kite/tick-evaluator.ts,R3,"In-process evaluator invoked per relevant tick: recompute intraday signal, read hot-context, run base+gate logic, drive per-user position state machine, edge-trigger orders with cooldown."
+  services/kite/position-state.ts,R3,"Per-user per-symbol position state machine (FLAT/PENDING_ENTRY/OPEN/PENDING_EXIT) + cooldown timers; single source of truth for edge transitions."
+  lib/audit-queue.ts,R4,"Async fire-and-forget write-behind queue for snapshots, signal events, executions; bounded buffer + backpressure; never blocks tick->order chain. Resolution scheduler + analytics keep reading same tables."
+
+outOfScope[6]:
+  - services/market/ensemble.ts (ensemble math - only its OUTPUT publishing changes, in scheduler)
+  - services/market/hmm-regime.ts (regime math unchanged)
+  - services/market/market-agent.ts (FlipGuard/priceScore - published to hot-context, logic unchanged)
+  - services/market/tier3-fetcher.ts (Firecrawl slow path - still 30s, unchanged; only its role as fallback feed reconsidered)
+  - services/market/resolution-scheduler.ts + resolution/scheduler.ts (must keep reading persisted rows)
+  - News ingestion / Neo4j / ChromaDB / diet-agents (unrelated)
+
+counts:
+  totalAffected: 17
+  complex: 3
+  medium: 4
+  simple: 5
+  newFiles: 5
+  linesInHotPathFiles: 5985

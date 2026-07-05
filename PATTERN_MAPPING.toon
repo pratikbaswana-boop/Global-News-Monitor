@@ -1,0 +1,39 @@
+patternMapping:
+  migrationGoal: Replace 5s REST-poll / DB-hop / level-triggered signal->execution pipeline with KiteTicker WebSocket push, in-process event-driven, edge-triggered design (write-behind audit + tick-driven exits with exchange-side SL backstop).
+  rule: Apply ONLY these patterns during batches. Anything not matching a pattern below is a NEW pattern -> STOP and flag.
+
+patterns[10]{id,requirement,name,old,new,appliesTo}:
+  P1,R1,poll-to-push-feed,"5s setTimeout timer calls fetchKiteOptionChain() which does kite.getQuote(60 keys) every tick (kite-option-chain.ts:330-513; scheduler.ts:598-608)","Global KiteTicker subscribes ~60 option tokens + NIFTY spot in full mode; ticks push into a live token->{ltp,oi,volume} map; no periodic getQuote for the option chain","market-ticker.ts,kite-option-chain.ts,scheduler.ts"
+  P2,R1,aggregate-as-pure-fn,"OI/volume/IV/gamma/PCR/maxPain aggregation is inline inside the getQuote fetch loop (kite-option-chain.ts:386-494)","Extract into pure computeChainMetrics(tickMap, instruments, spot) returning KiteOptionChainObservation; called on relevant ticks (sub-ms Newton-Raphson)","kite-option-chain.ts"
+  P3,R1,timer-fed-to-tick-fed-buffer,"recordObservation() called from the 5s timer body (scheduler.ts:646-654)","recordObservation() called from the tick handler when a relevant tick updates the chain; tier3-signal.ts D/P/regime math UNCHANGED","scheduler.ts,market-ticker.ts,tier3-signal.ts"
+  P4,R2,db-context-to-memory-context,"Hot path reads ensemble direction / regime / flip / priors by SELECTing the latest market_snapshots row (signal-executor.ts:316-328; deriveBaseOptionSignal reads snapshot columns)","Slow-path scheduler builds an immutable HotContext object and atomically swaps the module reference; hot path reads current ref with zero locking (hot-context.ts)","scheduler.ts,hot-context.ts,signal-executor.ts"
+  P5,R3,level-scan-to-edge-trigger,"scanAndExecutePendingSignals() re-scans 30-min snapshot window every 5s and trades any user without an execution row (signal-executor.ts:802-845)","tick-evaluator computes current side; fire ONLY on state transition (NONE->CALL, CALL->PUT, side flip) via per-user position-state machine; no 30-min window scan","signal-executor.ts,tick-evaluator.ts,position-state.ts,signal-executor-scheduler.ts"
+  P6,R3,dedup-row-to-state-machine,"Re-entry guarded by 'does a signal_executions row exist for this snapshotId+user' DB lookup (signal-executor.ts:359-367)","Per-user per-symbol state machine (FLAT/PENDING_ENTRY/OPEN/PENDING_EXIT) + cooldown timer is the single source of truth for whether to act","position-state.ts,signal-executor.ts"
+  P7,R4,blocking-write-to-write-behind,"await db.update/insert on the tick->order path (scheduler.ts:782-789 snapshot update; signal-executor executions; sits inline in hot path)","enqueue(auditEvent) fire-and-forget onto bounded async queue; a drainer persists to same tables off the hot path; never awaited before order placement","audit-queue.ts,scheduler.ts,signal-executor.ts,position-monitor.ts"
+  P8,R4,drop-material-change-gate,"'only update if PCR>0.02 / maxPain>0.10% / price>0.1% / intraday changed' gate guards the signal-affecting DB write (scheduler.ts:754-767)","Remove gate from the signal path; signal reacts to every relevant tick. Keep the change-threshold ONLY inside audit-queue as an optional persistence-volume throttle","scheduler.ts,audit-queue.ts"
+  P9,R5,poll-exit-to-tick-exit,"monitorOpenPositions() polls every 5s; fetches LTP via kite.getQuote per exec (position-monitor.ts:166-183); computes ratchet; places LIMIT exit","Ratchet evaluated on every tick of a held instrument using tick-map LTP; exit-order retry ladder (0.99/0.97/0.95) preserved; 5s loop removed","position-monitor.ts,market-ticker.ts,position-monitor-scheduler.ts"
+  P10,R5,add-exchange-sl-backstop,"No exchange-resident stop; if the process dies the position is naked (only in-process monitor protects it)","On entry fill, place an SL-M order at the hard-stop trigger via placeOrder (existing SL-M support); cancel/replace it as the ratchet ratchets up; cancel on exit","orders.ts,position-monitor.ts,signal-executor.ts"
+
+preserveInvariants[6]:
+  - tier3-signal.ts D/P/regime/TAU/deadzone math is byte-for-byte unchanged (only input source changes)
+  - Black-Scholes solveIV/bsGamma/bsCallPrice constants unchanged (r=0.065, iter=50, tol=1e-4, floor/cap 0.01/5.0)
+  - DB table + column shapes unchanged; only write timing/path changes (Resolution scheduler + analytics keep reading)
+  - deriveBaseOptionSignal decision tree + thresholds (maxPain +-1.5%, PCR 0.65/1.35, SGX 0.8%) unchanged
+  - Tier-3 gate semantics: only BLOCKS on opposite side, never initiates (signal-executor.ts:295-306)
+  - Strike selection / lot sizing / capital 95% / premium 5-400 / NIFTY_LOT_SIZE 65 unchanged
+
+migrationChecklist[12]{id,item}:
+  C1,"Global market-data KiteTicker connects from getGlobalKiteClient creds; subscribes NIFTY spot + resolved ~60 option tokens in full mode"
+  C2,"Reconnect + resubscribe on disconnect; token map cleared on ATM shift / expiry roll; re-resolve instruments on reconnect"
+  C3,"computeChainMetrics is pure and produces identical KiteOptionChainObservation vs old getQuote path for the same inputs"
+  C4,"recordObservation fed from tick handler; computeIntradaySignal output unchanged for identical observation stream"
+  C5,"HotContext published atomically by 5-min ensemble cycle; hot path never SELECTs slow-path inputs from DB"
+  C6,"Edge-trigger fires ONLY on state transition with cooldown; verify no re-entry churn (repro: one BUY_CALL direction must NOT produce repeated trades)"
+  C7,"Per-user position-state machine transitions covered: FLAT->PENDING_ENTRY->OPEN->PENDING_EXIT->FLAT"
+  C8,"audit-queue enqueues snapshot/signal/execution events; drainer persists; tick->order chain never awaits a DB write"
+  C9,"Material-change gate removed from signal path; present only as optional persistence throttle in audit-queue"
+  C10,"Ratchet evaluated per tick for held instruments using tick-map LTP; exit retry ladder + tick-rounding (0.05) preserved"
+  C11,"SL-M backstop placed on entry at hard-stop trigger; replaced as ratchet rises; cancelled on exit; verify no double-exit (SL-M + limit both firing)"
+  C12,"index.ts wiring: start market-ticker + evaluator; removed 5s executor/monitor loops; token-refresh + ensemble scheduler still start"
+
+newPatternProtocol: If a file needs a change not covered by P1-P10, STOP the batch, add the pattern here with review, then resume.
