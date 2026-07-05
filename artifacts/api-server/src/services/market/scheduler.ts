@@ -20,6 +20,7 @@ import { fetchSessionPriors, setSessionPriors, getSessionPriors, fetchTier3Snaps
 import { computeIntradaySignal, resetSignalState } from "./tier3-signal.js";
 import { getRelevantNewsByAsset } from "./stock-news.js";
 import { getLatestChainMetrics } from "../kite/market-ticker.js";
+import { publishAssetContext, resetHotContext } from "./hot-context.js";
 
 const ASSET_ID = "nse_market";
 const FIRST_RUN_DELAY_MS = 2 * 60 * 1000; // 2 min after startup
@@ -272,6 +273,21 @@ async function runEnsembleForAllAssets(window: Window): Promise<void> {
       );
       ok++;
 
+      // Publish slow-path inputs to the in-memory hot context (R2) so the
+      // event-driven executor reads them lock-free instead of via a DB hop.
+      publishAssetContext({
+        assetId: asset.id,
+        direction: signal.direction,
+        confidence: signal.confidence,
+        regime: signal.regime,
+        crisisProbability: signal.regimeProbabilities["CRISIS"] ?? 0,
+        flipConfirmed: signal.flipConfirmed,
+        priceScore: signal.priceScore,
+        uncertaintyFlag: signal.uncertaintyFlag,
+        sgxNiftyChangePct: signal.tier3Evidence?.sgxNiftyChangePct ?? null,
+        shortCoveringSignal: signal.tier3Evidence?.shortCoveringSignal ?? "none",
+      });
+
       // Update latest snapshot with fresh direction/flip/regime/priceScore
       // so the UI never shows stale morning data when AI has changed its mind.
       try {
@@ -488,6 +504,7 @@ async function onMarketOpen(): Promise<void> {
     const priors = await fetchSessionPriors();
     setSessionPriors(priors);
     resetSignalState(); // drop any prior-session ticks from the intraday signal buffer
+    resetHotContext();  // clear prior-session ensemble direction until first cycle republishes
     _priorsLoadedFor = today;
     logger.info({
       fiiNet: priors.fiiNetFlowCrore,

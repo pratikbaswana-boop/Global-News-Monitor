@@ -5,6 +5,7 @@ import { placeOrder, type PlaceOrderParams } from "./orders.js";
 import { getMargins, syncPortfolio } from "./portfolio.js";
 import { getGlobalKiteClient, getNearestExpiry } from "./kite-option-chain.js";
 import type { IntradaySignal } from "../market/tier3-signal.js";
+import { getHotContext } from "../market/hot-context.js";
 import { randomUUID } from "crypto";
 
 // Asset symbol → Kite trading symbol mapping
@@ -197,11 +198,16 @@ function selectBestOption(
 function deriveBaseOptionSignal(
   snapshot: typeof marketSnapshotsTable.$inferSelect
 ): { signal: "BUY_CALL" | "BUY_PUT" | "NO_TRADE"; suggestedStrike: number | null; reason: string } {
-  const aiDirection = (snapshot.predictedDirection === "uncertain" ? "neutral" : snapshot.predictedDirection) as "up" | "down" | "neutral";
-  const aiConfidence = snapshot.predictedConfidence as "high" | "medium" | "low";
+  // R2: slow-path inputs (AI direction/confidence, SGX, short-covering) come from the
+  // in-memory hot context published by the 5-min ensemble cycle — no DB hop. Fall back
+  // to the snapshot columns before the first publish of the day.
+  const ctx = getHotContext(snapshot.assetId);
+  const rawDirection = ctx?.direction ?? snapshot.predictedDirection;
+  const aiDirection = (rawDirection === "uncertain" ? "neutral" : rawDirection) as "up" | "down" | "neutral";
+  const aiConfidence = (ctx?.confidence ?? snapshot.predictedConfidence) as "high" | "medium" | "low";
   const maxPainDistancePct = snapshot.maxPainDistancePct;
-  const shortCoveringSignal = (snapshot.shortCoveringSignal ?? "none") as "none" | "covering" | "unwinding";
-  const sgxNiftyChangePct = snapshot.sgxNiftyChangePct;
+  const shortCoveringSignal = (ctx?.shortCoveringSignal ?? snapshot.shortCoveringSignal ?? "none") as "none" | "covering" | "unwinding";
+  const sgxNiftyChangePct = ctx?.sgxNiftyChangePct ?? snapshot.sgxNiftyChangePct;
   const tier3Json = snapshot.tier3Evidence ? JSON.parse(snapshot.tier3Evidence) as Record<string, unknown> : {};
   const putCallRatio = typeof tier3Json.putCallRatio === "number" ? tier3Json.putCallRatio : null;
   const realPrice = snapshot.realPriceAtSnapshot ? parseFloat(snapshot.realPriceAtSnapshot) : null;
