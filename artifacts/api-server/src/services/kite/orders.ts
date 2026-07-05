@@ -101,6 +101,36 @@ export async function placeOrder(
   return { kiteOrderId, status: "OPEN" };
 }
 
+/**
+ * Place an exchange-side protective stop (SL-M SELL) as a backstop for an open long
+ * option/equity position (R5). It rests at the exchange and fires natively at the
+ * trigger, so exit latency leaves the polling path and a dead process never leaves the
+ * position naked. Returns the resting order id.
+ */
+export async function placeProtectiveStop(
+  appUserId: string,
+  params: {
+    exchange: string;
+    tradingsymbol: string;
+    quantity: number;
+    triggerPrice: number;
+    product: "CNC" | "MIS" | "NRML";
+    tag?: string;
+  }
+): Promise<{ kiteOrderId: string }> {
+  const res = await placeOrder(appUserId, {
+    exchange: params.exchange,
+    tradingsymbol: params.tradingsymbol,
+    transactionType: "SELL",
+    quantity: params.quantity,
+    orderType: "SL-M",
+    triggerPrice: params.triggerPrice,
+    product: params.product,
+    tag: params.tag,
+  });
+  return { kiteOrderId: res.kiteOrderId };
+}
+
 export async function cancelOrder(
   appUserId: string,
   kiteOrderId: string,

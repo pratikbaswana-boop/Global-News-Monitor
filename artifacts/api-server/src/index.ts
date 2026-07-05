@@ -11,7 +11,7 @@ import { startResolutionScheduler } from "./services/resolution/index.js";
 import { startMarketCloseSummaryScheduler } from "./services/notifications/push-notifications.js";
 import { startChannelRecalibrationScheduler } from "./services/graph/channel-recalibration.js";
 import { startTickEvaluator } from "./services/kite/tick-evaluator.js";
-import { startPositionMonitorScheduler } from "./services/kite/position-monitor-scheduler.js";
+import { startPositionMonitor } from "./services/kite/position-monitor.js";
 import { startTokenRefreshScheduler } from "./services/kite/token-refresh-scheduler.js";
 import { startMarketTicker } from "./services/kite/market-ticker.js";
 
@@ -91,8 +91,9 @@ app.listen(port, (err) => {
     // driven by the KiteTicker feed — replaces the 5s snapshot-scan loop).
     startTickEvaluator();
 
-    // Broker: Trailing ratchet position monitor (runs every 2 min during IST market hours).
-    startPositionMonitorScheduler();
+    // Broker: Tick-driven position monitor — trailing ratchet + exchange-side SL-M
+    // backstop, driven by the KiteTicker feed (replaces the 5s poll loop).
+    startPositionMonitor();
 
     // Broker: Token refresh (runs every 6h, refreshes tokens expiring within 6h).
     startTokenRefreshScheduler();

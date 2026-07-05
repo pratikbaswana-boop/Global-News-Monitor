@@ -27,6 +27,7 @@ import {
   getGlobalKiteClient,
   resolveNiftyChain,
   computeChainMetrics,
+  findInstrumentToken,
   NIFTY_SPOT_TOKEN,
   type TickData,
   type ResolvedChain,
@@ -54,6 +55,11 @@ let spotPrice = 0;
 let latestMetrics: KiteOptionChainObservation | null = null;
 let lastRecordAt = 0;
 
+// Held-position instruments subscribed for tick-driven exits (R5), plus a symbol->token
+// index covering both the chain and held instruments.
+const heldTokens = new Set<number>();
+const symbolToToken = new Map<string, number>();
+
 // ── Public accessors ──────────────────────────────────────────────────────────
 export function getLatestChainMetrics(): KiteOptionChainObservation | null {
   return latestMetrics;
@@ -63,6 +69,42 @@ export function getTickMap(): ReadonlyMap<number, TickData> {
 }
 export function isTickerConnected(): boolean {
   return ticker?.connected() ?? false;
+}
+
+/** Latest tick LTP for a tracked trading symbol, or null if not subscribed / no tick yet. */
+export function getLtpBySymbol(tradingsymbol: string): number | null {
+  const token = symbolToToken.get(tradingsymbol);
+  if (!token) return null;
+  const t = tickMap.get(token);
+  return t && t.ltp > 0 ? t.ltp : null;
+}
+
+/** Subscribe a held position's instrument so its ticks flow into the feed (R5). */
+export async function trackHeldSymbol(tradingsymbol: string): Promise<void> {
+  let token = symbolToToken.get(tradingsymbol);
+  if (token && heldTokens.has(token)) return; // already tracked
+  if (!token) {
+    const resolved = await findInstrumentToken(tradingsymbol);
+    if (!resolved) return;
+    token = resolved;
+    symbolToToken.set(tradingsymbol, token);
+  }
+  heldTokens.add(token);
+  if (ticker && ticker.connected()) {
+    ticker.subscribe([token]);
+    ticker.setMode(ticker.modeFull, [token]);
+  }
+}
+
+/** Stop tracking a held position (unsubscribe only if it isn't part of the chain set). */
+export function untrackHeldSymbol(tradingsymbol: string): void {
+  const token = symbolToToken.get(tradingsymbol);
+  if (!token) return;
+  heldTokens.delete(token);
+  if (!subscribedOptionTokens.includes(token)) {
+    if (ticker && ticker.connected()) ticker.unsubscribe([token]);
+    tickMap.delete(token);
+  }
 }
 
 // ── Tick handling ─────────────────────────────────────────────────────────────
@@ -157,7 +199,11 @@ function applyChain(next: ResolvedChain): void {
   const nextSet = new Set(nextTokens);
   const prevSet = new Set(subscribedOptionTokens);
   const toAdd = nextTokens.filter((t) => !prevSet.has(t));
-  const toRemove = subscribedOptionTokens.filter((t) => !nextSet.has(t));
+  // Never unsubscribe a token we still hold a position in (R5 tick-driven exits).
+  const toRemove = subscribedOptionTokens.filter((t) => !nextSet.has(t) && !heldTokens.has(t));
+
+  // Keep the symbol->token index current for LTP-by-symbol lookups.
+  for (const inst of next.relevantInstruments) symbolToToken.set(inst.tradingsymbol, inst.instrument_token);
 
   if (ticker && ticker.connected()) {
     if (toRemove.length) ticker.unsubscribe(toRemove);
@@ -204,6 +250,11 @@ export async function startMarketTicker(): Promise<boolean> {
       ticker!.subscribe(subscribedOptionTokens);
       ticker!.setMode(ticker!.modeFull, subscribedOptionTokens);
     }
+    if (heldTokens.size) {
+      const held = [...heldTokens];
+      ticker!.subscribe(held);
+      ticker!.setMode(ticker!.modeFull, held);
+    }
   });
 
   ticker.on("ticks", (ticks: unknown[]) => {
@@ -244,4 +295,6 @@ export function stopMarketTicker(): void {
   spotPrice = 0;
   latestMetrics = null;
   lastRecordAt = 0;
+  heldTokens.clear();
+  symbolToToken.clear();
 }

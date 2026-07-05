@@ -394,6 +394,22 @@ export async function resolveNiftyChain(kite: KiteConnect, spotPrice: number): P
 }
 
 /**
+ * Resolve the KiteTicker instrument_token for a NIFTY option trading symbol, using the
+ * cached instrument list (fetching it once if cold). Used to subscribe held positions to
+ * the market-data feed for tick-driven exits (R5). Returns null if not found.
+ */
+export async function findInstrumentToken(tradingsymbol: string): Promise<number | null> {
+  if (instrumentsCache) {
+    const hit = instrumentsCache.find((i) => i.tradingsymbol === tradingsymbol);
+    if (hit) return hit.instrument_token;
+  }
+  const kite = await getGlobalKiteClient();
+  if (!kite) return null;
+  const insts = await getNiftyOptionInstruments(kite);
+  return insts.find((i) => i.tradingsymbol === tradingsymbol)?.instrument_token ?? null;
+}
+
+/**
  * Compute the option-chain observation (OI/volume/IV/gamma/PCR/maxPain) from a
  * live token->tick map. Pure — no I/O. Returns null if OI is incomplete.
  * Identical math to the legacy getQuote aggregation (max pain preserved as the
