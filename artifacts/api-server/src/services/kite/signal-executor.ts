@@ -978,26 +978,31 @@ async function dispatchToEligibleUsers(
     .where(and(eq(brokerAccountsTable.isActive, true), eq(brokerAccountsTable.autoTradeEnabled, true)));
   if (activeAccounts.length === 0) return;
 
-  for (const account of activeAccounts) {
-    if (!canEnter(account.userId, assetId)) continue;
+  // #3: fan out users in PARALLEL — their broker calls (getMargins/placeOrder) are gated
+  // FIFO by the shared Kite rate limiter, so calls interleave fairly and stay under the
+  // rate limit, instead of user 4 waiting behind users 1-3's full sequences.
+  await Promise.all(
+    activeAccounts.map(async (account) => {
+      if (!canEnter(account.userId, assetId)) return;
 
-    markPendingEntry(account.userId, assetId, sideForState);
-    try {
-      const result = await run(account.userId, account, snapshot);
-      if (result.executed) {
-        markOpen(account.userId, assetId, sideForState);
-        logger.info({ userId: account.userId, assetId, orderId: result.orderId }, "signal-executor: edge entry executed");
-      } else {
-        // Declined (not actionable now) — revert to FLAT with no cooldown so a later
-        // edge can retry, but the same side can't churn without a new transition.
+      markPendingEntry(account.userId, assetId, sideForState);
+      try {
+        const result = await run(account.userId, account, snapshot);
+        if (result.executed) {
+          markOpen(account.userId, assetId, sideForState);
+          logger.info({ userId: account.userId, assetId, orderId: result.orderId }, "signal-executor: edge entry executed");
+        } else {
+          // Declined (not actionable now) — revert to FLAT with no cooldown so a later
+          // edge can retry, but the same side can't churn without a new transition.
+          markFlat(account.userId, assetId, 0);
+          logger.info({ userId: account.userId, assetId, reason: result.reason }, "signal-executor: edge entry skipped");
+        }
+      } catch (err) {
         markFlat(account.userId, assetId, 0);
-        logger.info({ userId: account.userId, assetId, reason: result.reason }, "signal-executor: edge entry skipped");
+        logger.error({ userId: account.userId, assetId, err }, "signal-executor: edge entry failed");
       }
-    } catch (err) {
-      markFlat(account.userId, assetId, 0);
-      logger.error({ userId: account.userId, assetId, err }, "signal-executor: edge entry failed");
-    }
-  }
+    })
+  );
 }
 
 /** Edge-triggered OPTION entry (NIFTY) — long CALL/PUT premium chosen by the executor. */

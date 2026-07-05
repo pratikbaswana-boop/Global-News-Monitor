@@ -3,6 +3,7 @@ import { eq, desc } from "drizzle-orm";
 import { logger } from "../../lib/logger.js";
 import { getKiteClientForUser } from "./kite-client.js";
 import { enqueueAudit } from "../../lib/audit-queue.js";
+import { runKiteLimited } from "../../lib/kite-rate-limiter.js";
 import { randomUUID } from "crypto";
 
 export interface PlaceOrderParams {
@@ -71,7 +72,7 @@ export async function placeOrder(
     "Placing Kite order"
   );
 
-  const response = await kite.placeOrder(params.variety ?? "regular", orderParams);
+  const response = await runKiteLimited(() => kite.placeOrder(params.variety ?? "regular", orderParams));
   const kiteOrderId = String(response.order_id ?? response);
 
   // Persist the order record write-behind — the broker call above already happened;

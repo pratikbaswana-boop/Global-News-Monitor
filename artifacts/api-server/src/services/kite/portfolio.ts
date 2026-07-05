@@ -2,6 +2,7 @@ import { db, brokerPositionsTable, brokerHoldingsTable, brokerAccountsTable } fr
 import { eq } from "drizzle-orm";
 import { logger } from "../../lib/logger.js";
 import { getKiteClientForUser } from "./kite-client.js";
+import { runKiteLimited } from "../../lib/kite-rate-limiter.js";
 import { randomUUID } from "crypto";
 
 export interface MarginsSummary {
@@ -17,7 +18,7 @@ export async function getMargins(appUserId: string): Promise<MarginsSummary | nu
   const kite = await getKiteClientForUser(appUserId);
   if (!kite) return null;
 
-  const raw = await kite.getMargins() as Record<string, any>;
+  const raw = await runKiteLimited(() => kite.getMargins()) as Record<string, any>;
   const eq = raw?.equity ?? {};
   const avail = eq.available ?? {};
   const used = eq.used ?? {};
@@ -56,7 +57,7 @@ export async function getPositions(appUserId: string): Promise<{ day: unknown[];
   const kite = await getKiteClientForUser(appUserId);
   if (!kite) return { day: [], net: [] };
 
-  const positions = await kite.getPositions();
+  const positions = await runKiteLimited(() => kite.getPositions());
   const data = (positions as { day?: unknown[]; net?: unknown[] }) ?? {};
   return {
     day: Array.isArray(data.day) ? data.day : [],
