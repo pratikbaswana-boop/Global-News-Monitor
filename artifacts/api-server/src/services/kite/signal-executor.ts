@@ -6,7 +6,7 @@ import { getMargins, syncPortfolio } from "./portfolio.js";
 import { getGlobalKiteClient, getNearestExpiry } from "./kite-option-chain.js";
 import { peekLastSignal, type IntradaySignal } from "../market/tier3-signal.js";
 import { getHotContext } from "../market/hot-context.js";
-import { getLatestChainMetrics } from "./market-ticker.js";
+import { getLatestChainMetrics, getLtpBySymbol } from "./market-ticker.js";
 import { enqueueAudit } from "../../lib/audit-queue.js";
 import {
   canEnter,
@@ -163,6 +163,25 @@ async function fetchOptionQuotes(
       premium: lastPrice,
       lots: 0,
     });
+  }
+  return results;
+}
+
+/**
+ * Select candidate premiums straight from the in-memory KiteTicker tick map (#2). The
+ * candidates (ATM-100 … ATM+500 → within ±10 strikes) sit inside the ±15 chain we already
+ * subscribe in full mode, so their LTP is streaming — no REST getQuote on the order hot
+ * path. Returns only candidates with a live premium; the caller falls back to REST if the
+ * feed hasn't populated them yet.
+ */
+export function quoteCandidatesFromTicks(
+  candidates: { symbol: string; strike: number; deltaEstimate: number }[]
+): OptionCandidate[] {
+  const results: OptionCandidate[] = [];
+  for (const c of candidates) {
+    const ltp = getLtpBySymbol(c.symbol);
+    if (ltp === null || ltp <= 0) continue;
+    results.push({ symbol: c.symbol, strike: c.strike, deltaEstimate: c.deltaEstimate, premium: ltp, lots: 0 });
   }
   return results;
 }
@@ -710,8 +729,12 @@ async function executeOptionSignalForUser(
   const expiry = await getNearestExpiry();
   const candidates = buildStrikeCandidates(optionSig.suggestedStrike, optionSig.signal, expiry);
 
-  // Fetch live premiums
-  const quotes = await fetchOptionQuotes(userId, candidates);
+  // #2: take premiums from the in-memory tick map (candidates are within the subscribed
+  // chain). Fall back to a REST quote only if the feed hasn't populated them yet.
+  let quotes = quoteCandidatesFromTicks(candidates);
+  if (quotes.length === 0) {
+    quotes = await fetchOptionQuotes(userId, candidates);
+  }
   if (quotes.length === 0) {
     return { executed: false, reason: "Could not fetch option quotes" };
   }
