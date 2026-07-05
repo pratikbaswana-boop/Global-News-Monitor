@@ -2,6 +2,7 @@ import { db, brokerOrdersTable, brokerAccountsTable } from "@workspace/db";
 import { eq, desc } from "drizzle-orm";
 import { logger } from "../../lib/logger.js";
 import { getKiteClientForUser } from "./kite-client.js";
+import { enqueueAudit } from "../../lib/audit-queue.js";
 import { randomUUID } from "crypto";
 
 export interface PlaceOrderParams {
@@ -73,25 +74,28 @@ export async function placeOrder(
   const response = await kite.placeOrder(params.variety ?? "regular", orderParams);
   const kiteOrderId = String(response.order_id ?? response);
 
-  // Store in DB
-  await db.insert(brokerOrdersTable).values({
-    id: randomUUID(),
-    userId: appUserId,
-    brokerAccountId,
-    kiteOrderId,
-    variety: params.variety ?? "regular",
-    exchange: params.exchange,
-    tradingsymbol: params.tradingsymbol,
-    transactionType: params.transactionType,
-    orderType: params.orderType,
-    product: params.product,
-    quantity: params.quantity,
-    price: params.price ? String(params.price) : null,
-    triggerPrice: params.triggerPrice ? String(params.triggerPrice) : null,
-    status: "OPEN",
-    tag: params.tag ?? null,
-    placedAt: new Date(),
-    updatedAt: new Date(),
+  // Persist the order record write-behind — the broker call above already happened;
+  // the DB row is audit and must not delay the caller (R4).
+  enqueueAudit("broker-order-insert", async () => {
+    await db.insert(brokerOrdersTable).values({
+      id: randomUUID(),
+      userId: appUserId,
+      brokerAccountId,
+      kiteOrderId,
+      variety: params.variety ?? "regular",
+      exchange: params.exchange,
+      tradingsymbol: params.tradingsymbol,
+      transactionType: params.transactionType,
+      orderType: params.orderType,
+      product: params.product,
+      quantity: params.quantity,
+      price: params.price ? String(params.price) : null,
+      triggerPrice: params.triggerPrice ? String(params.triggerPrice) : null,
+      status: "OPEN",
+      tag: params.tag ?? null,
+      placedAt: new Date(),
+      updatedAt: new Date(),
+    });
   });
 
   return { kiteOrderId, status: "OPEN" };

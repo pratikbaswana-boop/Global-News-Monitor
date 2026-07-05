@@ -21,6 +21,7 @@ import { computeIntradaySignal, resetSignalState } from "./tier3-signal.js";
 import { getRelevantNewsByAsset } from "./stock-news.js";
 import { getLatestChainMetrics } from "../kite/market-ticker.js";
 import { publishAssetContext, resetHotContext } from "./hot-context.js";
+import { enqueueAudit } from "../../lib/audit-queue.js";
 
 const ASSET_ID = "nse_market";
 const FIRST_RUN_DELAY_MS = 2 * 60 * 1000; // 2 min after startup
@@ -723,7 +724,10 @@ async function refreshSnapshotTier3(): Promise<void> {
         freshMaxPainDistance = ((priceInfo.price - effectiveMaxPainStrike) / effectiveMaxPainStrike) * 100;
       }
 
-      // Only update if something materially changed
+      // R4/P8: the signal path no longer reads this snapshot for fast fields (the edge
+      // evaluator uses live ticker metrics + the hot context), so this change check is
+      // now ONLY a persistence-volume throttle — it decides whether the audit row is
+      // worth rewriting, it does NOT gate any trade decision.
       const oldTier3 = snapshot.tier3Evidence ? JSON.parse(snapshot.tier3Evidence) as Record<string, unknown> : {};
       const oldPcr = typeof oldTier3.putCallRatio === "number" ? oldTier3.putCallRatio : null;
       const oldMaxPain = snapshot.maxPainDistancePct ?? null;
@@ -732,11 +736,10 @@ async function refreshSnapshotTier3(): Promise<void> {
       const pcrChanged = oldPcr === null || effectivePcr === null || Math.abs(effectivePcr - oldPcr) > 0.02;
       const maxPainChanged = oldMaxPain === null || freshMaxPainDistance === null || Math.abs(freshMaxPainDistance - oldMaxPain) > 0.10;
       const priceChanged = oldPrice === null || Math.abs(priceInfo.price - oldPrice) / oldPrice > 0.001;
-      // Always update if intraday signal has new samples (buffer growing or verdict changed)
       const oldIntraday = oldTier3.intradaySignal as { samples?: number; signal?: string; ready?: boolean } | undefined;
       const intradayChanged = !oldIntraday || oldIntraday.samples !== intraday.samples || oldIntraday.signal !== intraday.signal;
 
-      if (!pcrChanged && !maxPainChanged && !priceChanged && !intradayChanged) continue;
+      if (!pcrChanged && !maxPainChanged && !priceChanged && !intradayChanged) continue; // persistence throttle only
 
       // Build updated tier3 evidence — merge old with new, preferring Kite data
       const updatedTier3 = {
@@ -751,14 +754,21 @@ async function refreshSnapshotTier3(): Promise<void> {
         intradaySignal: intraday, // microstructure gate verdict — must be persisted for the executor to read it
       };
 
-      await db
-        .update(marketSnapshotsTable)
-        .set({
-          tier3Evidence: JSON.stringify(updatedTier3),
-          realPriceAtSnapshot: priceInfo.price.toString(),
-          maxPainDistancePct: freshMaxPainDistance,
-        })
-        .where(eq(marketSnapshotsTable.id, snapshot.id));
+      // Write-behind (R4): snapshot persistence must never block the feed/exec path.
+      // Capture narrowed values synchronously — the async closure runs later.
+      const snapshotId = snapshot.id;
+      const realPriceStr = priceInfo.price.toString();
+      const evidenceJson = JSON.stringify(updatedTier3);
+      enqueueAudit("snapshot-tier3-update", async () => {
+        await db
+          .update(marketSnapshotsTable)
+          .set({
+            tier3Evidence: evidenceJson,
+            realPriceAtSnapshot: realPriceStr,
+            maxPainDistancePct: freshMaxPainDistance,
+          })
+          .where(eq(marketSnapshotsTable.id, snapshotId));
+      });
 
       logger.info({
         assetId: asset.id,

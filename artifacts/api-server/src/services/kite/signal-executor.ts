@@ -7,6 +7,7 @@ import { getGlobalKiteClient, getNearestExpiry } from "./kite-option-chain.js";
 import { peekLastSignal, type IntradaySignal } from "../market/tier3-signal.js";
 import { getHotContext } from "../market/hot-context.js";
 import { getLatestChainMetrics } from "./market-ticker.js";
+import { enqueueAudit } from "../../lib/audit-queue.js";
 import {
   canEnter,
   markPendingEntry,
@@ -659,7 +660,9 @@ async function executeSpotSignalForUser(
     execValues.stopLossPrice = realPrice > 0 ? String(realPrice * (direction === "up" ? 1 - stopLossPctVal / 100 : 1 + stopLossPctVal / 100)) : null;
   }
 
-  await db.insert(signalExecutionsTable).values(execValues);
+  enqueueAudit("signal-execution-insert", async () => {
+    await db.insert(signalExecutionsTable).values(execValues);
+  });
 
   // Sync portfolio in background so we have latest positions
   void syncPortfolio(userId);
@@ -833,7 +836,9 @@ async function executeOptionSignalForUser(
     }),
   };
 
-  await db.insert(signalExecutionsTable).values(execValues);
+  enqueueAudit("signal-execution-insert", async () => {
+    await db.insert(signalExecutionsTable).values(execValues);
+  });
   void syncPortfolio(userId);
 
   logger.info({
@@ -890,8 +895,17 @@ export async function reconcilePositionStates(): Promise<void> {
 
   const openSet = new Set(openExecs.map((e) => `${e.userId}::${e.assetId}`));
 
+  // Grace window so a freshly-opened position (whose execution insert is still draining
+  // through the write-behind queue, R4) is not mistaken for a closed one and flipped FLAT.
+  const RECONCILE_GRACE_MS = 15_000;
+  const now = Date.now();
+
   for (const s of getAllPositionStates()) {
-    if ((s.state === "OPEN" || s.state === "PENDING_EXIT") && !openSet.has(`${s.userId}::${s.assetId}`)) {
+    if (
+      (s.state === "OPEN" || s.state === "PENDING_EXIT") &&
+      !openSet.has(`${s.userId}::${s.assetId}`) &&
+      now - s.updatedAt > RECONCILE_GRACE_MS
+    ) {
       markFlat(s.userId, s.assetId); // position closed elsewhere → flat + cooldown
     }
   }
