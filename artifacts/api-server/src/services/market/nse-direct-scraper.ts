@@ -95,14 +95,8 @@ async function ensureNseSession(): Promise<void> {
 }
 
 async function nseGet<T>(path: string): Promise<T> {
-  // Firecrawl is PRIMARY (works on EC2/cloud where NSE blocks IPs).
-  // NSE direct is fallback for local dev only.
-  try {
-    return await firecrawlFetchJson<T>(`https://www.nseindia.com${path}`);
-  } catch (fcErr) {
-    logger.warn({ path, err: fcErr instanceof Error ? fcErr.message : fcErr }, "Firecrawl failed — falling back to NSE direct");
-  }
-
+  // NSE direct is PRIMARY (works on EC2 — confirmed via curl test).
+  // Firecrawl is fallback for endpoints that get blocked by Akamai.
   try {
     await ensureNseSession();
     const res = await fetch(`https://www.nseindia.com${path}`, {
@@ -113,9 +107,15 @@ async function nseGet<T>(path: string): Promise<T> {
     });
     if (!res.ok) throw new Error(`NSE ${path} returned HTTP ${res.status}`);
     return res.json() as Promise<T>;
-  } catch (err) {
-    logger.error({ path, err: err instanceof Error ? err.message : err }, "NSE direct fallback also failed");
-    throw err;
+  } catch (nseErr) {
+    logger.warn({ path, err: nseErr instanceof Error ? nseErr.message : nseErr }, "NSE direct failed — falling back to Firecrawl");
+  }
+
+  try {
+    return await firecrawlFetchJson<T>(`https://www.nseindia.com${path}`);
+  } catch (fcErr) {
+    logger.error({ path, err: fcErr instanceof Error ? fcErr.message : fcErr }, "Firecrawl fallback also failed");
+    throw fcErr;
   }
 }
 
