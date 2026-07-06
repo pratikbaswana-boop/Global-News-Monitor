@@ -6,7 +6,7 @@ import { getMargins, syncPortfolio } from "./portfolio.js";
 import { getGlobalKiteClient, getNearestExpiry } from "./kite-option-chain.js";
 import { computeIntradaySignal, type IntradaySignal } from "../market/tier3-signal.js";
 import { getHotContext } from "../market/hot-context.js";
-import { getLatestChainMetrics, getLtpBySymbol } from "./market-ticker.js";
+import { getLatestChainMetrics, getLtpBySymbol, getNiftySpotMovePct } from "./market-ticker.js";
 import { enqueueAudit } from "../../lib/audit-queue.js";
 import {
   canEnter,
@@ -429,6 +429,64 @@ function applyTier3Gate(
   return { ...base, reason: `${base.reason} ✓ tier-3 gate (${detail})` };
 }
 
+// ── Intraday range gate (NIFTY only) ───────────────────────────────────────────
+// Treats the base signal's expected-move band (priceImpactEstimate) as superior
+// knowledge about where NIFTY can travel today, relative to the live move from the
+// previous close. A CALL is only allowed while spot still has headroom below the
+// band's upper edge; a PUT only once spot has risen past the lower edge (i.e. there
+// is an up-move to give back). Signed edges make this mirror automatically for a
+// bearish band ("-0.5% to -1.2%") and a neutral band ("±0.3%") — no special-casing.
+const OPTION_ASSET_ID = "nifty50";
+
+/** Parse "+0.5% to +1.2%" / "-0.5% to -1.2%" / "±0.3%" into signed [lo, hi] edges. */
+function parseImpactRange(s: string | null | undefined): { lo: number; hi: number } | null {
+  if (!s) return null;
+  if (s.includes("±")) {
+    const m = s.match(/±\s*(\d+(?:\.\d+)?)/);
+    if (!m) return null;
+    const v = parseFloat(m[1]!);
+    return Number.isFinite(v) ? { lo: -v, hi: v } : null;
+  }
+  const nums = s.match(/[+-]?\d+(?:\.\d+)?/g);
+  if (!nums || nums.length < 2) return null;
+  const a = parseFloat(nums[0]!);
+  const b = parseFloat(nums[1]!);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+  return { lo: Math.min(a, b), hi: Math.max(a, b) };
+}
+
+/**
+ * Gate the base option signal by the expected-move band vs NIFTY's live move.
+ * Only ever downgrades to NO_TRADE — never flips a side — so it cannot manufacture a
+ * trade the base tree didn't already want. Fails open (pass-through) when the band is
+ * unparseable or the live move isn't available yet, matching the tier-3 gate warmup.
+ */
+function applyRangeGate(
+  base: { signal: "BUY_CALL" | "BUY_PUT" | "NO_TRADE"; suggestedStrike: number | null; reason: string },
+  priceImpactEstimate: string | null | undefined,
+  movePct: number | null
+): { signal: "BUY_CALL" | "BUY_PUT" | "NO_TRADE"; suggestedStrike: number | null; reason: string } {
+  if (base.signal === "NO_TRADE") return base;
+
+  const band = parseImpactRange(priceImpactEstimate);
+  if (!band || movePct === null) {
+    return { ...base, reason: `${base.reason} (range gate: ${!band ? "no band" : "no live move"}, pass-through)` };
+  }
+
+  const m = movePct;
+  const detail = `move ${m >= 0 ? "+" : ""}${m.toFixed(2)}% vs [${band.lo.toFixed(1)}, ${band.hi.toFixed(1)}]`;
+
+  // CALL needs headroom below the upper edge; PUT needs room above the lower edge.
+  if (base.signal === "BUY_CALL" && !(m < band.hi)) {
+    return { signal: "NO_TRADE", suggestedStrike: null, reason: `Range gate blocked CALL — ${detail} (no headroom)` };
+  }
+  if (base.signal === "BUY_PUT" && !(m > band.lo)) {
+    return { signal: "NO_TRADE", suggestedStrike: null, reason: `Range gate blocked PUT — ${detail} (below floor)` };
+  }
+
+  return { ...base, reason: `${base.reason} ✓ range gate (${detail})` };
+}
+
 function deriveOptionSignalFromSnapshot(
   snapshot: typeof marketSnapshotsTable.$inferSelect
 ): { signal: "BUY_CALL" | "BUY_PUT" | "NO_TRADE"; suggestedStrike: number | null; reason: string } {
@@ -437,7 +495,9 @@ function deriveOptionSignalFromSnapshot(
     ? (JSON.parse(snapshot.tier3Evidence) as Record<string, unknown>)
     : {};
   const intraday = tier3Json.intradaySignal as IntradaySignal | undefined;
-  return applyTier3Gate(base, intraday);
+  const gated = applyTier3Gate(base, intraday);
+  if (snapshot.assetId !== OPTION_ASSET_ID) return gated;
+  return applyRangeGate(gated, snapshot.priceImpactEstimate, getNiftySpotMovePct());
 }
 
 /**
@@ -468,7 +528,9 @@ export function computeLiveOptionSide(
   // Compute the intraday verdict FRESH (not the cached value) so the edge is detected
   // against the latest buffer state — this is what turns the faster feed into faster
   // detection. computeIntradaySignal is idempotent w.r.t. redundant calls (time-based EMA).
-  return applyTier3Gate(base, computeIntradaySignal());
+  const gated = applyTier3Gate(base, computeIntradaySignal());
+  if (assetId !== OPTION_ASSET_ID) return gated;
+  return applyRangeGate(gated, ctx?.priceImpactEstimate ?? null, getNiftySpotMovePct());
 }
 
 /**

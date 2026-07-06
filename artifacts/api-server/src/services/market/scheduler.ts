@@ -287,6 +287,7 @@ async function runEnsembleForAllAssets(window: Window): Promise<void> {
         uncertaintyFlag: signal.uncertaintyFlag,
         sgxNiftyChangePct: signal.tier3Evidence?.sgxNiftyChangePct ?? null,
         shortCoveringSignal: signal.tier3Evidence?.shortCoveringSignal ?? "none",
+        priceImpactEstimate: signal.priceImpactEstimate,
       });
 
       // Update latest snapshot with fresh direction/flip/regime/priceScore

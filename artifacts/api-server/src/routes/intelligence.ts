@@ -2159,30 +2159,6 @@ function synthesizeV2Signals(
   return { activeBullSignals: bull, activeBearSignals: bear };
 }
 
-// ─── Per-asset price impact ───────────────────────────────────────────────────
-// Replaces the hardcoded "+0.5% to +1.2%" string from market-agent.ts so each
-// asset's impact estimate reflects its own typical daily range and the call's
-// magnitude. Falls back to the original constants when history isn't available.
-function computePerAssetPriceImpact(
-  direction: "up" | "down" | "neutral" | "uncertain",
-  magnitude: "strong" | "moderate" | "mild",
-  avgDailyRangePct: number | null,
-): string {
-  if (!avgDailyRangePct || avgDailyRangePct <= 0) {
-    return direction === "up" ? "+0.5% to +1.2%"
-         : direction === "down" ? "-0.5% to -1.2%"
-         : "±0.3%";
-  }
-  const loMul = magnitude === "strong" ? 0.4 : magnitude === "moderate" ? 0.2 : 0.05;
-  const hiMul = magnitude === "strong" ? 1.0 : magnitude === "moderate" ? 0.6 : 0.3;
-  const lo = avgDailyRangePct * loMul;
-  const hi = avgDailyRangePct * hiMul;
-  const fmt = (n: number) => n.toFixed(1);
-  if (direction === "up") return `+${fmt(lo)}% to +${fmt(hi)}%`;
-  if (direction === "down") return `-${fmt(lo)}% to -${fmt(hi)}%`;
-  return `±${fmt(hi)}%`;
-}
-
 // ─── Early flip detection ─────────────────────────────────────────────────────
 
 async function detectEarlyFlipAndNotify(
@@ -3009,11 +2985,10 @@ router.get("/intelligence/market-signals", async (req, res) => {
           // from the asset's own avg daily range.
           const { activeBullSignals: synthBull, activeBearSignals: synthBear } =
             synthesizeV2Signals(signal, asset.symbol);
-          const perAssetImpact = computePerAssetPriceImpact(
-            signal.direction,
-            signal.magnitude,
-            historical?.avgDailyRangePct ?? null,
-          );
+          // Single source of truth: the expected-move band computed inside
+          // runMarketAgent (realized vol × √horizon × conviction). Same value the
+          // auto-trade snapshot and the intraday range gate use.
+          const perAssetImpact = signal.priceImpactEstimate;
           return {
             direction: signal.direction,
             magnitude: signal.magnitude,
@@ -3326,16 +3301,11 @@ router.post("/intelligence/market-signals/trigger", async (req, res) => {
           };
           const signal = await runMarketAgent(asset.id, asset.name, asset.symbol, regimeState, "OHLCV unavailable", "", null, { force: true });
           const safeDir = signal.direction === "uncertain" ? "neutral" : signal.direction;
-          // Manual trigger path: pull asset's historical range so price impact
-          // is per-asset, and synthesize signal items from agent reasoning.
-          const triggerHistorical = await fetchHistoricalPrices(asset.id).catch(() => null);
+          // Manual trigger path: synthesize signal items from agent reasoning.
           const { activeBullSignals: synthBull, activeBearSignals: synthBear } =
             synthesizeV2Signals(signal, asset.symbol);
-          const perAssetImpact = computePerAssetPriceImpact(
-            signal.direction,
-            signal.magnitude,
-            triggerHistorical?.avgDailyRangePct ?? null,
-          );
+          // Single source of truth (see runMarketAgent → expectedMoveBand).
+          const perAssetImpact = signal.priceImpactEstimate;
           ai = {
             direction: safeDir,
             magnitude: signal.magnitude,

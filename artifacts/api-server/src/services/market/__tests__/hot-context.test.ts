@@ -24,6 +24,7 @@ function input(assetId: string, overrides: Partial<Input> = {}): Input {
     uncertaintyFlag: false,
     sgxNiftyChangePct: 0.3,
     shortCoveringSignal: "none",
+    priceImpactEstimate: "+0.5% to +1.2%",
     ...overrides,
   };
 }

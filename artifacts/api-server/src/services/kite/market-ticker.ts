@@ -67,6 +67,7 @@ let tickMap = new Map<number, TickData>();
 let chain: ResolvedChain | null = null;
 let subscribedOptionTokens: number[] = [];
 let spotPrice = 0;
+let spotPrevClose = 0; // NIFTY previous-day close from the full-mode tick's ohlc.close
 let latestMetrics: KiteOptionChainObservation | null = null;
 let lastRecordAt = 0;
 
@@ -87,6 +88,16 @@ export function getTickMap(): ReadonlyMap<number, TickData> {
 }
 export function isTickerConnected(): boolean {
   return ticker?.connected() ?? false;
+}
+
+/**
+ * NIFTY spot's current move from previous close, in % — the axis the expected-move
+ * band (priceImpactEstimate) lives on. Null until both a live tick and the ohlc
+ * previous close have been seen, so the range gate can safely pass-through on warmup.
+ */
+export function getNiftySpotMovePct(): number | null {
+  if (spotPrice <= 0 || spotPrevClose <= 0) return null;
+  return ((spotPrice - spotPrevClose) / spotPrevClose) * 100;
 }
 
 /** Latest tick LTP for a tracked trading symbol, or null if not subscribed / no tick yet. */
@@ -134,15 +145,18 @@ export function untrackHeldSymbol(tradingsymbol: string): void {
 }
 
 // ── Tick handling ─────────────────────────────────────────────────────────────
-function parseTick(raw: unknown): { token: number; ltp: number; oi: number; volume: number } | null {
+function parseTick(raw: unknown): { token: number; ltp: number; oi: number; volume: number; prevClose: number } | null {
   const t = raw as Record<string, unknown>;
   const token = Number(t["instrument_token"] ?? 0);
   if (!token) return null;
+  // Full mode carries ohlc: { open, high, low, close }; close = previous-day close.
+  const ohlc = t["ohlc"] as Record<string, unknown> | undefined;
   return {
     token,
     ltp: Number(t["last_price"] ?? 0),
     oi: Number(t["oi"] ?? 0),
     volume: Number(t["volume_traded"] ?? t["volume"] ?? 0),
+    prevClose: Number(ohlc?.["close"] ?? 0),
   };
 }
 
@@ -159,6 +173,7 @@ function onTicks(ticks: unknown[]): void {
         spotPrice = p.ltp;
         spotUpdated = true;
       }
+      if (p.prevClose > 0) spotPrevClose = p.prevClose;
       continue;
     }
 
@@ -354,6 +369,7 @@ export function stopMarketTicker(): void {
   chain = null;
   subscribedOptionTokens = [];
   spotPrice = 0;
+  spotPrevClose = 0;
   latestMetrics = null;
   lastRecordAt = 0;
   heldTokens.clear();

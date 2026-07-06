@@ -509,6 +509,46 @@ function confidenceFromEnsemble(result: EnsembleResult): "high" | "medium" | "lo
   return "low";
 }
 
+// ── Expected-move band (single source of truth for priceImpactEstimate) ────────
+// Realized close-to-close volatility of the last few sessions, scaled by √horizon
+// and the ensemble's conviction (magnitude + confidence). The band is a central
+// quantile interval of the return distribution (half-normal: ~40th pctile ≈ 0.52σ,
+// ~85th ≈ 1.44σ), NOT a fixed multiple of the daily range. Returns an explicit
+// "unavailable" message when there's no usable price history rather than faking a band.
+
+/** Sample std-dev (n-1) of the last ≤7 close-to-close daily returns, in %. */
+function dailyReturnStdPct(candles: YahooOHLCV[] | null | undefined): number | null {
+  if (!candles || candles.length < 3) return null;
+  const rets = candles.slice(-7).map((c) => c.changePct);
+  const mean = rets.reduce((s, r) => s + r, 0) / rets.length;
+  const variance = rets.reduce((s, r) => s + (r - mean) ** 2, 0) / Math.max(1, rets.length - 1);
+  const std = Math.sqrt(variance);
+  return std > 0 ? Math.round(std * 100) / 100 : null;
+}
+
+export function expectedMoveBand(
+  direction: "up" | "down" | "neutral" | "uncertain",
+  magnitude: "strong" | "moderate" | "mild",
+  confidence: "high" | "medium" | "low",
+  timeframe: "intraday" | "next-session",
+  sigmaDaily: number | null,
+): string {
+  if (!sigmaDaily || sigmaDaily <= 0) {
+    return "Range unavailable — no recent price history";
+  }
+  const horizonSessions = timeframe === "next-session" ? 2 : 1;
+  const sigmaH = sigmaDaily * Math.sqrt(horizonSessions);
+  const magScore = magnitude === "strong" ? 1.0 : magnitude === "moderate" ? 0.7 : 0.4;
+  const confScore = confidence === "high" ? 1.0 : confidence === "medium" ? 0.75 : 0.5;
+  const conviction = 0.5 * magScore + 0.5 * confScore; // 0.45 … 1.0
+  const lo = sigmaH * 0.52 * conviction;
+  const hi = sigmaH * 1.44 * conviction;
+  const fmt = (n: number) => n.toFixed(1);
+  if (direction === "up") return `+${fmt(lo)}% to +${fmt(hi)}%`;
+  if (direction === "down") return `-${fmt(lo)}% to -${fmt(hi)}%`;
+  return `±${fmt(hi)}%`; // neutral / uncertain: unsigned magnitude only
+}
+
 // ── Public API ─────────────────────────────────────────────────────────────────
 
 export async function runMarketAgent(
@@ -731,12 +771,19 @@ Return JSON: { "call": "BULLISH" | "BEARISH" | "NEUTRAL", "confidence": 0.0-1.0,
     ?? ensemble.votes.find(v => v.call === ensemble.final)?.rationale
     ?? ensemble.votes[0]?.rationale ?? "";
 
+  const magnitude = ensemble.unanimous ? "strong" : "moderate";
+  const confidence = confidenceFromEnsemble(ensemble);
+  const timeframe = ensemble.uncertaintyFlag ? "next-session" : "intraday";
+
   const signal: MarketSignal = {
     direction: finalDirection,
-    magnitude: ensemble.unanimous ? "strong" : "moderate",
-    confidence: confidenceFromEnsemble(ensemble),
-    timeframe: ensemble.uncertaintyFlag ? "next-session" : "intraday",
-    priceImpactEstimate: finalCall === "BULLISH" ? "+0.5% to +1.2%" : finalCall === "BEARISH" ? "-0.5% to -1.2%" : "±0.3%",
+    magnitude,
+    confidence,
+    timeframe,
+    // Per-asset expected-move band from realized vol × √horizon × conviction —
+    // the single source of truth consumed by the UI, the persisted snapshot, the
+    // hot context, and the intraday range gate. See expectedMoveBand().
+    priceImpactEstimate: expectedMoveBand(finalDirection, magnitude, confidence, timeframe, dailyReturnStdPct(rawCandles)),
     verdict: primaryRationale,
     dominantNarrative: finalCall === "UNCERTAIN"
       ? "Mixed signals — ensemble split"

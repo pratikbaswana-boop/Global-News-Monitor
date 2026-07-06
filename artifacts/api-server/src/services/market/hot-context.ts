@@ -22,6 +22,7 @@ export interface HotAssetContext {
   uncertaintyFlag: boolean;
   sgxNiftyChangePct: number | null;
   shortCoveringSignal: "none" | "covering" | "unwinding";
+  priceImpactEstimate: string; // expected-move band, e.g. "+0.5% to +1.2%" — feeds the intraday range gate
   version: number; // monotonic, increments on each publish
   publishedAt: number; // epoch ms
 }
