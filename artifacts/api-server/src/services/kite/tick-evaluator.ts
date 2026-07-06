@@ -18,6 +18,7 @@ import {
   dispatchSpotForDirection,
   reconcilePositionStates,
 } from "./signal-executor.js";
+import { reconcilePendingEntries } from "./entry-tracker.js";
 
 const OPTION_ASSET_ID = "nifty50";
 // Spot equities the old level-scan also auto-traded (index/sensex excluded).
@@ -54,6 +55,12 @@ async function evaluate(): Promise<void> {
       await reconcilePositionStates();
     } catch (err) {
       logger.warn({ err: err instanceof Error ? err.message : err }, "tick-evaluator: reconcile failed");
+    }
+    // Re-adopt any pending_entry rows orphaned by a restart and resolve them (fill/cancel).
+    try {
+      await reconcilePendingEntries();
+    } catch (err) {
+      logger.warn({ err: err instanceof Error ? err.message : err }, "tick-evaluator: pending-entry reconcile failed");
     }
   }
 

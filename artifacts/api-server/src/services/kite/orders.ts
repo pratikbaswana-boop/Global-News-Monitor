@@ -102,11 +102,34 @@ export async function placeOrder(
   return { kiteOrderId, status: "OPEN" };
 }
 
+// The resting protective stop is a stop-loss LIMIT (SL), not SL-M: NSE discontinued
+// SL-M for options in Sept 2021 and Kite rejects SL-M for index options, so an SL-M
+// backstop would never actually exist on the exchange. An SL order triggers at
+// `triggerPrice` and then rests as a LIMIT at `limitPrice`, which we set a few percent
+// BELOW the trigger so it is marketable the moment it fires (a stop that only fills at
+// the trigger price can be skipped past in a fast move — the whole point of the backstop
+// is that it fills).
+export const SL_LIMIT_OFFSET_PCT = 4; // limit sits this % below the SELL trigger
+
+/** Round a price to the NSE options tick size (₹0.05). */
+export function roundToTick(price: number): number {
+  return Math.round(price / 0.05) * 0.05;
+}
+
 /**
- * Place an exchange-side protective stop (SL-M SELL) as a backstop for an open long
+ * Derive the SL limit price for a SELL stop at `triggerPrice`: `SL_LIMIT_OFFSET_PCT`
+ * below the trigger (floored at one tick so it never goes ≤ 0).
+ */
+export function slLimitPriceForTrigger(triggerPrice: number): number {
+  return Math.max(0.05, roundToTick(triggerPrice * (1 - SL_LIMIT_OFFSET_PCT / 100)));
+}
+
+/**
+ * Place an exchange-side protective stop (SL SELL) as a backstop for an open long
  * option/equity position (R5). It rests at the exchange and fires natively at the
  * trigger, so exit latency leaves the polling path and a dead process never leaves the
- * position naked. Returns the resting order id.
+ * position naked. The limit price defaults to `SL_LIMIT_OFFSET_PCT` below the trigger.
+ * Returns the resting order id and the limit price actually used.
  */
 export async function placeProtectiveStop(
   appUserId: string,
@@ -115,21 +138,24 @@ export async function placeProtectiveStop(
     tradingsymbol: string;
     quantity: number;
     triggerPrice: number;
+    limitPrice?: number;
     product: "CNC" | "MIS" | "NRML";
     tag?: string;
   }
-): Promise<{ kiteOrderId: string }> {
+): Promise<{ kiteOrderId: string; limitPrice: number }> {
+  const limitPrice = params.limitPrice ?? slLimitPriceForTrigger(params.triggerPrice);
   const res = await placeOrder(appUserId, {
     exchange: params.exchange,
     tradingsymbol: params.tradingsymbol,
     transactionType: "SELL",
     quantity: params.quantity,
-    orderType: "SL-M",
+    orderType: "SL",
     triggerPrice: params.triggerPrice,
+    price: limitPrice,
     product: params.product,
     tag: params.tag,
   });
-  return { kiteOrderId: res.kiteOrderId };
+  return { kiteOrderId: res.kiteOrderId, limitPrice };
 }
 
 export async function cancelOrder(

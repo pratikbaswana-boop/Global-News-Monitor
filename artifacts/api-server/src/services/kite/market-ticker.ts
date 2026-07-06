@@ -21,7 +21,7 @@
 import { EventEmitter } from "events";
 import { KiteTicker } from "kiteconnect";
 import { logger } from "../../lib/logger.js";
-import { recordObservation } from "../market/tier3-signal.js";
+import { recordObservation, resetSignalState } from "../market/tier3-signal.js";
 import {
   getGlobalDataCreds,
   getGlobalKiteClient,
@@ -44,6 +44,17 @@ const OBSERVATION_INTERVAL_MS = 1_000;
 // 250 pts = 5 strikes; still leaves ≥10 strikes of coverage on each side of ATM.
 const RESOLVE_DRIFT_PTS = 250;
 
+// ── Spot equity tokens for KiteTicker (replaces Yahoo in the fast path) ───────
+// Well-known Kite instrument tokens for NSE equities + BSE index. Override via env.
+const SPOT_EQUITY_TOKENS: Record<string, { token: number; symbol: string }> = {
+  RELIANCE:  { token: Number(process.env["KITE_RELIANCE_TOKEN"] ?? 779521),   symbol: "RELIANCE" },
+  TCS:       { token: Number(process.env["KITE_TCS_TOKEN"] ?? 2953217),      symbol: "TCS" },
+  HDFCBANK:  { token: Number(process.env["KITE_HDFCBANK_TOKEN"] ?? 857857),  symbol: "HDFCBANK" },
+  SENSEX:    { token: Number(process.env["KITE_SENSEX_TOKEN"] ?? 265),       symbol: "SENSEX" },
+};
+const spotEquityPrices = new Map<string, { ltp: number; lastTickAt: number }>();
+const SPOT_EQUITY_STALE_MS = 30_000; // fall back to Yahoo if no tick in 30s
+
 // ── Event bus (consumed by the tick evaluator / position monitor in later batches) ──
 export const marketTicker = new EventEmitter();
 
@@ -58,6 +69,9 @@ let subscribedOptionTokens: number[] = [];
 let spotPrice = 0;
 let latestMetrics: KiteOptionChainObservation | null = null;
 let lastRecordAt = 0;
+
+// Reverse lookup: token → equity symbol for spot tick parsing.
+const tokenToEquitySymbol = new Map<number, string>();
 
 // Held-position instruments subscribed for tick-driven exits (R5), plus a symbol->token
 // index covering both the chain and held instruments.
@@ -81,6 +95,14 @@ export function getLtpBySymbol(tradingsymbol: string): number | null {
   if (!token) return null;
   const t = tickMap.get(token);
   return t && t.ltp > 0 ? t.ltp : null;
+}
+
+/** Latest LTP for a spot equity (RELIANCE/TCS/HDFCBANK/SENSEX) from KiteTicker, or null if stale. */
+export function getSpotEquityLtp(symbol: string): number | null {
+  const entry = spotEquityPrices.get(symbol);
+  if (!entry) return null;
+  if (Date.now() - entry.lastTickAt > SPOT_EQUITY_STALE_MS) return null;
+  return entry.ltp > 0 ? entry.ltp : null;
 }
 
 /** Subscribe a held position's instrument so its ticks flow into the feed (R5). */
@@ -136,6 +158,15 @@ function onTicks(ticks: unknown[]): void {
       if (p.ltp > 0) {
         spotPrice = p.ltp;
         spotUpdated = true;
+      }
+      continue;
+    }
+
+    // Spot equity token — update the equity price map.
+    const equitySymbol = tokenToEquitySymbol.get(p.token);
+    if (equitySymbol) {
+      if (p.ltp > 0) {
+        spotEquityPrices.set(equitySymbol, { ltp: p.ltp, lastTickAt: Date.now() });
       }
       continue;
     }
@@ -213,13 +244,20 @@ function applyChain(next: ResolvedChain): void {
     if (toRemove.length) ticker.unsubscribe(toRemove);
     if (toAdd.length) {
       ticker.subscribe(toAdd);
-      ticker.setMode(ticker.modeFull, toAdd);
+      ticker.setMode(ticker!.modeFull, toAdd);
     }
   }
 
   for (const t of toRemove) tickMap.delete(t);
   subscribedOptionTokens = nextTokens;
   chain = next;
+
+  // Reset the tier-3 intraday buffer on chain re-resolve. When spot drifts 250 points
+  // and we re-subscribe to a new strike set, dCall/dPut deltas computed across the
+  // boundary compare OI of different instruments — garbage direction scores for the
+  // next ~5 minutes. Clearing the buffer forces a natural warmup (READY_FRACTION=0.5).
+  resetSignalState();
+  logger.info("market-ticker: tier-3 buffer reset on chain re-resolve");
 
   logger.info(
     { expiry: next.expiryStr, atmStrike: next.atmStrike, tokens: nextTokens.length, added: toAdd.length, removed: toRemove.length },
@@ -259,6 +297,10 @@ export async function startMarketTicker(): Promise<boolean> {
       ticker!.subscribe(held);
       ticker!.setMode(ticker!.modeFull, held);
     }
+    // Subscribe spot equity tokens (RELIANCE/TCS/HDFCBANK/SENSEX) for live LTP.
+    const equityTokens = Object.values(SPOT_EQUITY_TOKENS).map((e) => e.token);
+    ticker!.subscribe(equityTokens);
+    ticker!.setMode(ticker!.modeFull, equityTokens);
   });
 
   ticker.on("ticks", (ticks: unknown[]) => {
@@ -267,6 +309,14 @@ export async function startMarketTicker(): Promise<boolean> {
     } catch (err) {
       logger.error({ err: err instanceof Error ? err.message : err }, "market-ticker: onTicks failed");
     }
+  });
+
+  // Kite order postbacks arrive on this same WebSocket for the connected account. Re-emit
+  // them on the shared bus so the entry tracker (R6) can confirm fills sub-second, instead
+  // of waiting on the 10s reconcile. (Order updates route to the account that owns the
+  // ticker's access token; per-user accounts still fall back to the tracker's poll.)
+  ticker.on("order_update", (order: unknown) => {
+    marketTicker.emit("order_update", order);
   });
 
   ticker.on("reconnect", (attempt: number, delay: number) => {
@@ -279,6 +329,13 @@ export async function startMarketTicker(): Promise<boolean> {
 
   ticker.connect();
   started = true;
+
+  // Build reverse lookup for spot equity tick parsing.
+  tokenToEquitySymbol.clear();
+  for (const [symbol, info] of Object.entries(SPOT_EQUITY_TOKENS)) {
+    tokenToEquitySymbol.set(info.token, symbol);
+  }
+
   logger.info("market-ticker: started");
   return true;
 }
@@ -301,4 +358,6 @@ export function stopMarketTicker(): void {
   lastRecordAt = 0;
   heldTokens.clear();
   symbolToToken.clear();
+  spotEquityPrices.clear();
+  tokenToEquitySymbol.clear();
 }

@@ -1,943 +1,924 @@
-# Global News Monitor — Complete System Blueprint
+# Global News Intelligence & Market Prediction — Complete System Blueprint
 
-## Architecture Overview
+> AI-native geopolitical intelligence + Indian market prediction platform.
+> Closed-loop: ingest news → build knowledge graph → multi-agent reasoning → market
+> direction call → trade execution → resolution → Brier score → feed lessons back.
+
+---
+
+## 1. System Overview
+
+The platform fuses three data domains:
+
+1. **Geopolitical news** (RSS + GDELT) → CAMEO-coded events → Neo4j graph → stories.
+2. **Market microstructure** (NSE option chain, FII/DII, VIX, PCR, SGX Nifty, sectoral deltas).
+3. **AI reasoning** (GPT-4o multi-agent + 3-window ensemble + HMM regime + Tier-3 microstructure).
+
+The output is a tradeable direction call (`BULLISH` / `BEARISH` / `NEUTRAL` / `UNCERTAIN`)
+per asset, which an edge-triggered executor converts into option/spot trades via Zerodha Kite,
+managed by a tick-driven trailing-stop position monitor. Predictions are later resolved and
+scored with Brier scores; calibration penalties feed back into the next forecast.
+
+### Tracked assets (hardcoded in `market/scheduler.ts`)
+
+| id          | symbol    | yahoo    |
+|-------------|-----------|----------|
+| nifty50     | NIFTY     | ^NSEI    |
+| sensex      | SENSEX    | ^BSESN   |
+| reliance    | RELIANCE  | RELIANCE.NS |
+| tcs         | TCS       | TCS.NS   |
+| hdfc-bank   | HDFCBANK  | HDFCBANK.NS |
+| gold        | GOLD      | GC=F     |
+| silver      | SILVER    | SI=F     |
+
+---
+
+## 2. Process Architecture
+
+### 2.1 Two-thread model (`artifacts/api-server/src/index.ts`)
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                              AWS EC2 (single instance)                           │
-│                                                                                 │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐  │
-│  │ Postgres │  │  Neo4j   │  │ ChromaDB │  │  Caddy   │  │   API Server     │  │
-│  │   :5432  │  │  :7687   │  │  :8000   │  │ :80/:443 │  │   (Node :3000)   │  │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────────────┘  │
-│                                                                                 │
-│  ┌───────────────────────────────────────────────────────────────────────────┐   │
-│  │                           API Server (Node.js)                             │   │
-│  │                                                                             │   │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐   │   │
-│  │  │  Ingestion   │  │  Knowledge  │  │  Reasoning  │  │     Market      │   │   │
-│  │  │  Pipeline    │  │    Graph    │  │  Pipeline   │  │     Engine      │   │   │
-│  │  │  (Phase 1)   │  │  (Phase 2)  │  │  (Phase 3)  │  │   (Phase 4)     │   │   │
-│  │  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────────┘   │   │
-│  │                                                                     │   │   │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐   │   │
-│  │  │ Resolution   │  │   Self-     │  │  Kite       │  │   Frontend      │   │   │
-│  │  │  Watcher     │  │ Calibration │  │  Broker     │  │   (React/Vite)  │   │   │
-│  │  │  (Phase 5)   │  │             │  │  Integration│  │                 │   │   │
-│  │  └─────────────┘  └─────────────┘  └─────────────────┘   └─────────────────┘   │   │
-│  └───────────────────────────────────────────────────────────────────────────┘   │
-│                                                                                 │
-│  External APIs:                                                                 │
-│  ├── AWS Bedrock (LLM: Mistral Large, Nova Lite, Titan Embed)                   │
-│  ├── Yahoo Finance (OHLCV price data)                                           │
-│  ├── Kite Connect (Zerodha: real-time option chain + order execution)           │
-│  ├── Firecrawl (NSE web scraping: VIX, A/D ratio, FII/DII)                      │
-│  ├── GDELT (global events batch feed)                                           │
-│  ├── RSS feeds (Reuters, BBC, NYT, etc.)                                        │
-│  └── Web Push (VAPID notifications)                                             │
-└─────────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────── MAIN THREAD ────────────────────────────┐
+│  Express API server (PORT env, default 3000)                        │
+│                                                                     │
+│  Latency-critical schedulers (always run here):                     │
+│   • startMarketScheduler()        — HMM + ensemble every 5/15/60 min│
+│   • startMarketTicker()           — KiteTicker WebSocket feed       │
+│   • startMarketSignalScheduler()  — Tier-3 signal refresh           │
+│   • startMarketResolutionScheduler() — snapshot resolution          │
+│   • startTickEvaluator()          — edge-triggered signal dispatch  │
+│   • startPositionMonitor()        — trailing stop / exit control    │
+│   • startTokenRefreshScheduler()  — Kite OAuth token refresh        │
+└_____________________________________________________________________┘
+        │ if BG_IN_WORKER=true (default)
+        ▼
+┌──────────────────────── WORKER THREAD (worker.ts) ──────────────────┐
+│  CPU-bound phases (off-loaded from event loop):                     │
+│   • startIngestionScheduler()        — Phase 1                      │
+│   • startGraphScheduler()            — Phase 2                      │
+│   • startReasoningScheduler()        — Phase 3                      │
+│   • startResolutionScheduler()       — Phase 5 (every 6h)           │
+│   • startSelfCalibrationScheduler()  — daily Brier recalibration    │
+│   • startMarketCloseSummaryScheduler()                              │
+│   • startChannelRecalibrationScheduler() — quarterly Pearson        │
+│  Health report posted to main thread every 60s.                     │
+└_____________________________________________________________________┘
+```
+
+### 2.2 Kill switches (env vars)
+
+- `DISABLE_BG_SCHEDULERS=true` → no background phases start at all.
+- `BG_IN_WORKER=false` → phases 1–3, 5 run on the main thread (rollback mode).
+
+---
+
+## 3. End-to-End Flow
+
+```
+RSS/GDELT feeds
+     │
+     ▼
+[Phase 1] Ingestion ─────► raw_articles (Postgres) + embedding (ChromaDB)
+     │   • semantic dedup (cosine ≥ 0.88 = duplicate, ≥ 0.70 = corroboration)
+     │   • GPT-4o-mini CAMEO event extraction
+     ▼
+[Phase 2] Graph Build ───► Neo4j: Event─[:ACTED_ON]→Country/Leader
+     │   • Louvain community detection → Story nodes
+     │   • Contradiction detection, narrative drift (cosine centroid, 4-week)
+     ▼
+[Phase 3] Reasoning Pipeline (per story, GPT-4o)
+     │   Analyst → Historian → Forecaster → Devil's Advocate
+     │   • feedback lessons injected from past resolutions
+     │   • calibration penalty if rolling Brier > 0.22
+     ▼
+prediction_v2 (Postgres) + TRANSMITS_TO edge in Neo4j
+     │
+     ▼
+[Phase 4] Market Agent (every 5 min during open)
+     │   • HMM regime (RISK_ON / RISK_OFF / CRISIS)
+     │   • 3-window ensemble (6h / 24h / 72h) → confidence-weighted vote
+     │   • Tier-3 intraday microstructure (D/P/regime)
+     │   • Candle trust, channel decay, FlipGuard
+     ▼
+market_snapshots (Postgres) + hot-context in-memory cache
+     │
+     ▼
+[Phase 4b] Tick Evaluator (KiteTicker, every 1s)
+     │   • edge-triggered: fires only on signal transition
+     │   • dispatches trades to eligible users
+     ▼
+[Phase 4c] Signal Executor (Kite API)
+     │   • builds option strikes, fetches quotes, places orders
+     │   • hysteresis bands on maxPain / PCR / conflict
+     │   • entry persisted PENDING_ENTRY → OPEN only on a confirmed fill
+     ▼
+[Phase 4d] Position Monitor (every tick + 30s heartbeat)
+     │   • ratchet trailing stop, exchange-side SL (stop-loss limit), time stop (far OTM)
+     ▼
+signal_executions (Postgres) + Kite orders
+     │
+     ▼
+[Phase 5] Resolution Watcher (every 6h)
+     │   • OFAC / ACLED / UN News / NSE ±2% / GPT-4o fallback
+     │   • Brier score, forensics post-mortem
+     ▼
+[Feedback] Self-Calibration (daily)
+     • rolling 10-prediction Brier per story type
+     • penalty flag → Forecaster system prompt on next run
 ```
 
 ---
 
-## Phase 1: News Ingestion Pipeline
+## 4. Phase 1 — Ingestion
 
-### Flow
+**Files:** `services/ingestion/scheduler.ts`, `rss-fetcher.ts`, `gdelt-fetcher.ts`,
+`event-extractor.ts`, `semantic-dedup.ts`, `feed-registry-seed.ts`.
+
+### 4.1 Sources
+- **RSS feeds** seeded in `feed-registry-seed.ts` (tiered by credibility 1–5).
+- **GDELT** events (pre-coded CAMEO, bypasses GPT-4o extraction).
+
+### 4.2 Semantic dedup (`semantic-dedup.ts`)
+
+Embeds `title + first 300 chars` via OpenAI `text-embedding` and compares against
+articles ingested in the last `DEDUP_WINDOW_HOURS = 6` using cosine similarity.
+
+**Hardcoded thresholds:**
+- `DUPLICATE_THRESHOLD = 0.88` → mark `duplicate`, keep higher-quality (lower tier) source.
+- `CORROBORATION_THRESHOLD = 0.70` → link as corroboration, increment `corroboration_count`.
+
+**Cosine formula:**
 ```
-RSS Feeds ──→ fetchRssFeed() ──→ processArticle() ──→ raw_articles table
-GDELT Batch ──→ fetchGdeltBatch() ──→ processArticle()
-                                        │
-                                        ├── Step 1: Semantic Dedup (embedding cosine similarity)
-                                        ├── Step 2: Persist to raw_articles (Postgres)
-                                        └── Step 3: Event Extraction (LLM → CAMEO codes)
-                                                    └── events table
+cos(a,b) = (a·b) / (‖a‖·‖b‖)
 ```
+Dimension mismatch (e.g. 1536 vs 1024) returns `-1` sentinel and the pair is skipped.
 
-### Key Details
-- **Feed Registry**: Seeded from `feed-registry-seed.ts` with credibility tiers (1=Reuters, 5=state media)
-- **Dedup**: Uses embedding cosine similarity to catch near-duplicate rewrites. Articles with >0.92 similarity to existing are discarded
-- **Event Extraction**: Uses `chatCompleteFast()` (Bedrock Nova Lite on AWS) to extract CAMEO event codes from articles
-- **State Media**: Articles from state media (credibility tier ≥3) require corroboration before event extraction
-- **Backoff**: 3 consecutive failures → feed quarantined with exponential backoff
-- **Cadence**: Runs every `NEWS_FETCH_INTERVAL_HOURS` (default 1h)
+### 4.3 CAMEO event extraction (`event-extractor.ts`)
 
-### Hardcoded Values
-| Value | Location | Description |
-|-------|----------|-------------|
-| `5000` chars | `scheduler.ts:62` | Max article body length |
-| `500` chars | `scheduler.ts:62` | Max title length |
-| `0.92` | `semantic-dedup.ts` | Cosine similarity dedup threshold |
-| `3` failures | `scheduler.ts:130` | Quarantine threshold |
+GPT-4o-mini (`chatCompleteFast`, `temperature=0.1`, `max_tokens=600`) with a strict
+JSON schema system prompt. Output fields: `actors`, `action_type` (CAMEO code),
+`target`, `location`, `event_date`, `stated_intent`, `requires_corroboration`,
+`confidence` (0–1).
+
+**Hardcoded rule:** `requires_corroboration` is forced `true` if the source is state
+media AND credibility tier ≥ 3.
+
+CAMEO codes used: `SANCTION, MOBILIZE_MILITARY, NEGOTIATE, CONDEMN, THREATEN,
+PROVIDE_AID, SIGN_TREATY, IMPOSE_EMBARGO, EXPEL_DIPLOMAT, CEASEFIRE, PROTEST,
+ELECTION, POLICY_CHANGE, ECONOMIC_ACTION`.
+
+Malformed JSON / model refusals are persisted to `extraction_errors` for audit.
 
 ---
 
-## Phase 2: Knowledge Graph (Neo4j)
+## 5. Phase 2 — Knowledge Graph
 
-### Flow
+**Files:** `services/graph/event-graph-builder.ts`, `louvain.ts`, `story-emergence.ts`,
+`contradiction-detector.ts`, `narrative-drift.ts`, `channel-recalibration.ts`,
+`neo4j-client.ts`.
+
+### 5.1 Graph schema (Neo4j)
+
 ```
-events table ──→ event-graph-builder.ts ──→ Neo4j (Event, Country, Story nodes)
-                                                   │
-                                                   ├── contradiction-detector.ts (finds conflicting events)
-                                                   ├── story-emergence.ts (Louvain clustering → Story nodes)
-                                                   ├── narrative-drift.ts (tracks narrative evolution)
-                                                   └── channel-recalibration.ts (quarterly Pearson correlation)
+(:Story)-[:CONTAINS]->(:Event)-[:ACTED_ON]->(:Country|:Leader)
+(:Event)-[:CONTRADICTS]->(:Event)
+(:Story)-[:TRANSMITS_TO]->(:TransmissionChannel {historical_correlation})
 ```
 
-### Key Details
-- **Graph Schema**: `Story → CONTAINS → Event → ACTED_ON → Country`, `Event → CONTRADICTS → Event`, `Story → TRANSMITS_TO → Channel`
-- **Story Emergence**: Uses Louvain community detection algorithm to cluster related events into stories
-- **Channel Recalibration**: Quarterly Pearson correlation of transmission channel weights
-- **Cadence**: Graph scheduler runs every 30 minutes
+### 5.2 Story emergence (`story-emergence.ts`)
+
+1. Fetch `Event` nodes from last `LOOKBACK_DAYS = 21` (excluding hypotheses).
+2. Build weighted graph: events connected by shared country; edge weight =
+   `(effectiveWeight_a + effectiveWeight_b)/2 * sharedCountryCount`.
+3. Run **Louvain** community detection (`louvain.ts`).
+4. Filter communities: `MIN_COMMUNITY_EVENTS = 4`, `MIN_COMMUNITY_COUNTRIES = 1`,
+   capped at `MAX_ACTIVE_STORIES = 25`.
+5. Match to existing Story via **Jaccard similarity** of country sets;
+   `STORY_CONTINUITY_OVERLAP_THRESHOLD = 0.60` → update, else create.
+6. New stories labelled by GPT-4o (`temperature=0.2`, `max_tokens=30`, "8 words or fewer").
+7. Stories not seen this cycle → `status='dormant'`.
+
+**Jaccard formula:**
+```
+J(A,B) = |A ∩ B| / |A ∪ B|
+```
+
+### 5.3 Narrative drift (`narrative-drift.ts`) — weekly
+
+- Embeds up to 30 articles per story, computes weekly **centroid** (mean vector).
+- Compares to centroid from `LOOKBACK_WEEKS = 4` weeks ago.
+- `cosineDistance = 1 - cosineSimilarity(currentCentroid, oldCentroid)`.
+- **Hardcoded:** `DRIFT_THRESHOLD = 0.25`. If exceeded, GPT-4o writes a one-sentence
+  `drift_description` and stores `narrative_drift_score` on the Story node.
+
+### 5.4 Channel recalibration (`channel-recalibration.ts`) — quarterly
+
+- Recomputes **Pearson correlation** between channel activation and a Brier-derived
+  price-change proxy over the last `LOOKBACK_DAYS = 90`.
+- Proxy: `priceChangePct = (1 - brierScore) * 2 - 1` (maps Brier 0→+1, 1→-1).
+- Correlation clamped to `[0.10, 0.95]` and written to
+  `TransmissionChannel.historical_correlation`.
+- **Implementation note:** uses chained `setTimeout` chunks of `MAX_TIMEOUT_MS = 24 days`
+  because Node's `setTimeout` overflows `INT32_MAX` for the 90-day interval.
 
 ---
 
-## Phase 3: 4-Agent Reasoning Pipeline
+## 6. Phase 3 — Reasoning Pipeline
 
-### Flow
+**Files:** `services/reasoning/pipeline.ts`, `agent-analyst.ts`, `agent-historian.ts`,
+`agent-forecaster.ts`, `agent-devil.ts`, `self-calibration.ts`.
+
+LangGraph-style 4-agent chain per story. Skips if a prediction exists younger than
+**5 hours** (`hasRecentPrediction`).
+
+### 6.1 Pipeline stages
+
+| Stage | Agent | Model | Role |
+|-------|-------|-------|------|
+| 0 | Feedback loader | — | Pulls lessons from `forensics.ts` for this story |
+| 1 | Subgraph fetch | — | Cypher: events + countries + contradictions (last 72h) |
+| 2 | **Analyst** | GPT-4o | Situation report + Indian market exposure channels |
+| 3 | **Historian** | GPT-4o | Historical analogues (anchored on feedback lessons) |
+| 4 | **Forecaster** | GPT-4o | Scenario tree with probabilities + falsification conditions |
+| 5 | **Devil's Advocate** | GPT-4o | Critique + adjusted `finalScenarios` |
+| 6 | Write | — | `prediction_v2` row + `TRANSMITS_TO` Neo4j edge |
+
+### 6.2 Flags written to `prediction_v2.flags`
+
+- `no_historical_analogue` — historian found no analogue.
+- `calibration_penalty_active` — rolling Brier > 0.22 for this story type.
+- `active_contradiction` — subgraph has real `CONTRADICTS` edges.
+- `narrative_drifting` — `analogueConfidence < 0.45` and not `noHistoricalAnalogue`.
+
+### 6.3 Self-calibration (`self-calibration.ts`) — daily
+
+- Computes **rolling 10-prediction Brier** per story type (dominant channel as proxy).
+- **Hardcoded:** `BRIER_PENALTY_THRESHOLD = 0.22`, `ROLLING_WINDOW = 10`.
+- If exceeded → `confidence_penalty = 0.20` injected into the Forecaster's next system
+  prompt via `getCalibrationWarning()`.
+- Also computes **4-level Brier breakdown**: per-record, per-story-type, per-CAMEO-action,
+  per-transmission-channel (last 500 resolved records).
+
+### 6.4 Brier score (`resolution/brier-score.ts`)
+
 ```
-Story (from Neo4j) ──→ runPipeline(storyId)
-                         │
-                         ├── Stage 0: Feedback Injection (lessons from past resolutions)
-                         ├── Stage 1: Fetch Story Subgraph (Neo4j Cypher query)
-                         ├── Stage 2: Analyst Agent (LLM call → situation report)
-                         ├── Stage 3: Historian Agent (LLM call → historical analogues)
-                         ├── Stage 4: Forecaster Agent (LLM call → scenario tree)
-                         │              └── Self-calibration warning if Brier > 0.22
-                         ├── Stage 5: Devil's Advocate Agent (LLM call → critique + adjusted scenarios)
-                         └── Stage 6: Write to prediction_v2 table + Neo4j TRANSMITS_TO edge
+BS = (1/N) · Σᵢ (fᵢ − oᵢ)²
 ```
+- `fᵢ` = forecast probability for scenario i, `oᵢ = 1` if it materialised else `0`.
+- Lower is better: 0 = perfect, 1 = worst.
+- **Calibration labels:** ≤0.10 Excellent, ≤0.20 Good, ≤0.33 Acceptable, ≤0.50 Poor,
+  else Very poor.
 
-### Key Details
-- **LLM**: All 4 agents use `chatComplete()` → routes to Bedrock Mistral Large on AWS
-- **Skip Guard**: If prediction exists within 5 hours, skip pipeline
-- **Flags**: `no_historical_analogue`, `calibration_penalty_active`, `active_contradiction`, `narrative_drifting`
-- **Resolution**: `resolveAfter = now + min(timeframeDays) × 24h`
-- **Cadence**: Reasoning scheduler runs every 5 minutes, picks up stories without recent predictions
-
-### Hardcoded Values
-| Value | Location | Description |
-|-------|----------|-------------|
-| `5h` | `pipeline.ts:88` | Skip if recent prediction exists |
-| `0.45` | `pipeline.ts:166` | Historian analogue confidence threshold for `narrative_drifting` flag |
-| `0.22` | `self-calibration.ts` | Brier score penalty threshold |
+**Example:** 3 scenarios with probabilities `[0.6, 0.3, 0.1]`, scenario 1 materialised:
+```
+BS = ((0.6−0)² + (0.3−1)² + (0.1−0)²) / 3
+   = (0.36 + 0.49 + 0.01) / 3 = 0.2867
+```
 
 ---
 
-## Phase 4: Market Engine (Signal Generation + Auto-Trading)
+## 7. Phase 4 — Market Direction Engine
 
-This is the core trading system. It has multiple sub-systems running on different cadences:
+**Files:** `services/market/scheduler.ts`, `hmm-regime.ts`, `ensemble.ts`,
+`market-agent.ts`, `candle-trust.ts`, `tier3-signal.ts`, `tier3-fetcher.ts`,
+`hot-context.ts`.
 
-### 4A. Market Scheduler (Slow Path — 5 min cycles)
+### 7.1 Scheduler cadence (`scheduler.ts`) — IST-aware
 
-```
-                    ┌──────────────────────────────────────────────────┐
-                    │           Market Scheduler (runCycle)             │
-                    │                                                  │
-                    │  1. HMM Regime Detection                         │
-                    │     fetchRegimeFeatures() → detectRegime()       │
-                    │     → market_regimes table                       │
-                    │                                                  │
-                    │  2. Session Priors (load once at open)           │
-                    │     fetchSessionPriors() → in-memory             │
-                    │     (FII/DII flows, delivery %, participant OI)  │
-                    │                                                  │
-                    │  3. Reset Flip Guards (new trading day)          │
-                    │                                                  │
-                    │  4. For each of 7 assets:                        │
-                    │     a. Fetch OHLCV from Yahoo Finance            │
-                    │     b. runMarketAgent() → AI ensemble             │
-                    │     c. Persist to market_snapshots table          │
-                    │     d. Publish to hot context (in-memory)        │
-                    └──────────────────────────────────────────────────┘
-```
+| Window | IST | Cadence |
+|--------|-----|---------|
+| pre-market | 08:45–09:15 | 15 min |
+| open | 09:15–15:30 | **5 min** |
+| post-close | 15:30–16:30 | 15 min |
+| off-hours | else | 60 min |
 
-**Cadence (IST):**
-| Window | Time | Interval |
-|--------|------|----------|
-| Pre-market | 08:45–09:15 | 15 min |
-| Open | 09:15–15:30 | 5 min |
-| Post-close | 15:30–16:30 | 15 min |
-| Off-hours | 16:30–08:45 | 60 min |
+Weekends → always `closed`. `FIRST_RUN_DELAY_MS = 2 min` after startup.
 
-**Tracked Assets (hardcoded):**
-| Asset ID | Symbol | Yahoo Symbol |
-|----------|--------|-------------|
-| nifty50 | NIFTY | ^NSEI |
-| sensex | SENSEX | ^BSESN |
-| reliance | RELIANCE | RELIANCE.NS |
-| tcs | TCS | TCS.NS |
-| hdfc-bank | HDFCBANK | HDFCBANK.NS |
-| gold | GOLD | GC=F |
-| silver | SILVER | SI=F |
+IST computed as `istMin = (utcH*60 + utcM + 330) % 1440`.
 
-### 4B. HMM Regime Detection
+### 7.2 HMM regime detection (`hmm-regime.ts`)
 
-**3-State Gaussian Hidden Markov Model:**
+3-state Gaussian Hidden Markov Model: **RISK_ON / RISK_OFF / CRISIS**.
 
-States: `RISK_ON`, `RISK_OFF`, `CRISIS`
+**5-dim feature vector:** `[vixLevel, vixChange5d, pcrIntraday, niftyRealVol10d, inrUsdChange5d]`
+(PCR replaced the old `fiiNetFlow5d` because FII cash flow is EOD-only and froze the HMM
+intraday).
 
-**Feature Vector (5-dim):** `[vixLevel, vixChange5d, pcrIntraday, niftyRealVol10d, inrUsdChange5d]`
-
-**Hardcoded Parameters (calibrated for NSE 2010–2024):**
+**Hardcoded NSE-calibrated parameters (2010–2024):**
 
 ```
-MU (means):
-  RISK_ON:   [13.5,  -0.5,  0.85,  11.0,  -0.05]
-  RISK_OFF:  [19.0,   1.5,  1.15,  18.0,   0.25]
-  CRISIS:    [28.0,   5.0,  1.45,  30.0,   1.20]
-
-SIGMA (std devs):
-  RISK_ON:   [3.0,  1.0,  0.15,  3.5,  0.20]
-  RISK_OFF:  [4.0,  1.5,  0.20,  5.0,  0.35]
-  CRISIS:    [6.0,  3.0,  0.30,  8.0,  0.80]
-
-Transition Matrix A[i][j] = P(j|i):
-  RISK_ON →  [0.88, 0.10, 0.02]
-  RISK_OFF → [0.08, 0.84, 0.08]
-  CRISIS →   [0.03, 0.15, 0.82]
-
-Initial Prior: [0.55, 0.30, 0.15]
+MU = [
+  [13.5, -0.5, 0.85, 11.0, -0.05],  // RISK_ON
+  [19.0,  1.5, 1.15, 18.0,  0.25],  // RISK_OFF
+  [28.0,  5.0, 1.45, 30.0,  1.20],  // CRISIS
+]
+SIGMA = [
+  [3.0, 1.0, 0.15, 3.5, 0.20],
+  [4.0, 1.5, 0.20, 5.0, 0.35],
+  [6.0, 3.0, 0.30, 8.0, 0.80],
+]
+A (transition) = [
+  [0.88, 0.10, 0.02],
+  [0.08, 0.84, 0.08],
+  [0.03, 0.15, 0.82],
+]
+PI = [0.55, 0.30, 0.15]
 ```
 
-**Algorithm:**
-1. **Viterbi** — decodes most likely state sequence from 30 days of features
-2. **Forward Algorithm** — computes P(state | all observations) for current timestep
-3. **Drift Detection** — alerts if avg log-likelihood drops below threshold
+- **Viterbi** decodes most-likely state sequence.
+- **Forward algorithm** gives `P(state | all observations)`.
+- Needs ≥ 5 observations; otherwise defaults to `RISK_OFF` with uniform probs.
+- **Drift detection:** trailing 5-observation avg log-likelihood; if `< DRIFT_THRESHOLD = -12.0`
+  → `driftAlert: true` (recommend recalibrating MU/SIGMA).
 
-**Example:**
+**Emission log-prob (diagonal Gaussian):**
 ```
-Input: VIX=14.2, VIX5d=-0.3, PCR=0.88, RealVol=12.1, INR5d=-0.02
-→ RISK_ON (probability ~0.82)
-→ Used as input to ensemble + tier3 score
-```
-
-### 4C. AI Ensemble (3-Window GPT/LLM Inference)
-
-```
-                    ┌──────────────────────────────────────────────┐
-                    │           runMarketAgent()                    │
-                    │                                              │
-                    │  1. Fetch Tier-3 Snapshot                    │
-                    │     (PCR, VIX, A/D ratio, FII/DII, etc.)     │
-                    │                                              │
-                    │  2. Fetch OHLCV + Candle Trust               │
-                    │     checkCandleTrust() → trustScore, flags   │
-                    │                                              │
-                    │  3. Run AI Ensemble (3 parallel LLM calls)   │
-                    │     ├── 6h context  → vote (weight 0.35)     │
-                    │     ├── 24h context → vote (weight 0.40)     │
-                    │     └── 72h context → vote (weight 0.25)     │
-                    │                                              │
-                    │  4. Confidence-Weighted Vote                 │
-                    │     → BULLISH / BEARISH / NEUTRAL / UNCERTAIN│
-                    │                                              │
-                    │  5. Compute priceScore                       │
-                    │     priceScore = tier3Score×0.7 + tier1×0.3  │
-                    │                                              │
-                    │  6. Apply FlipGuard                          │
-                    │     → confirmed direction                    │
-                    │                                              │
-                    │  7. Compute Tier-3 Score (broad market)      │
-                    │     → tier3Evidence JSON                     │
-                    │                                              │
-                    │  8. Return MarketSignal                      │
-                    └──────────────────────────────────────────────┘
+logP(obs|state k) = Σ_d [ -0.5·log(2π) - log(σ) - 0.5·((obs-μ)/σ)² ]
 ```
 
-**Ensemble Vote Weights (hardcoded):**
-| Window | Weight |
-|--------|--------|
-| 6h | 0.35 |
-| 24h | 0.40 |
-| 72h | 0.25 |
+### 7.3 3-window ensemble (`ensemble.ts`)
 
-**Confidence-Weighted Vote Formula:**
+Three parallel GPT-4o calls (`temperature=0.2`, `max_tokens=300`, JSON mode) with
+distinct system prompts and context windows:
+
+| Window | Weight | Focus |
+|--------|--------|-------|
+| 6h  | 0.35 | Intraday microstructure, candle quality, options flow, breadth |
+| 24h | 0.40 | Institutional conviction: FII/DII, delivery %, OI change |
+| 72h | 0.25 | Macro structural: crude, INR, bond yields, VIX trend, geopol scenarios |
+
+**Confidence-weighted vote (`confidenceWeightedVote`):**
 ```
-weightedScore = Σ (dirScore × windowWeight × confidence) / Σ (windowWeight × confidence)
-
-where:
-  dirScore = BULLISH→+1, BEARISH→-1, NEUTRAL/UNCERTAIN→0
-  windowWeight = {6h: 0.35, 24h: 0.40, 72h: 0.25}
-
-if normalizedScore > 0.20 → BULLISH
-if normalizedScore < -0.20 → BEARISH
-if ≥2 HIGH-confidence votes disagree → UNCERTAIN
-else → NEUTRAL
+weightedScore = Σ (directionSign(call) · windowWeight · confidence)
+normalizedScore = weightedScore / Σ(windowWeight · confidence)
 ```
+where `directionSign(BULLISH)=+1, BEARISH=-1, NEUTRAL=0`.
 
-**Geopolitical Tiebreaker:** If `decayedWeight > 0.2`, adds ±0.15 to score.
+**Decision thresholds (hardcoded):**
+- `normalizedScore > 0.20` → `BULLISH`
+- `normalizedScore < -0.20` → `BEARISH`
+- Else: if ≥ 2 high-confidence (>0.5) votes disagree → `UNCERTAIN`
+- Else: if a live geopolitical signal (`decayedWeight > 0.2`, non-neutral) exists → use it
+- Else → `NEUTRAL`
 
-**CRISIS Override:** If regime=CRISIS and crisisProbability > 0.6 → forced UNCERTAIN.
+**CRISIS override:** if `regime === CRISIS` and `crisisProbability > 0.6` → `UNCERTAIN`
+regardless of votes.
 
-**LLM on AWS:** `LLM_PROVIDER=bedrock`, `LLM_MODEL_CHAT=mistral.mistral-large-2402-v1:0`
-- Ensemble code hardcodes `model: "gpt-4o"` but Bedrock ignores this and uses env var model
-- All `chatComplete()` calls route through `bedrockChat()` which uses `ConverseCommand`
+**Geopolitical tiebreak:** if `dominantChannel === "fii_risk_off"` and
+`decayedWeight > 0.3`, add `±0.15` to `normalizedScore`.
 
-### 4D. PriceScore Computation
+### 7.4 Candle trust (`candle-trust.ts`)
 
-**Formula:**
+Hardcoded rules applied to the latest OHLCV candle:
+- `volume_anomaly` if `volume > 3 × rollingAvgVolume20d` → trust `-= 0.5`
+- `low_delivery_high_move` if `|close-open|/open > 0.5%` and `deliveryPct < 20` → `-= 0.3`
+- `wash_trade_suspected` → `-= 0.4`
+- Trust floored at `0.1`.
+
+`tier1Score = +1 (close>open), -1 (close<open), 0 (|move|<0.05%)`.
+
+### 7.5 Tier-3 intraday microstructure (`tier3-signal.ts`)
+
+Self-contained rolling-buffer engine fed by `market-ticker.ts` at ~1s cadence
+(`OBSERVATION_INTERVAL_MS = 1000`). Produces a `CALL / PUT / NONE` verdict that **gates**
+the AI-derived option side in `signal-executor.ts`.
+
+**Tunables (hardcoded):**
 ```
-priceScore = (tier3Score × 0.7) + (tier1Contribution × 0.3)
-
-where:
-  tier1Contribution = candleTrust.tier1Score × candleTrust.trustScore × avgConfidence
-  avgConfidence = mean(vote.confidence for all votes)
-
-Direction thresholds:
-  priceScore > 0.20  → "up"
-  priceScore < -0.20 → "down"
-  else → fall back to ensemble majority vote
-```
-
-**Example:**
-```
-tier3Score = 0.45, tier1Score = 1 (close > open), trustScore = 0.7, avgConfidence = 0.6
-tier1Contribution = 1 × 0.7 × 0.6 = 0.42
-priceScore = (0.45 × 0.7) + (0.42 × 0.3) = 0.315 + 0.126 = 0.441 → "up"
-```
-
-### 4E. Candle Trust Filter (Tier 1)
-
-```
-checkCandleTrust(currentCandle, rollingAvgVolume20d, deliveryPct)
-```
-
-**Rules:**
-| Flag | Condition | Trust Penalty |
-|------|-----------|---------------|
-| `volume_anomaly` | Volume > 3× 20-day average | -0.5 |
-| `low_delivery_high_move` | Price moved >0.5% but delivery <20% | -0.3 |
-| `wash_trade_suspected` | (not currently triggered) | -0.4 |
-
-**Trust score:** Starts at 1.0, minimum 0.1.
-
-**Tier1 directional score:** `close > open → +1`, `close < open → -1`, `|move| < 0.05% → 0`
-
-### 4F. FlipGuard (Anti-Whipsaw)
-
-```
-applyFlipGuard(guard, newDirection)
+WINDOW_MS        = 300_000   // 5-min direction window
+IV_WINDOW_MS     = 150_000   // 2.5-min IV confirmation
+LONG_WINDOW_MS   = 600_000   // 10-min power/scale window
+BUFFER_MAX_MS    = 750_000   // ~12.5 min retention
+EMA_TAU_MS       = 150_000   // time-constant for direction EMA
+READY_FRACTION   = 0.5       // buffer must span ≥50% of WINDOW_MS
+DO_SCALE_FALLBACK = 0.02     // before percentile history warms up
+DO_SCALE_MIN_SAMPLES = 10
+THETA_D  = 0.30              // direction-strength threshold
+THETA_P_LOW  = 0.30          // power-low threshold (fade regime)
+THETA_P_HIGH = 0.55          // power-high threshold (tilt_on_power)
+K_FADE  = 0.5                // fade scaling
+TAU     = 0.08               // output deadzone
 ```
 
-**Rules:**
-1. If `newDirection === confirmedDirection` → no flip, reset pending
-2. If `confirmedDirection === "uncertain"` and new is clear → **flip immediately**
-3. If `newDirection === pendingDirection` and `pendingCount ≥ 1` → **flip confirmed** (requires 2 consecutive confirmations)
-4. If `newDirection !== pendingDirection` → set new pending, count=1
-
-**State:** Persisted in `flip_guards` table (survives restarts), cached in-memory.
-
-**Reset:** At start of each new trading day (pre-market), all flip guards reset to `uncertain`.
-
-### 4G. Tier-3 Score (Broad Market Composite)
-
+**Step 1 — Direction score D:**
 ```
-computeTier3Score(snapshot) → [-1, +1]
-```
+ret        = log(latestPrice / pastPrice)          // past = nearest(latest.t - WINDOW_MS)
+realizedVol = sqrt(Σ logRets²)                     // over window samples
+Dp         = clip(ret / realizedVol, -1, 1)
 
-**Live Signals (weight 0.85):**
-| Signal | Weight | Formula |
-|--------|--------|---------|
-| PCR | 0.30 | `clamp((1.0 - PCR) / 0.5, -1, 1)` (inverted if short covering) |
-| Advance/Decline Ratio | 0.25 | `clamp((ADR - 1.0) / 0.5, -1, 1)` |
-| India VIX 5d Change | 0.18 | `clamp(-vix5dChange / 2.0, -1, 1)` |
-| Sectoral Divergence | 0.12 | `clamp(sectorDeltaScore, -1, 1)` |
+priceWeight = tanh(3 · Dp)
+dCall = latest.callOI - past.callOI
+dPut  = latest.putOI  - past.putOI
+doRaw = ((dCall - dPut) · priceWeight) / (latest.callOI + latest.putOI)
 
-**Session Priors (weight 0.15):**
-| Signal | Weight | Formula |
-|--------|--------|---------|
-| FII Net Flow | 0.09 | `clamp(fiiNetCrore / 3000, -1, 1)` |
-| Delivery % | 0.03 | `clamp((deliveryPct - 35) / 15, -1, 1)` |
-| FII Participant OI | 0.03 | `clamp(fiiParticipantOINet / 50000, -1, 1)` |
-| Max Pain Penalty | 0.10 | `clamp(-maxPainDistancePct / 3.0, -1, 1)` (if >1.5% away) |
-| SGX Nifty Divergence | 0.08 | `clamp(sgxNiftyChangePct / 1.5, -1, 1)` (if >0.5%) |
+doScale = max(percentile(|doRaw| history, 0.90), 1e-9)   // 90th percentile scale
+Do      = clip(doRaw / doScale, -1, 1)
 
-**Final:** `clamp((liveScore + priorScore) / totalWeight, -1, 1)`
-
-**Example:**
-```
-PCR=0.83, ADR=15.3, VIX5d=-0.5, sectorDelta=0.2
-FII=-311.82 Cr, delivery=null, maxPainDist=-3.09%
-
-liveScore = clamp((1.0-0.83)/0.5, -1, 1)×0.30 + clamp((15.3-1)/0.5, -1, 1)×0.25
-           + clamp(0.5/2.0, -1, 1)×0.18 + clamp(0.2, -1, 1)×0.12
-         = 0.34×0.30 + 1.0×0.25 + 0.25×0.18 + 0.2×0.12
-         = 0.102 + 0.25 + 0.045 + 0.024 = 0.421
-
-priorScore = clamp(-311.82/3000, -1, 1)×0.09 + clamp(3.09/3.0, -1, 1)×0.10
-           = -0.104×0.09 + 1.0×0.10
-           = -0.009 + 0.10 = 0.091
-
-tier3Score = clamp((0.421 + 0.091) / 0.85, -1, 1) ≈ 0.46
+dInst = 0.4·Dp + 0.6·Do
+α     = 1 - exp(-dtMs / EMA_TAU_MS)        // time-based EMA
+D     = EMA(dInst)                          // smoothed direction
 ```
 
-### 4H. Tier-3 Intraday Microstructure Signal Engine
-
-This is the **pure math** intraday signal that acts as a gate for trades.
-
+**Step 2 — Power score P:**
 ```
-recordObservation({t, price, callOI, putOI, optionVolume, atmIV, atmGamma})
-    │
-    │  (every 5 seconds from KiteTicker WebSocket)
-    │
-    ▼
-computeIntradaySignal() → {signal: CALL|PUT|NONE, D, P, regime, signalRaw}
-```
+volNow = max(latest.volume - prev.volume, 0)
+oiNow  = |(latest.callOI + latest.putOI) - (prev.callOI + prev.putOI)|
+Pv   = min(volNow / meanVol, 2) / 2
+Poi  = min(oiNow  / meanOi,  2) / 2
+Pg   = min(latest.atmGamma / meanGamma, 2) / 2
+pRaw = 0.4·Pv + 0.4·Poi + 0.2·Pg
 
-**Buffer:** Rolling 12.5 minutes of observations (~150 samples at 5s cadence)
+deltaIvPct = latest.atmIV / ivThen - 1            // ivThen = nearest(latest.t - IV_WINDOW_MS)
+gate = 0.45 + 0.55 · clip(deltaIvPct / 0.08, 0, 1)  // IV confirmation multiplier
 
-**Direction Score (D):**
-```
-1. Price momentum:
-   ret = ln(latestPrice / pastPrice)         // log return over 5-min window
-   realizedVol = sqrt(Σ(logRets²))           // realized volatility
-   Dp = clamp(ret / realizedVol, -1, 1)      // Sharpe-like ratio
-
-2. OI positioning:
-   priceWeight = tanh(3 × Dp)                // continuous direction weighting
-   dCall = latestCallOI - pastCallOI
-   dPut  = latestPutOI  - pastPutOI
-   doRaw = ((dCall - dPut) × priceWeight) / (latestCallOI + latestPutOI)
-   doScale = 90th percentile of |doRaw| history (or 0.02 fallback)
-   Do = clamp(doRaw / doScale, -1, 1)
-
-3. Combine + EMA smooth:
-   dInst = 0.4×Dp + 0.6×Do
-   emaD = emaD + α×(dInst - emaD)           // α = 2/(30+1) ≈ 0.065
-   D = emaD
+tilt     = sign(dCall - dPut)
+disagree = tilt ≠ 0 and sign(D) ≠ 0 and tilt ≠ sign(D)
+P = pRaw · gate · (disagree ? 0.8 : 1)
 ```
 
-**Power Score (P):**
+**Step 3 — Regime switch:**
 ```
-1. Volume velocity:
-   Pv = min(volNow / meanVol, 2) / 2        // current tick volume vs 10-min avg
-
-2. OI velocity:
-   Poi = min(oiNow / meanOi, 2) / 2         // current OI change vs 10-min avg
-
-3. Gamma ratio:
-   Pg = min(latestGamma / meanGamma, 2) / 2 // current gamma vs 10-min avg
-
-4. Raw power:
-   pRaw = 0.4×Pv + 0.4×Poi + 0.2×Pg
-
-5. IV confirmation gate:
-   deltaIvPct = latestIV / pastIV - 1       // IV change over 2.5 min
-   gate = 0.45 + 0.55 × clamp(deltaIvPct / 0.08, 0, 1)
-
-6. OI-skew disagreement penalty:
-   if tilt ≠ sign(D): P = pRaw × gate × 0.8
-   else:              P = pRaw × gate
-```
-
-**Regime Switch:**
-```
-if |D| > 0.30 and P < 0.30:
-    signalRaw = -D × 0.5          // FADE: fade unsupported move
+if |D| > THETA_D and P < THETA_P_LOW:
+    signalRaw = -D · K_FADE              // fade unsupported move
     regime = "fade"
-
-elif |D| ≤ 0.30 and P > 0.55:
-    signalRaw = tilt × P           // TILT: ride positioning when power high but direction flat
+elif |D| ≤ THETA_D and P > THETA_P_HIGH:
+    signalRaw = tilt · P                 // ride positioning
     regime = "tilt_on_power"
-
 else:
-    signalRaw = D × P              // ALIGNED: direction and power agree
+    signalRaw = D · P                    // aligned
     regime = "aligned"
 ```
 
-**Deadzone:**
+**Step 4 — Deadzone output:**
 ```
-if signalRaw > 0.08  → CALL
-if signalRaw < -0.08 → PUT
-else                 → NONE
-```
-
-**Hardcoded Tunables:**
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| `WINDOW_MS` | 300,000 (5 min) | Direction window |
-| `IV_WINDOW_MS` | 150,000 (2.5 min) | IV confirmation lookback |
-| `LONG_WINDOW_MS` | 600,000 (10 min) | Power/scale window |
-| `BUFFER_MAX_MS` | 750,000 (12.5 min) | Buffer retention |
-| `EMA_SPAN` | 30 | EMA smoothing span (~150s) |
-| `READY_FRACTION` | 0.5 | Buffer must cover 50% of window |
-| `THETA_D` | 0.30 | Direction threshold for fade |
-| `THETA_P_LOW` | 0.30 | Low power threshold for fade |
-| `THETA_P_HIGH` | 0.55 | High power threshold for tilt |
-| `K_FADE` | 0.5 | Fade multiplier |
-| `TAU` | 0.08 | Deadzone threshold |
-
-### 4I. Option Chain Metrics (Kite Connect)
-
-**Data Source:** KiteTicker WebSocket → real-time LTP, OI, volume for NIFTY options
-
-**Chain Resolution:**
-- Strike interval: **50 points** (hardcoded)
-- Strike range: **±15 strikes** from ATM (30 strikes × 2 CE/PE = 60 instruments)
-- Expiry: Nearest weekly expiry (Thursday)
-- Re-resolve when spot drifts **250 points** from current ATM
-
-**Implied Volatility (Newton-Raphson):**
-```
-solveIV(marketPrice, S, K, T, r=0.065, isCall=true)
-
-Initial guess: σ = 0.20 (20%)
-Max iterations: 50
-Tolerance: 1e-4
-
-Iteration:
-  price = BSCall(S, K, σ, T, r)
-  diff = price - marketPrice
-  if |diff| < tolerance → return σ
-  d1 = (ln(S/K) + (r + 0.5σ²)T) / (σ√T)
-  vega = S√T × exp(-0.5d1²) / √(2π)
-  σ = σ - diff/vega
-  σ = clamp(σ, 0.01, 5.0)    // floor 1%, cap 500%
+signal = "CALL" if signalRaw >  TAU
+       = "PUT"  if signalRaw < -TAU
+       = "NONE" otherwise
 ```
 
-**Black-Scholes Call Price:**
+**Black-Scholes ATM gamma (`bsGamma`)** — used because NSE feed lacks gamma:
 ```
-d1 = (ln(S/K) + (r + 0.5σ²)T) / (σ√T)
-d2 = d1 - σ√T
-CallPrice = S×N(d1) - K×e^(-rT)×N(d2)
-```
-
-**Black-Scholes Gamma:**
-```
-d1 = (ln(S/K) + (r + 0.5σ²)T) / (σ√T)
-Gamma = φ(d1) / (S × σ × √T)
-
-where φ(x) = exp(-0.5x²) / √(2π)
+d1 = (ln(S/K) + (r + 0.5·σ²)·T) / (σ·√T)        with r = 0.065
+γ  = φ(d1) / (S · σ · √T)        where φ = standard normal pdf
 ```
 
-**Time to Expiry:**
-```
-T = max(msUntilThursday, 2h) / (365 × 24 × 60 × 60 × 1000)
-```
-Minimum 2 hours to avoid division-by-zero on expiry day.
+### 7.6 Tier-3 fetcher (`tier3-fetcher.ts`) — session priors + live snapshot
 
-**Risk-free rate:** `r = 0.065` (6.5%, hardcoded)
+**Session priors** (loaded once at market open, frozen all day):
+- Previous-day FII/DII net flows, delivery %, FII participant OI net, **SGX Nifty change %**.
 
-**PCR:**
+**Short-covering signal (hardcoded rules):**
 ```
-PCR = totalPutOI / totalCallOI
-```
-
-**Max Pain:**
-```
-For each strike K:
-  pain(K) = K × (CE_OI_at_K + PE_OI_at_K)
-maxPainStrike = argmin(pain(K))
+covering   : pcr > 1.0 and oiChange < 0 and vix5dChange < 0   // shorts buying back → bullish
+unwinding  : pcr < 0.9 and oiChange > 0 and vix5dChange > 0   // fresh shorts → bearish
+none       : otherwise
 ```
 
-**Example:**
+**Sector delta score:** `raw = bank·0.6 + it·0.4`, then `clamp(raw/2, -1, +1)`.
+
+**SGX Nifty prior:** if `|sgxNiftyChangePct| > 0.5`, `sgxScore = clamp(sgxPct/1.5, -1, 1)`,
+added to prior score with weight `0.08`.
+
+**PCR score inversion during short covering:** normally `pcrScore = clamp((1-pcr)/0.5, -1, 1)`
+(high PCR = bearish), but if `shortCoveringSignal === "covering"` → `pcrScore = clamp((pcr-1)/0.5, -1, 1)`
+(high PCR = bullish).
+
+### 7.7 Channel decay (`market-agent.ts`)
+
+Active transmission channels fetched from Neo4j via `TRANSMITS_TO` edges, then decayed:
 ```
-Spot = 24,268, ATM strike = 24,250
-ATM call LTP = ₹85, T = 3 days / 365 = 0.00822 years
-
-solveIV(85, 24268, 24250, 0.00822, 0.065, true)
-→ σ ≈ 0.12 (12% IV)
-
-gamma = φ(d1) / (24268 × 0.12 × √0.00822) ≈ 0.00045
+daysSinceTrigger = floor((today - triggerDate) / 1 day)
+decayFactor      = 0.5 ^ max(0, daysSinceTrigger - 1)     // half-life = 1 day
+decayedWeight    = rawWeight · decayFactor
+isActive         = decayedWeight > 0.1
 ```
+Only channels with `decayedWeight > 0.3` are shown to the GPT-4o prompts.
 
-### 4J. Base Option Signal Decision Tree
-
+**Scenario priced-in decay** (for `getActiveScenariosWithDecay`):
 ```
-deriveBaseFromInputs({aiDirection, maxPainDistancePct, putCallRatio, shortCoveringSignal, sgxNiftyChangePct, realPrice})
-```
-
-**Decision priority (first match wins):**
-
-| # | Condition | Signal | Reason |
-|---|-----------|--------|--------|
-| 1 | No maxPain AND no PCR AND no SGX | NO_TRADE | Insufficient data |
-| 2 | maxPainDist > +1.5% | BUY_PUT | Max pain stretch (price above pin) |
-| 3 | maxPainDist < -1.5% | BUY_CALL | Max pain stretch (price below pin) |
-| 4 | PCR < 0.65 | BUY_PUT | Too bullish (contrarian) |
-| 5 | PCR > 1.35 | BUY_CALL | Too bearish (contrarian) |
-| 6 | shortCovering = "covering" | BUY_CALL | Short covering active |
-| 7 | shortCovering = "unwinding" | BUY_PUT | Fresh shorts entering |
-| 8 | AI=up AND SGX < -0.8% | NO_TRADE | SGX divergence |
-| 9 | AI=down AND SGX > +0.8% | NO_TRADE | SGX divergence |
-| 10 | |maxPainDist| > 1.0% | NO_TRADE | Mild max pain conflict |
-| 11 | AI = "up" | BUY_CALL | AI bullish + tier-3 neutral |
-| 12 | AI = "down" | BUY_PUT | AI bearish + tier-3 neutral |
-| 13 | (else) | NO_TRADE | AI direction neutral |
-
-**Suggested strike:** `round(realPrice / 50) × 50` (nearest 50-point strike)
-
-### 4K. Tier-3 Gate
-
-```
-applyTier3Gate(baseSignal, intradaySignal)
+alreadyTransmitted = daysSince >= 1
+decayFactor = alreadyTransmitted ? max(0.1, 1.0 - daysSince·0.3) : 1.0
 ```
 
-| Condition | Result |
-|-----------|--------|
-| base = NO_TRADE | Return NO_TRADE (no gate needed) |
-| intraday not ready (warmup) | **Pass through** base signal |
-| intraday.signal = NONE | **Pass through** base signal |
-| intraday.signal = same side as base | **Pass through** (confirmed) |
-| intraday.signal = opposite side | **BLOCK** → NO_TRADE |
+### 7.8 PriceScore + FlipGuard (`market-agent.ts`)
 
-### 4L. Tick Evaluator (Edge-Triggered Execution)
-
+**PriceScore:**
 ```
-KiteTicker tick ──→ evaluate() (throttled 1s)
-                      │
-                      ├── computeLiveOptionSide("nifty50")
-                      │     (uses hot context + live metrics + intraday gate)
-                      │
-                      ├── if optionSide changed (edge):
-                      │     └── dispatchEntryForSide() for all users
-                      │
-                      └── for spot assets (RELIANCE, TCS, HDFCBANK):
-                          if AI direction changed:
-                            └── dispatchSpotForDirection()
+avgConfidence     = mean(vote.confidence)
+tier1Contribution = candleTrust.tier1Score · candleTrust.trustScore · avgConfidence
+priceScore        = tier3Score·0.7 + tier1Contribution·0.3
+direction         = "up" if priceScore > 0.20
+                   "down" if priceScore < -0.20
+                   else ensemble majority fallback
 ```
 
-**Key design:** Edge-triggered, not level-triggered. Only fires on **transitions** (e.g., NO_TRADE → BUY_CALL), not on every tick where signal is steady. This prevents re-entry after exits from a single signal.
+**FlipGuard** (DB-primary, in-memory read-through; survives restarts):
+- If `newDirection === confirmedDirection` → no flip, reset pending.
+- From `uncertain` → any clear direction flips **immediately**.
+- Otherwise requires **2 consecutive** readings in the new direction:
+  - 1st new direction → `pendingDirection = new, pendingCount = 1`, no emit.
+  - 2nd matching → `emitFlip = true`, confirm new direction.
+  - Different direction → reset pending to that new direction, count = 1.
 
-### 4M. Signal Executor (Order Placement)
+`flipConfirmed` is only `true` when the guard actually emits a flip.
 
+### 7.9 Snapshot persistence (`scheduler.ts`)
+
+Each cycle, for each asset:
+- If material change (direction flip, flip confirmed, `|ΔpriceScore| > 0.15`, or
+  confidence boost low→medium/high) → **insert new** `market_snapshots` row.
+- Else → **update** existing today's row and refresh `snapshotAt`.
+- `resolveAfter` = next 15:30 IST (10:00 UTC), skipping weekends.
+
+Hot-context (`hot-context.ts`) publishes slow-path inputs lock-free for the tick
+executor to read without a DB hop.
+
+---
+
+## 8. Phase 4b — Tick Evaluator (edge-triggered)
+
+**File:** `services/kite/tick-evaluator.ts`.
+
+Subscribes to the `marketTicker` EventEmitter; evaluates at most once per
+`EVAL_THROTTLE_MS = 1000` ms.
+
+**Trading hours guard (`isTradingOpen`):**
 ```
-dispatchEntryForSide(assetId, signal)
-  │
-  ├── For each user with auto-trade enabled:
-  │     ├── Check position state (can enter?)
-  │     ├── Check trade preferences (enabled, confidence threshold, intraday-only)
-  │     ├── Derive option signal (base + tier-3 gate)
-  │     ├── Build strike candidates (±10 strikes from ATM)
-  │     ├── Fetch live quotes from Kite
-  │     ├── Select best option (score = lots × delta)
-  │     ├── Place LIMIT order (1% above LTP, rounded to ₹0.05 tick)
-  │     └── Record execution in signal_executions table
-  │
-  └── Strike candidates for BUY_CALL:
-        ITM: ATM-100 (δ≈0.80), ATM-50 (δ≈0.65)
-        OTM: ATM+0 (δ≈0.50), ATM+50 (δ≈0.35), ..., ATM+500 (δ≈0.008)
-```
-
-**Option Selection Formula:**
-```
-score = lots × deltaEstimate
-  (maximize: more lots × higher delta = better)
-
-Capital: 95% of available cash (leaves buffer for Kite margin)
-Filter: ₹5 ≤ premium ≤ ₹400, lots ≥ 1, lots ≤ 20
-High capital (≥₹50k): only δ ≥ 0.50
-```
-
-**Hardcoded Values:**
-| Value | Location | Description |
-|-------|----------|-------------|
-| `65` | `signal-executor.ts:37` | NIFTY lot size |
-| `5` | `signal-executor.ts:38` | Min option premium (₹5) |
-| `400` | `signal-executor.ts:39` | Max option premium (₹400) |
-| `20` | `signal-executor.ts:40` | Max option lots |
-| `30%` | `signal-executor.ts:44` | ATM/ITM hard stop |
-| `15%` | `signal-executor.ts:45` | ATM/ITM trail gap |
-| `10%` | `signal-executor.ts:46` | ATM/ITM milestone step |
-| `15%` | `signal-executor.ts:48` | Far OTM hard stop |
-| `8%` | `signal-executor.ts:49` | Far OTM trail gap |
-| `5%` | `signal-executor.ts:50` | Far OTM milestone step |
-| `15 min` | `signal-executor.ts:51` | Far OTM time stop |
-| `0.15` | `signal-executor.ts:52` | Far OTM delta threshold |
-| `50` | `signal-executor.ts:54` | NIFTY strike interval |
-| `0.065` | `kite-option-chain.ts:298` | Risk-free rate (6.5%) |
-
-### 4N. Position Monitor (Exit Management)
-
-```
-KiteTicker tick ──→ evaluatePositions() (throttled 2s)
-                      │
-                      ├── For each open execution:
-                      │     ├── Get current LTP from tick map
-                      │     ├── Update peak price
-                      │     ├── Compute ratchet stop:
-                      │     │     profitPct = (peak - entry) / entry × 100
-                      │     │     milestoneLevel = floor(profitPct / milestoneStep) × milestoneStep
-                      │     │     if milestoneLevel = 0: stop = entry × (1 - hardStopPct/100)
-                      │     │     else: stop = milestonePrice × (1 - trailGapPct/100)
-                      │     │           stop = max(stop, entry)  // never below entry after first milestone
-                      │     │
-                      │     ├── If LTP ≤ stop: place exit order
-                      │     ├── Far OTM time stop: if 15 min elapsed and gain < 5% → exit
-                      │     └── Update SL-M order on exchange (zero-latency backstop)
-                      │
-                      └── Heartbeat every 30s (in case ticks stop)
+istMin = (utcH·60 + utcM + 330) % 1440
+istDay = (now + 330min).getUTCDay()
+closed on Saturday (6) / Sunday (0)
+open  when 555 ≤ istMin < 930      // 09:15–15:30 IST
 ```
 
-**Ratchet Example (ATM/ITM):**
+**Edge-trigger logic:**
 ```
-Entry = ₹100, peak = ₹130
-profitPct = (130-100)/100 × 100 = 30%
-milestoneLevel = floor(30/10) × 10 = 30
-milestonePrice = 100 × (1 + 30/100) = ₹130
-stopPrice = 130 × (1 - 15/100) = ₹110.50
-→ Stop never below ₹100 (entry) after first milestone
+optionSide = computeLiveOptionSide("nifty50").signal
+if optionSide !== lastOptionSide:
+    lastOptionSide = optionSide
+    if optionSide in {BUY_CALL, BUY_PUT}:
+        dispatchEntryForSide("nifty50", optionSide)
+```
+Same pattern for spot equities (`reliance`, `tcs`, `hdfc-bank`) on AI direction change.
+
+**Reconciliation:** every `RECONCILE_INTERVAL_MS = 10_000` ms, syncs the in-memory
+state machine with the DB (catches missed transitions, manual exits, etc.).
+
+---
+
+## 9. Phase 4c — Signal Executor
+
+**File:** `services/kite/signal-executor.ts` (~1092 lines).
+
+### 9.1 Asset → Kite symbol map (hardcoded)
+
+```
+nifty50   → NIFTY 50 (NSE)
+sensex    → SENSEX (BSE)
+reliance  → RELIANCE (NSE)
+tcs       → TCS (NSE)
+hdfc-bank → HDFCBANK (NSE)
 ```
 
-**Exit Reasons:**
-| Reason | Description |
-|--------|-------------|
-| `trailing_stop` | LTP hit ratcheted trailing stop |
-| `time_stop` | Far OTM: 15 min elapsed without +5% gain |
-| `manual` | User manually closed position |
-| `order_rejected` | Kite rejected the entry order |
-
-### 4O. Tier-3 Refresh Timer (5s Fast Path)
+### 9.2 Option trading constants (hardcoded)
 
 ```
-Every 5 seconds (during market hours):
-  ├── Every 6th tick (30s): fetchTier3Snapshot() from Firecrawl
-  │     (VIX, A/D ratio, sector deltas, FII/DII)
-  │
-  ├── Read latest chain metrics from KiteTicker (in-memory)
-  ├── Compute intraday signal
-  ├── Fetch live prices from Yahoo Finance for all 7 assets
-  └── Update market_snapshots with fresh tier3Evidence + price
+NIFTY_LOT_SIZE             = 65
+MIN_OPTION_PREMIUM         = 5        // ₹
+MAX_OPTION_PREMIUM         = 400      // ₹
+MAX_OPTION_LOTS            = 20
+NIFTY_STRIKE_INTERVAL      = 50
+
+// Standard options
+OPTION_HARD_STOP_PCT       = 30
+OPTION_TRAIL_GAP_PCT       = 15
+OPTION_MILESTONE_STEP      = 10
+
+// Far-OTM options (delta < 0.15)
+FAR_OTM_HARD_STOP_PCT      = 15
+FAR_OTM_TRAIL_GAP_PCT      = 8
+FAR_OTM_MILESTONE_STEP     = 5
+FAR_OTM_TIME_STOP_MS       = 15·60·1000   // 15-min time stop
+FAR_OTM_DELTA_THRESHOLD    = 0.15
+FAR_OTM_MIN_GAIN_PCT       = 5            // must reach +5% within time window
+```
+
+### 9.3 Hysteresis bands (hardcoded)
+
+Prevents oscillation around trigger thresholds. Trigger fires the signal; release
+clears it (only at a safer opposite-side value).
+
+```
+MAX_PAIN_TRIGGER   = 1.5    MAX_PAIN_RELEASE   = 1.2     // |dist| % from max pain
+PCR_LOW_TRIGGER    = 0.65   PCR_LOW_RELEASE    = 0.75    // bullish low PCR
+PCR_HIGH_TRIGGER   = 1.35   PCR_HIGH_RELEASE   = 1.25    // bearish high PCR
+MILD_CONFLICT_TRIGGER = 1.0 MILD_CONFLICT_RELEASE = 0.8
+```
+
+**Example:** PCR falling — at 0.65 the `BUY_CALL` (bullish) signal triggers; it stays
+active until PCR rises back above `0.75` (release), preventing flicker between 0.64–0.66.
+
+### 9.4 Option signal derivation (`deriveBaseFromInputs`)
+
+1. **Max pain:** `dist = (spot - maxPainStrike) / spot · 100`.
+   - `dist > MAX_PAIN_TRIGGER` → `BUY_PUT` (price too high, expect pull toward pain).
+   - `dist < -MAX_PAIN_TRIGGER` → `BUY_CALL`.
+   - `|dist| < MAX_PAIN_RELEASE` → clear max-pain signal.
+2. **PCR low:** PCR < `PCR_LOW_TRIGGER` → `BUY_CALL`; release at `PCR_LOW_RELEASE`.
+3. **PCR high:** PCR > `PCR_HIGH_TRIGGER` → `BUY_PUT`; release at `PCR_HIGH_RELEASE`.
+4. **Mild conflict gate:** when AI direction and microstructure disagree at
+   `MILD_CONFLICT_TRIGGER`, suppress; release at `MILD_CONFLICT_RELEASE`.
+5. **Tier-3 gate:** the intraday microstructure verdict (`CALL/PUT/NONE` from
+   `tier3-signal.ts`) must agree with the AI-derived side, else `NO_TRADE`.
+6. **AI direction fallback:** if no microstructure override, use the ensemble's
+   `up`/`down` direction → `BUY_CALL` / `BUY_PUT`; `neutral` → `NO_TRADE`.
+
+### 9.5 Strike candidate building
+
+```
+atmStrike  = round(spot / NIFTY_STRIKE_INTERVAL) · NIFTY_STRIKE_INTERVAL
+candidates = [atmStrike ± k·NIFTY_STRIKE_INTERVAL  for k in 0..STRIKE_RANGE]
+```
+Filtered by `MIN_OPTION_PREMIUM ≤ premium ≤ MAX_OPTION_PREMIUM` and capital affordability.
+
+### 9.6 Spot equity quantity formula
+
+```
+maxRiskAmount  = capital · riskPct            // per-user risk budget
+riskPerUnit    = realPrice · stopLossPct
+quantity       = floor(maxRiskAmount / riskPerUnit)
+```
+
+### 9.7 Execution flow
+
+1. Check user auto-trade preferences + capital + risk limits.
+2. Build strike candidates, fetch quotes (from live tick map first, fallback to
+   Kite REST `getQuote`).
+3. `selectBestOption` by affordability + moneyness.
+4. Place order via Kite API (`placeOrder`).
+5. Persist to `signal_executions` via the audit queue with `status = 'pending_entry'`.
+6. Register the entry with the **fill tracker** (`entry-tracker.ts`) — see §9.8.
+7. Track the held symbol in `market-ticker` for tick-driven exits.
+
+Trades are dispatched to **all eligible users** on a signal transition, with
+concurrency-safe dispatching to prevent re-entry churn.
+
+### 9.8 Fill-confirmed entry (`entry-tracker.ts`)
+
+An accepted order is not a filled order. An unfilled/partial LIMIT entry that was treated
+as `open` would leave the monitor trailing a phantom, and its exchange SL — if it fired —
+would open a **naked short** option. So the state machine gates OPEN on an actual fill:
+
+```
+PENDING_ENTRY ──(order COMPLETE / partial fill)──▶ OPEN   (row → 'open', entryPrice = fill avg, qty = filled)
+      │
+      └──(REJECTED / CANCELLED / no fill in ENTRY_FILL_TIMEOUT_MS)──▶ FLAT   (order cancelled, row → 'cancelled')
+```
+
+- The position monitor only manages `status = 'open'` rows, so a `pending_entry` is never
+  trailed and gets no SL backstop.
+- Fills are confirmed by, whichever is first: **(1)** the Kite **order postback** —
+  delivered on the KiteTicker WebSocket already held and re-emitted as `order_update` on
+  the shared bus (sub-second); **(2)** a short **poll** of `getOrderHistory` as a backstop
+  for accounts whose postbacks don't route to the global ticker connection.
+- `ENTRY_FILL_TIMEOUT_MS` (default 20 s, env-overridable): an entry that never fills is
+  cancelled and returns to FLAT (no cooldown → a later edge can retry). A partial fill at
+  timeout is **promoted** to OPEN with the filled quantity, not cancelled.
+- Restart-safe: `reconcilePendingEntries()` (run from the tick evaluator's 10 s reconcile)
+  re-adopts orphaned `pending_entry` rows and resolves them the same way.
+
+---
+
+## 10. Phase 4d — Position Monitor (tick-driven exits)
+
+**File:** `services/kite/position-monitor.ts`.
+
+Runs on every tick + a safety heartbeat every `SAFETY_INTERVAL_MS = 30_000` ms
+(in case ticks stall).
+
+### 10.1 Ratchet trailing stop (`computeRatchetStop`)
+
+```
+profitPct = direction=="up"
+          ? (peak - entry)/entry · 100
+          : (entry - peak)/entry · 100
+
+milestoneLevel = max(0, floor(profitPct / milestoneStep) · milestoneStep)
+
+if milestoneLevel == 0:                              // no profit yet → hard stop
+    stopPrice = up   ? entry·(1 - hardStopPct/100)
+                     : entry·(1 + hardStopPct/100)
+else:                                                // lock in milestone
+    milestonePrice = up   ? entry·(1 + milestoneLevel/100)
+                          : entry·(1 - milestoneLevel/100)
+    stopPrice      = up   ? milestonePrice·(1 - trailGapPct/100)
+                          : milestonePrice·(1 + trailGapPct/100)
+    stopPrice      = up   ? max(stopPrice, entry)    // never below entry once profitable
+                          : min(stopPrice, entry)
+```
+
+**Example (BUY_CALL, entry=₹100, peak=₹125, milestoneStep=10, trailGap=15, hardStop=30):**
+```
+profitPct       = (125-100)/100·100 = 25%
+milestoneLevel  = floor(25/10)·10   = 20
+milestonePrice  = 100·1.20          = 120
+stopPrice       = 120·(1-0.15)      = 102   (≥ entry ✓)
+```
+So a 25% gain locks a stop at ₹102 (2% profit floor). If price drops to ₹102, exit.
+
+### 10.2 Exchange-side SL (stop-loss limit) backstop
+
+A stop-loss **limit (SL)** order — *not* SL-M — is placed directly on Kite once a fill is
+confirmed, at the current ratchet stop price, and its trigger is trailed UP as milestones
+step (trigger and limit modified together, never lowered). It rests at the exchange and
+fires natively if ticks stall or the process dies.
+
+- **Why SL, not SL-M:** NSE discontinued SL-M for options in Sept 2021 and Kite rejects
+  SL-M for index options — an SL-M backstop would be rejected on every placement, so the
+  "exchange-side backstop" would never actually exist. The SL's limit price is set
+  `SL_LIMIT_OFFSET_PCT` (default 4 %) **below** the trigger so it stays marketable and
+  fills the moment it triggers (a stop that only fills at the trigger can be skipped past
+  in a fast move).
+- **No cancel-then-exit race:** when the in-process monitor must exit (time stop, or a
+  price breach with no resting SL) it does **not** cancel the SL first (which would leave
+  the position unprotected between the cancel and the exit fill). Instead `escalateExit`:
+  - **converts the resting SL into the exit in place** — modifies its trigger to just
+    below LTP + a tighter limit, so the *same* exchange order becomes an aggressive exit
+    (one order, no gap, no double-sell); or
+  - if an exit is already working, **re-prices it lower** via modify; or
+  - if no order rests (SL placement had failed), **places a fresh LIMIT exit**.
+  A modify failure returns and lets the next tick re-evaluate against fresh position
+  quantity rather than stacking a second sell (avoids oversell).
+
+### 10.3 Far-OTM time stop
+
+For options with `delta < FAR_OTM_DELTA_THRESHOLD (0.15)`:
+- Hard stop `15%`, trail gap `8%`, milestone `5%`.
+- **Time stop:** if not gained `≥ FAR_OTM_MIN_GAIN_PCT (5%)` within
+  `FAR_OTM_TIME_STOP_MS (15 min)` → exit.
+
+### 10.4 Mutable exit state
+
+`peakPrice`, `milestoneLevel`, `stopPrice`, `slOrderId`, `slTrigger`, `slLimit`,
+`exitOrderId`, `timeStopDeadline` are persisted to `signal_executions` (in `notes`) on
+each tick batch so a restart resumes exactly where it left off.
+
+---
+
+## 11. Phase 5 — Resolution & Feedback Loop
+
+**Files:** `services/resolution/resolution-watcher.ts`, `brier-score.ts`,
+`forensics.ts`, `services/reasoning/self-calibration.ts`.
+
+Runs every **6 hours**.
+
+### 11.1 Resolution watchers (run in parallel per expired prediction)
+
+| Watcher | Source | Trigger |
+|---------|--------|---------|
+| OFAC | `treasury.gov/ofac/downloads/sdn.xml` (6h cache) | Actor name appears in SDN list |
+| ACLED | `api.acleddata.com/acled/read` (needs `ACLED_API_KEY` + `ACLED_EMAIL`) | Conflict events in country since `resolveAfter` |
+| UN News | `news.un.org/feed/.../rss.xml` | Actor name in recent UN titles |
+| NSE price | Yahoo `^NSEI` 2d close | `|pctChange| ≥ 2.0%` |
+| GPT-4o fallback | — | Determines `materialisedIndex` from scenarios + events + watcher signals |
+
+### 11.2 UNCERTAIN retrospective scoring
+
+For `market_snapshots` with `uncertaintyFlag = true`:
+```
+isCorrect = |priceChangePct| > 1.0      // significant move = uncertainty was warranted
+```
+
+### 11.3 Auto-mark
+
+Predictions older than `AUTO_MARK_DAYS = 60` with no resolution →
+`resolutionStatus = "outcome_unverifiable"`.
+
+### 11.4 Forensics post-mortem (`forensics.ts`)
+
+If outcome confidence ≠ "low": runs a forensics agent that compares the Devil's
+Advocate critique to the actual outcome, producing:
+- `devilWasRight` (boolean)
+- `missedChannel` (which transmission channel was overlooked)
+- `lessonsLearned` (JSON bullet list)
+
+These lessons are injected into the **next** reasoning pipeline run for the same
+story via `getFeedbackLessons()`.
+
+### 11.5 Feedback closed loop
+
+```
+resolution → brierScore → self-calibration (daily)
+          → confidence_penalty if rolling brier > 0.22
+          → forecaster system prompt on next run
+          → better calibrated probabilities
+          → re-resolved → brier → …
 ```
 
 ---
 
-## Phase 5: Resolution & Self-Calibration
+## 12. Market Data Feed — KiteTicker (`services/kite/market-ticker.ts`)
 
-### Resolution Watcher
-- Runs every 6 hours
-- Checks `prediction_v2` entries where `resolveAfter < now` and `resolutionStatus = pending`
-- Fetches actual price data for the prediction's asset and timeframe
-- Marks prediction as correct/incorrect based on whether the predicted direction matched
-- Computes Brier score contribution
+Single WebSocket connection replacing the 5-second REST poll.
 
-### Market Resolution Scheduler
-- Runs at 15:30 IST (market close)
-- Resolves all `market_snapshots` for the day
-- Compares `predictedDirection` vs actual price change (`realPriceAtSnapshot` vs close price)
-- Records `is_correct`, `price_change_pct`, `resolution_direction`
+**Subscriptions:**
+- NIFTY 50 spot token (`NIFTY_SPOT_TOKEN`) — full mode.
+- ATM-centred ±strike range option tokens (full mode for OI + volume).
+- Spot equity tokens (RELIANCE/TCS/HDFCBANK/SENSEX) — env-overridable:
+  ```
+  KITE_RELIANCE_TOKEN  = 779521
+  KITE_TCS_TOKEN       = 2953217
+  KITE_HDFCBANK_TOKEN  = 857857
+  KITE_SENSEX_TOKEN    = 265
+  ```
+- Held-position instruments (dynamically via `trackHeldSymbol`).
 
-### Self-Calibration
-- Runs daily
-- Computes rolling Brier score per transmission channel
-- If Brier > 0.22, injects calibration penalty into future forecaster agent calls
-- Tracks which channels are over/underconfident
+**Chain re-resolve:** when spot drifts `RESOLVE_DRIFT_PTS = 250` from current ATM
+(5 strikes), re-resolves the chain, re-subscribes, and **resets the tier-3 buffer**
+(cross-boundary OI deltas would be garbage for ~5 min).
 
----
+**Stale equity fallback:** `SPOT_EQUITY_STALE_MS = 30_000` → fall back to Yahoo if
+no tick in 30s.
 
-## Infrastructure
-
-### Docker Services
-| Service | Image | Port | Purpose |
-|---------|-------|------|---------|
-| postgres | postgres:16 | 5432 | Primary database |
-| neo4j | neo4j:5 | 7687 | Knowledge graph |
-| chromadb | chromadb/chroma | 8000 | Vector embeddings |
-| api-server | gnm/api-server | 3000 | Backend (Node.js) |
-| frontend | gnm/frontend | 80 | React/Vite SPA |
-| caddy | caddy:2-alpine | 80/443 | Reverse proxy + TLS |
-
-### LLM Provider Configuration (AWS)
-| Setting | Value |
-|---------|-------|
-| `LLM_PROVIDER` | `bedrock` |
-| `LLM_MODEL_CHAT` | `mistral.mistral-large-2402-v1:0` |
-| `LLM_MODEL_FAST` | `amazon.nova-lite-v1:0` |
-| `LLM_MODEL_EMBED` | `amazon.titan-embed-text-v2:0` |
-| Bedrock retries | 10 (SDK) + 6 (manual backoff, up to 32s) |
-| Anthropic key | Also set (fallback/other tasks) |
-
-### Kite Connect Configuration
-| Setting | Value |
-|---------|-------|
-| API timeout | 7000ms |
-| WebSocket | KiteTicker (full mode for OI + volume) |
-| Spot token | 256265 (NIFTY 50) |
-| Strike interval | 50 |
-| Strike range | ±15 (30 strikes) |
-| Instrument cache | 6 hours |
-| Observation interval | 5 seconds |
-| Chain re-resolve | When spot drifts 250 points |
-| Token refresh | Every 6 hours |
+**Reconnect:** `reconnect: true, max_retry: 10, max_delay: 60`.
 
 ---
 
-## Complete Signal-to-Trade Flow (End-to-End)
+## 13. Database & Storage
 
-```
-  ┌─────────────────────────────────────────────────────────────────────────┐
-  │                        SLOW PATH (5 min cycle)                          │
-  │                                                                         │
-  │  Yahoo Finance ──→ OHLCV ──→ Candle Trust ──┐                          │
-  │                                              │                          │
-  │  Firecrawl ──→ NSE Scraper ──→ Tier-3 ──┐   │                          │
-  │  (VIX, ADR, FII/DII, sectors)            │   │                          │
-  │                                          ▼   ▼                          │
-  │  HMM Regime ──→ runMarketAgent() ──→ AI Ensemble (3 LLM calls)         │
-  │  (RISK_ON/                                 │                           │
-  │   RISK_OFF/                                ▼                           │
-  │   CRISIS)                         Confidence-Weighted Vote              │
-  │                                          │                           │
-  │                                          ▼                           │
-  │                                  computePriceScore()                   │
-  │                                  (tier3×0.7 + tier1×0.3)               │
-  │                                          │                           │
-  │                                          ▼                           │
-  │                                    FlipGuard                            │
-  │                                  (anti-whipsaw)                        │
-  │                                          │                           │
-  │                                          ▼                           │
-  │                                  MarketSignal                          │
-  │                                  → market_snapshots table              │
-  │                                  → hot context (in-memory)             │
-  └─────────────────────────────────────────────────────────────────────────┘
-
-  ┌─────────────────────────────────────────────────────────────────────────┐
-  │                        FAST PATH (5s tick)                              │
-  │                                                                         │
-  │  KiteTicker WebSocket                                                   │
-  │  ├── NIFTY spot + 60 option instruments                                 │
-  │  │                                                                      │
-  │  │   ┌──────────────────────────────────────────────────────┐          │
-  │  │   │  computeChainMetrics()  (every tick)                  │          │
-  │  │   │  → PCR, maxPain, IV, gamma                            │          │
-  │  │   └──────────────────┬───────────────────────────────────┘          │
-  │  │                      │                                              │
-  │  │                      ▼                                              │
-  │  │   ┌──────────────────────────────────────────────────────┐          │
-  │  │   │  recordObservation()  (every 5s)                      │          │
-  │  │   │  → tier3-signal buffer                                 │          │
-  │  │   └──────────────────┬───────────────────────────────────┘          │
-  │  │                      │                                              │
-  │  │                      ▼                                              │
-  │  │   ┌──────────────────────────────────────────────────────┐          │
-  │  │   │  computeIntradaySignal()  (every 5s)                  │          │
-  │  │   │  → D, P, regime, signal (CALL/PUT/NONE)               │          │
-  │  │   └──────────────────┬───────────────────────────────────┘          │
-  │  │                      │                                              │
-  │  │                      ▼                                              │
-  │  │   ┌──────────────────────────────────────────────────────┐          │
-  │  │   │  Tick Evaluator  (throttled 1s)                       │          │
-  │  │   │                                                       │          │
-  │  │   │  computeLiveOptionSide() =                            │          │
-  │  │   │    deriveBaseFromInputs(hot context + live metrics)   │          │
-  │  │   │    + applyTier3Gate(intraday signal)                  │          │
-  │  │   │                                                       │          │
-  │  │   │  If side CHANGED (edge-triggered):                    │          │
-  │  │   │    → dispatchEntryForSide()                           │          │
-  │  │   │       → for each user:                                │          │
-  │  │   │          → strike selection + quote fetch + order     │          │
-  │  │   └──────────────────┬───────────────────────────────────┘          │
-  │  │                      │                                              │
-  │  │                      ▼                                              │
-  │  │   ┌──────────────────────────────────────────────────────┐          │
-  │  │   │  Position Monitor  (throttled 2s)                     │          │
-  │  │   │                                                       │          │
-  │  │   │  For each open position:                               │          │
-  │  │   │    → Update peak price                                 │          │
-  │  │   │    → Compute ratchet trailing stop                     │          │
-  │  │   │    → If LTP ≤ stop: place exit order                   │          │
-  │  │   │    → Far OTM time stop (15 min, +5% required)          │          │
-  │  │   │    → Update exchange-side SL-M order                   │          │
-  │  │   └──────────────────────────────────────────────────────┘          │
-  │  └──────────────────────────────────────────────────────────────────────┘
-  └─────────────────────────────────────────────────────────────────────────┘
-```
+| Store | Tech | Purpose |
+|-------|------|---------|
+| PostgreSQL | Drizzle ORM | `raw_articles`, `extracted_events`, `prediction_v2`, `market_snapshots`, `market_regimes`, `flip_guards`, `signal_executions`, `story_centroids`, `article_corroborations`, `extraction_errors` |
+| Neo4j | Cypher | `Story`, `Event`, `Country`, `Leader`, `TransmissionChannel` + relationships |
+| ChromaDB | vector store | Article embeddings (semantic search / dedup) |
 
 ---
 
-## Database Schema (Key Tables)
+## 14. External Integrations
 
-| Table | Purpose |
-|-------|---------|
-| `raw_articles` | Ingested news articles with embeddings |
-| `feed_registry` | RSS feed sources with credibility tiers |
-| `events` | CAMEO-coded events extracted from articles |
-| `prediction_v2` | 4-agent reasoning pipeline output |
-| `market_regimes` | HMM regime detection results |
-| `market_snapshots` | Per-asset AI predictions with tier3 evidence |
-| `flip_guards` | Anti-whipsaw state per asset |
-| `signal_executions` | Trade execution records |
-| `broker_accounts` | Kite Connect broker accounts |
-| `broker_orders` | Placed orders |
-| `broker_positions` | Current positions |
-| `user_trade_preferences` | Per-user per-asset auto-trade settings |
-
----
-
-## All Hardcoded Values Summary
-
-| Value | File | Description |
-|-------|------|-------------|
-| `0.065` | `kite-option-chain.ts` | Risk-free rate (r) for Black-Scholes |
-| `50` | `kite-option-chain.ts` | NIFTY strike interval |
-| `15` | `kite-option-chain.ts` | Strike range (±15 from ATM) |
-| `256265` | `kite-option-chain.ts` | NIFTY 50 spot instrument token |
-| `0.20` | `kite-option-chain.ts` | IV solver initial guess (20%) |
-| `50` | `solveIV` | Max Newton-Raphson iterations |
-| `1e-4` | `solveIV` | IV solver tolerance |
-| `0.01, 5.0` | `solveIV` | IV floor (1%) and cap (500%) |
-| `65` | `signal-executor.ts` | NIFTY lot size |
-| `5, 400` | `signal-executor.ts` | Min/max option premium |
-| `20` | `signal-executor.ts` | Max option lots |
-| `30%, 15%, 10%` | `signal-executor.ts` | ATM/ITM stop/trail/milestone |
-| `15%, 8%, 5%` | `signal-executor.ts` | Far OTM stop/trail/milestone |
-| `15 min` | `signal-executor.ts` | Far OTM time stop |
-| `0.15` | `signal-executor.ts` | Far OTM delta threshold |
-| `5%` | `signal-executor.ts` | Far OTM min gain within time stop |
-| `0.08` | `tier3-signal.ts` | Deadzone (TAU) |
-| `0.30` | `tier3-signal.ts` | THETA_D (direction threshold for fade) |
-| `0.30, 0.55` | `tier3-signal.ts` | THETA_P_LOW, THETA_P_HIGH |
-| `0.5` | `tier3-signal.ts` | K_FADE (fade multiplier) |
-| `300s, 150s, 600s` | `tier3-signal.ts` | Window sizes (direction, IV, long) |
-| `30` | `tier3-signal.ts` | EMA span |
-| `0.35, 0.40, 0.25` | `ensemble.ts` | Ensemble window weights (6h, 24h, 72h) |
-| `0.20` | `market-agent.ts` | priceScore direction threshold |
-| `0.7, 0.3` | `market-agent.ts` | priceScore weights (tier3, tier1) |
-| `1.5%, 1.0%` | `signal-executor.ts` | Max pain stretch thresholds |
-| `0.65, 1.35` | `signal-executor.ts` | PCR extreme thresholds |
-| `0.8%` | `signal-executor.ts` | SGX divergence threshold |
-| `50000` | `signal-executor.ts` | High capital threshold (₹50k) |
-| `95%` | `signal-executor.ts` | Capital deployment (leaves 5% buffer) |
-| `1%` | `signal-executor.ts` | LIMIT order price buffer above LTP |
-| `₹0.05` | `signal-executor.ts` | Tick size for price rounding |
-| `2s, 30s` | `position-monitor.ts` | Eval throttle, safety heartbeat |
-| `1s, 10s` | `tick-evaluator.ts` | Eval throttle, reconcile interval |
-| `5s` | `market-ticker.ts` | Observation interval for tier3 buffer |
-| `250` | `market-ticker.ts` | Chain re-resolve drift (points) |
-| `6h` | `kite-option-chain.ts` | Instrument list cache TTL |
-| `2 min` | `scheduler.ts` | First run delay after startup |
-| `5, 15, 60 min` | `scheduler.ts` | Cadence (open, pre/post, off-hours) |
-| `0.88, 0.10, 0.02` | `hmm-regime.ts` | RISK_ON transition probabilities |
-| `0.08, 0.84, 0.08` | `hmm-regime.ts` | RISK_OFF transition probabilities |
-| `0.03, 0.15, 0.82` | `hmm-regime.ts` | CRISIS transition probabilities |
-| `0.55, 0.30, 0.15` | `hmm-regime.ts` | Initial state prior |
-| `0.22` | `self-calibration.ts` | Brier score penalty threshold |
-| `5h` | `pipeline.ts` | Skip reasoning if recent prediction exists |
+| Service | Use |
+|---------|-----|
+| OpenAI GPT-4o | Event extraction, story labelling, 4-agent reasoning, ensemble inference, outcome determination, drift description |
+| OpenAI GPT-4o-mini (`chatCompleteFast`) | Fast event extraction |
+| OpenAI embeddings | Semantic dedup + narrative drift centroids |
+| Zerodha Kite | Order placement, quote fetch, OAuth token refresh |
+| KiteTicker | Real-time WebSocket market data |
+| Yahoo Finance | OHLCV, SGX Nifty, VIX, fallback spot prices |
+| NSE direct scraper | Option chain, FII/DII, delivery %, participant OI |
+| Firecrawl | NSE/SGX scraping fallback |
+| GDELT | Pre-coded CAMEO events |
+| OFAC SDN XML | Sanctions resolution watcher |
+| ACLED API | Conflict events resolution watcher |
+| UN News RSS | UN statement resolution watcher |
 
 ---
 
-## Startup Sequence
+## 15. Key Decision Points Summary
 
-```
-index.ts → app.listen(port)
-  │
-  ├── startIngestionScheduler()          // Phase 1: RSS + GDELT news ingestion
-  ├── startGraphScheduler()              // Phase 2: Neo4j graph building
-  ├── startReasoningScheduler()          // Phase 3: 4-agent pipeline
-  ├── startMarketScheduler()             // Phase 4: HMM + ensemble + snapshots
-  │    ├── First cycle after 2 min delay
-  │    └── startTier3RefreshTimer()      // 5s fast-path refresh
-  ├── startMarketTicker()                // KiteTicker WebSocket connection
-  ├── startMarketSignalScheduler()       // 09:00 IST daily signal snapshot
-  ├── startMarketResolutionScheduler()   // 15:30 IST daily resolution
-  ├── startResolutionScheduler()         // Every 6h: resolve predictions
-  ├── startSelfCalibrationScheduler()    // Daily: Brier score calibration
-  ├── startMarketCloseSummaryScheduler() // 15:30 IST: push notifications
-  ├── startChannelRecalibrationScheduler() // Quarterly: Pearson recalibration
-  ├── startTickEvaluator()               // Edge-triggered auto-trade executor
-  ├── startPositionMonitor()             // Tick-driven exit management
-  └── startTokenRefreshScheduler()       // Every 6h: refresh Kite tokens
-```
+| Decision | Mechanism | Location |
+|----------|-----------|----------|
+| Is this article a duplicate? | Cosine sim ≥ 0.88 | `semantic-dedup.ts` |
+| Is this event real? | `requires_corroboration` + state-media rule | `event-extractor.ts` |
+| Do these events form a story? | Louvain + Jaccard ≥ 0.60 | `story-emergence.ts` |
+| Has the story drifted? | Cosine centroid distance > 0.25 over 4 weeks | `narrative-drift.ts` |
+| What regime are we in? | 3-state Gaussian HMM (Viterbi + Forward) | `hmm-regime.ts` |
+| Bullish or bearish? | Confidence-weighted 3-window ensemble, ±0.20 | `ensemble.ts` |
+| Is the candle trustworthy? | Volume/delivery flags, trust 0.1–1.0 | `candle-trust.ts` |
+| Intraday microstructure? | D/P regime-switch, deadzone 0.08 | `tier3-signal.ts` |
+| Should we flip direction? | FlipGuard: 2-consecutive confirmation | `market-agent.ts` |
+| Should we trade now? | Edge-triggered on signal transition + Tier-3 gate | `tick-evaluator.ts` / `signal-executor.ts` |
+| Which option strike? | ATM ± k·50, premium/capital filter | `signal-executor.ts` |
+| Did the entry actually fill? | Order postback / poll → PENDING_ENTRY→OPEN, else timeout→FLAT | `entry-tracker.ts` |
+| When to exit? | Ratchet trailing stop + exchange SL (limit) + time stop | `position-monitor.ts` |
+| Was the prediction right? | Brier score + 5 watchers + GPT-4o fallback | `resolution-watcher.ts` |
+| Should we trust this story type? | Rolling 10-pred Brier > 0.22 → penalty 0.20 | `self-calibration.ts` |
+| Are channel weights still valid? | Quarterly Pearson recalibration | `channel-recalibration.ts` |
 
-**Kill switch:** `DISABLE_BG_SCHEDULERS=true` → boots HTTP server only, skips all schedulers.
+---
+
+## 16. Timing Reference (all hardcoded)
+
+| Interval | Value | Where |
+|----------|-------|-------|
+| Ingestion cycle | (per scheduler) | `ingestion/scheduler.ts` |
+| Reasoning pipeline dedup | 5 h | `pipeline.ts` |
+| Market scheduler — open | 5 min | `market/scheduler.ts` |
+| Market scheduler — pre/post | 15 min | `market/scheduler.ts` |
+| Market scheduler — off-hours | 60 min | `market/scheduler.ts` |
+| Tick evaluation throttle | 1 s | `tick-evaluator.ts` |
+| Position reconciliation | 10 s | `tick-evaluator.ts` |
+| Entry fill timeout | 20 s (`ENTRY_FILL_TIMEOUT_MS`) | `entry-tracker.ts` |
+| Position safety heartbeat | 30 s | `position-monitor.ts` |
+| KiteTicker observation feed | 1 s | `market-ticker.ts` |
+| Chain re-resolve drift | 250 pts | `market-ticker.ts` |
+| Spot equity stale | 30 s | `market-ticker.ts` |
+| Resolution cycle | 6 h | `resolution-watcher.ts` |
+| Self-calibration | 24 h | `self-calibration.ts` |
+| Channel recalibration | 90 d | `channel-recalibration.ts` |
+| Narrative drift | weekly | `narrative-drift.ts` |
+| Auto-mark unverifiable | 60 d | `resolution-watcher.ts` |
+| Worker health report | 60 s | `worker.ts` |
+| First-run delays | 2 / 10 / 15 min | various |
+
+---
+
+_End of blueprint._

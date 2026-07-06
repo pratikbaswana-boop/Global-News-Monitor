@@ -15,7 +15,10 @@ export function getDriver(): Driver {
   }
 
   _driver = neo4j.driver(uri, neo4j.auth.basic(user, password), {
-    maxConnectionPoolSize: 15,
+    // Each thread (main + worker) gets its own driver. Size down from 15 to 8
+    // per thread (16 total) to stay within Neo4j max connection limits.
+    // Override via NEO4J_MAX_POOL env var if your Neo4j allows more.
+    maxConnectionPoolSize: parseInt(process.env["NEO4J_MAX_POOL"] ?? "8", 10),
     connectionAcquisitionTimeout: 10_000,
   });
   return _driver;

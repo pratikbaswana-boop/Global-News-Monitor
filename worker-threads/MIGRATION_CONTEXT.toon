@@ -1,0 +1,81 @@
+migration:
+  title: Worker-thread isolation of Phase 1-3 (and 5) CPU-bound background jobs (Follow-up #1)
+  goal: Stop CPU-bound background jobs (Louvain clustering, embedding/cosine dedup, GDELT batch parsing, large JSON parses in the 4-agent pipeline) from blocking the Node event loop that the tick evaluator and position monitor run on. Move Phases 1-3 + 5 + notifications off the main thread into a worker_threads worker.
+  endState: Main thread runs ONLY latency-critical + in-process-coupled work (HTTP server, KiteTicker feed, Tier-3 signal engine + tick evaluator + executor, position monitor + write-behind audit drainer, Phase 4 market scheduler, token refresh). A single worker thread runs Phase 1 (ingestion), Phase 2 (knowledge graph incl. Louvain), Phase 3 (4-agent reasoning), Phase 5 (resolution + self-calibration), and notifications. Worker shares NO in-memory state with the trading engine - the two sides meet only at Postgres/Neo4j/Chroma. Worker crash does not take down the API; worker respawns with backoff. DISABLE_BG_SCHEDULERS=true means do not spawn the worker at all.
+  reason: A story-emergence job (Louvain) / dedup cycle / GDELT parse can freeze the stop-loss (tick evaluator) evaluation for hundreds of ms on the main event loop. Exit latency is where this costs real money. The existing DISABLE_BG_SCHEDULERS kill-switch is already the natural seam - turn it into the thread boundary. worker_threads chosen over a separate process for minimal deploy change (one container, one image).
+  lastUpdated: 2026-07-05
+
+requirements[6]{id,title,detail,touches}:
+  W1,Worker scaffold,"Add worker.ts entrypoint + esbuild target (second bundle entry). Spawn from index.ts behind the existing DISABLE_BG_SCHEDULERS kill-switch. Worker just logs 'ready' initially. Prove spawn / crash-respawn-with-backoff / graceful-shutdown work. No phases moved yet.","artifacts/api-server/src/worker.ts(new); artifacts/api-server/build.mjs; artifacts/api-server/src/index.ts"
+  W2,Move Phase 5 + notifications,"Lowest risk - purely DB/HTTP-out. Worker owns its own Postgres + web-push clients. Validate resolutions still written, pushes still sent.","services/market/resolution-scheduler.ts; services/market/self-calibration; notifications module; src/worker.ts"
+  W3,Move Phase 1 (ingestion),"Worker owns its own Bedrock (fast model) + Postgres client. Validate raw_articles / events still populate; semantic dedup still runs.","services/news/* (RSS/GDELT fetch, semantic dedup, event extraction); src/worker.ts"
+  W4,Move Phase 2 (graph incl. Louvain),"Worker owns its own Neo4j driver. Biggest CPU win - Louvain story-emergence no longer stalls the main loop. Validate stories still emerge.","services/knowledge/* (event-graph-builder, Louvain story-emergence, contradiction, narrative-drift, channel-recalibration); src/worker.ts"
+  W5,Move Phase 3 (reasoning),"Worker owns its own Bedrock (chat) + Neo4j + Chroma clients. Validate prediction_v2 still written.","services/reasoning/* (4-agent pipeline); src/worker.ts"
+  W6,Cleanup main thread,"Main thread no longer imports Phase 1-3 modules. Confirm the trading-engine bundle shrank and shares no Phase 1-3 code with the worker bundle.","src/index.ts; build.mjs; any leftover cross-phase imports"
+
+decisions:
+  isolation: WORKER_THREADS_NOT_PROCESS
+  isolationNote: One container, one image, minimal deploy change. Workers get structured-clone messages, not shared references - each side constructs its own clients.
+  coupling: DB_ONLY_COUPLING
+  couplingNote: Phases 1-3 (and 5) talk to the trading engine ONLY through Postgres/Neo4j. No hot-path message protocol needed - messages are lifecycle-only (start/shutdown/ready/health/log).
+  marketSchedulerStaysOnMain: TRUE
+  marketSchedulerStaysOnMainNote: Phase 4 market scheduler calls publishAssetContext() into a module-level map the executor reads lock-free on the same thread. Moving it to a worker would force serializing hot-context across a thread boundary every 5 min. It is a 5-min slow-path job with negligible CPU (Yahoo fetch + LLM calls are I/O) - does not threaten tick latency. Keep in-process hot-context intact.
+  rollout: KILL_SWITCH_GATED
+  rolloutNote: DISABLE_BG_SCHEDULERS=true already exists and simply means 'do not spawn the worker'. A BG_IN_WORKER=false flag can run phases on main as before, so each batch is reversible without a code revert.
+  sequencing: LOWEST_RISK_FIRST
+  sequencingNote: W1 scaffold (no phases moved) -> W2 Phase 5 + notifications (DB/HTTP only) -> W3 Phase 1 ingestion -> W4 Phase 2 graph + Louvain (biggest CPU win) -> W5 Phase 3 reasoning -> W6 cleanup. Each batch independently shippable.
+
+constraints:
+  noTouchRule: Anything NOT explicitly named in W1-W6 stays untouched. The Tier-3 R1-R5 trading migration is a SEPARATE project - do not conflate.
+  preserved[7]:
+    - Phase 4 market scheduler stays on main thread (publishes hot-context in-process to the executor)
+    - HTTP server (Express) stays on main thread
+    - KiteTicker feed (market-ticker) stays on main thread
+    - Tier-3 signal engine + tick evaluator + executor + position monitor stay on main thread
+    - Token refresh scheduler stays on main thread
+    - DB table/column shapes unchanged - worker writes to the same tables the main thread was writing to
+    - tier3-signal.ts / hot-context / position-state / audit-queue (R1-R5 migration artifacts) stay on main thread
+  mustNotBreak[5]:
+    - Worker + main both open DB/Neo4j pools -> size pools down per thread so total stays within limits
+    - Worker crash must NOT take down the API (worker.on error/exit -> respawn with backoff)
+    - SIGTERM must signal worker to drain (finish in-flight jobs, flush its own write-behind) then terminate()
+    - No Phase 1-3 module-level singleton may assume a single global instance - must be safe to instantiate twice (once per thread)
+    - No Phase 1-3 module-level cache may be read by Phase 4 in-process on main (grep cross-phase module state before cutover)
+
+dependencies:
+  external[6]{name,impact}:
+    worker_threads,"Node built-in. No new dep. structured-clone message protocol; parentPort / workerData for env + config."
+    Postgres/Drizzle,"Worker opens its OWN pool (separate from main). Size both down so total stays within DB max_connections."
+    Neo4j driver,"Worker opens its OWN driver for Phase 2/3. Driver is thread-safe per session but each thread should own its driver instance."
+    ChromaDB client,"Worker owns its own client for Phase 3 reasoning."
+    Bedrock/LLM client (@workspace/integrations-openai-ai-server),"Worker owns its own instance for Phase 1 (fast model) + Phase 3 (chat). Audit: must be safe to instantiate twice."
+    web-push,"Worker owns its own instance for notifications (Phase 5 / market-close summary)."
+  downstream[3]:
+    - Trading engine reads news/events/geopolitical-signal/regimes from DB - must keep finding rows written by the worker
+    - Frontend reads the same tables - shapes must not change
+    - Resolution scheduler + analytics consumers of persisted rows must keep working (now fed by worker, not main)
+  sharedStateAudit: REQUIRED_BEFORE_W3
+  sharedStateAuditNote: Before moving Phase 1 (W3), grep for any Phase 1-3 module-level cache/state that is also read by Phase 4 in-process on main. Known Phase-4 caches that stay on main: instrumentsCache, session priors, FlipGuard, hot-context. Flag any others.
+
+timeline:
+  priorityOrder: W1, W2, W3, W4, W5, W6
+  batching: One requirement (W1-W6) per batch, 5-10 files per batch, git tag rollback point per batch
+  criticalRisk: Double DB/Neo4j connection pools (worker + main) - must size down per thread. Worker crash resilience must be proven in W1 before any phase moves in W2.
+  urgencyNote: Plan recommends adding the ~10-line monitorEventLoopDelay probe FIRST to confirm whether #1 is urgent yet. The probe itself is out of scope of this migration but should be added in parallel to justify sequencing.
+
+messageProtocol:
+  direction: LIFECYCLE_ONLY
+  mainToWorker[2]:
+    - "{type:'start'}"
+    - "{type:'shutdown'}"
+  workerToMain[3]:
+    - "{type:'ready'}"
+    - "{type:'health', queueDepths, lastCycleMs}"
+    - "{type:'log', ...}"
+  note: No trade data, no snapshots, no graph payloads cross the boundary. Heavy data flows through the DB.
+
+verification:
+  eventLoopLagProbe: monitorEventLoopDelay from perf_hooks on main thread, logged each minute (p50/p99). Before: p99 spikes aligned with story-emergence/dedup cycles. After: p99 flattens (no CPU jobs left on main).
+  tickToEvalLatency: timestamp gap between a tick arriving and evaluate() completing; assert no multi-hundred-ms gaps during a background cycle.
+  functionalParity: row counts in raw_articles / events / prediction_v2 / market_regimes over a session match the pre-split baseline.
+  resilience: kill the worker mid-cycle -> API stays up, worker respawns, no lost trading.

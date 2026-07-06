@@ -1,7 +1,7 @@
 import { db, signalExecutionsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { logger } from "../../lib/logger.js";
-import { placeOrder, placeProtectiveStop, cancelOrder, modifyOrder } from "./orders.js";
+import { placeOrder, placeProtectiveStop, cancelOrder, modifyOrder, slLimitPriceForTrigger } from "./orders.js";
 import { getPositions } from "./portfolio.js";
 import { getGlobalKiteClient } from "./kite-option-chain.js";
 import { getKiteClientForUser } from "./kite-client.js";
@@ -19,15 +19,13 @@ const ASSET_EXCHANGE_MAP: Record<string, string> = {
 };
 
 // ── Tick-driven exit control (R5) ─────────────────────────────────────────────
-// Evaluation is driven by the KiteTicker feed, but throttled: the exchange-side SL-M
-// backstop fires the actual stop natively (zero latency), so our loop only has to raise
-// the trailing trigger, catch fills/closes, and run time-stops — none of which needs
-// sub-second cadence. getPositions() is a broker call, so we bound how often it runs.
-const EVAL_THROTTLE_MS = 2_000;
+// Evaluation is driven by the KiteTicker feed. The ratchet check is a float comparison,
+// so we run it on every tick of held instruments — no throttle. The `running` guard
+// prevents overlapping passes (getPositions is a broker call). The exchange-side SL
+// (stop-loss limit) backstop fires the actual stop natively (zero latency).
 const SAFETY_INTERVAL_MS = 30_000; // heartbeat in case ticks stop flowing
 
 let started = false;
-let lastEvalAt = 0;
 let running = false;
 
 /**
@@ -39,9 +37,11 @@ interface ExitState {
   peak: number;
   slOrderId?: string;
   slTrigger?: number;
+  slLimit?: number;
   exitOrderId?: string;
   exitAttempts: number;
   exitReason?: string;
+  lastMilestoneLevel: number;
   hydrated: boolean;
 }
 const exitStates = new Map<string, ExitState>();
@@ -109,9 +109,11 @@ function getExitState(exec: typeof signalExecutionsTable.$inferSelect): ExitStat
       peak: Number(exec.highestPriceReached ?? exec.entryPrice ?? 0),
       slOrderId: typeof n.slOrderId === "string" ? n.slOrderId : undefined,
       slTrigger: typeof n.slTrigger === "number" ? n.slTrigger : undefined,
+      slLimit: typeof n.slLimit === "number" ? n.slLimit : undefined,
       exitOrderId: typeof n.exitOrderId === "string" ? n.exitOrderId : undefined,
       exitAttempts: typeof n.exitAttempts === "number" ? n.exitAttempts : 0,
       exitReason: typeof n.exitReason === "string" ? n.exitReason : undefined,
+      lastMilestoneLevel: typeof n.lastMilestoneLevel === "number" ? n.lastMilestoneLevel : 0,
       hydrated: true,
     };
     exitStates.set(exec.id, s);
@@ -131,9 +133,11 @@ function persistExitState(exec: typeof signalExecutionsTable.$inferSelect, s: Ex
     ...base,
     slOrderId: s.slOrderId,
     slTrigger: s.slTrigger,
+    slLimit: s.slLimit,
     exitOrderId: s.exitOrderId,
     exitAttempts: s.exitAttempts,
     exitReason: s.exitReason,
+    lastMilestoneLevel: s.lastMilestoneLevel,
   };
   const execId = exec.id;
   const peakStr = String(s.peak);
@@ -186,7 +190,7 @@ function finalizeClose(
 }
 
 /**
- * Monitor all open executions: track peak, maintain the trailing exchange-side SL-M
+ * Monitor all open executions: track peak, maintain the trailing exchange-side SL
  * backstop, run time-stops, and record closes. Called tick-driven (throttled) and from a
  * slow safety heartbeat.
  */
@@ -237,7 +241,7 @@ export async function monitorOpenPositions(): Promise<void> {
 
         const posQty = Number(pos.quantity ?? 0);
         if (posQty === 0) {
-          // Position gone — our exit filled, the SL-M fired, or a manual square-off.
+          // Position gone — our exit filled, the SL fired, or a manual square-off.
           const s = exitStates.get(exec.id);
           const exitReason = s?.exitReason ?? (s?.slOrderId ? "stop_loss" : "manual");
           const exitPrice = s?.slTrigger && exitReason === "stop_loss" ? s.slTrigger : null;
@@ -309,12 +313,15 @@ export async function monitorOpenPositions(): Promise<void> {
           milestoneStep
         );
 
-        // ── Exchange-side SL-M backstop (R5 / P10) ──────────────────────────────
+        // ── Exchange-side SL (stop-loss limit) backstop (R5 / P10) ──────────────
         // Long options only (SELL to exit). Place once on a confirmed fill; then trail
         // the trigger UP as the ratchet rises so the exchange holds the stop natively.
+        // SL (not SL-M) because NSE/Kite reject SL-M on index options — the limit rests
+        // SL_LIMIT_OFFSET_PCT below the trigger so it fills the moment it fires.
         let backstopChanged = false;
         if (direction === "up" && !state.exitOrderId) {
           const desiredTrigger = roundTick(stopPrice);
+          const desiredLimit = slLimitPriceForTrigger(desiredTrigger);
           if (!state.slOrderId) {
             try {
               const sl = await placeProtectiveStop(userId, {
@@ -322,25 +329,32 @@ export async function monitorOpenPositions(): Promise<void> {
                 tradingsymbol: exec.assetSymbol,
                 quantity: posQty,
                 triggerPrice: desiredTrigger,
+                limitPrice: desiredLimit,
                 product: (exec.product ?? "MIS") as "CNC" | "MIS" | "NRML",
                 tag: `sl-${exec.id.slice(0, 14)}`,
               });
               state.slOrderId = sl.kiteOrderId;
               state.slTrigger = desiredTrigger;
+              state.slLimit = sl.limitPrice;
               backstopChanged = true;
-              logger.info({ userId, execId: exec.id, symbol: exec.assetSymbol, trigger: desiredTrigger, slOrderId: sl.kiteOrderId }, "position-monitor: exchange SL-M backstop placed");
+              logger.info({ userId, execId: exec.id, symbol: exec.assetSymbol, trigger: desiredTrigger, limit: sl.limitPrice, slOrderId: sl.kiteOrderId }, "position-monitor: exchange SL backstop placed");
             } catch (err) {
-              logger.error({ userId, execId: exec.id, err: err instanceof Error ? err.message : err }, "position-monitor: SL-M placement failed — in-process stop will cover");
+              logger.error({ userId, execId: exec.id, err: err instanceof Error ? err.message : err }, "position-monitor: SL placement failed — in-process stop will cover");
             }
-          } else if (state.slTrigger !== undefined && desiredTrigger > state.slTrigger + 0.05) {
-            // Ratchet rose — raise the resting stop (never lower it).
+          } else if (milestoneLevel > state.lastMilestoneLevel) {
+            // Milestone stepped up — raise the resting stop (never lower it). Modify BOTH
+            // the trigger and the limit together so the limit keeps tracking the trigger.
+            // Only modify when the milestone actually increases, not on every tick, to
+            // avoid spamming Kite modify-order calls against the rate limit.
             try {
-              await modifyOrder(userId, state.slOrderId, "regular", { triggerPrice: desiredTrigger });
+              await modifyOrder(userId, state.slOrderId, "regular", { triggerPrice: desiredTrigger, price: desiredLimit });
               state.slTrigger = desiredTrigger;
+              state.slLimit = desiredLimit;
+              state.lastMilestoneLevel = milestoneLevel;
               backstopChanged = true;
-              logger.info({ userId, execId: exec.id, symbol: exec.assetSymbol, trigger: desiredTrigger }, "position-monitor: SL-M trigger trailed up");
+              logger.info({ userId, execId: exec.id, symbol: exec.assetSymbol, trigger: desiredTrigger, limit: desiredLimit, milestone: milestoneLevel }, "position-monitor: SL trigger trailed up (milestone stepped)");
             } catch (err) {
-              logger.warn({ userId, execId: exec.id, err: err instanceof Error ? err.message : err }, "position-monitor: SL-M modify failed");
+              logger.warn({ userId, execId: exec.id, err: err instanceof Error ? err.message : err }, "position-monitor: SL modify failed");
             }
           }
         }
@@ -356,20 +370,18 @@ export async function monitorOpenPositions(): Promise<void> {
         }
 
         // Price breach only drives an in-process exit when the exchange backstop is
-        // absent (placement failed) — otherwise the SL-M fires natively (no double sell).
+        // absent (placement failed) — otherwise the resting SL fires natively (no double
+        // sell). A time-stop always exits in-process, converting the resting SL rather
+        // than cancelling it (see escalateExit).
         const priceBreached = direction === "up" ? currentPrice <= stopPrice : currentPrice >= stopPrice;
         const needInProcessExit = timeStopHit || (!state.slOrderId && priceBreached);
 
-        if (needInProcessExit && !state.exitOrderId) {
-          await placeInProcessExit(userId, exec, exchange, currentPrice, direction, state, timeStopHit ? "time_stop" : "trailing_stop");
-        } else if (needInProcessExit && state.exitOrderId) {
-          // Previous in-process exit unfilled — retry more aggressively.
-          try {
-            await cancelOrder(userId, state.exitOrderId);
-          } catch (err) {
-            logger.warn({ userId, orderId: state.exitOrderId, err }, "position-monitor: cancel unfilled exit failed, replacing anyway");
-          }
-          await placeInProcessExit(userId, exec, exchange, currentPrice, direction, state, state.exitReason ?? "trailing_stop");
+        if (needInProcessExit) {
+          // escalateExit handles first-exit, retry, and SL-conversion in one path — it
+          // never cancels the protective stop before an exit is working, so the position
+          // is never unprotected between a cancel and a fill.
+          const reason = timeStopHit ? "time_stop" : (state.exitReason ?? "trailing_stop");
+          await escalateExit(userId, exec, exchange, currentPrice, direction, state, reason);
         } else if (peakMoved || backstopChanged) {
           persistExitState(exec, state);
         }
@@ -393,8 +405,25 @@ export async function monitorOpenPositions(): Promise<void> {
   }
 }
 
-/** Place a progressively-aggressive in-process LIMIT exit (time-stop / SL-fallback). */
-async function placeInProcessExit(
+/**
+ * Drive a progressively-aggressive exit WITHOUT ever leaving the position unprotected.
+ *
+ * The old flow cancelled the resting protective SL first and then placed a LIMIT exit —
+ * a window where, if the exit didn't fill, the long option was naked. This one never
+ * cancels-then-places. It reuses whatever order is already working:
+ *
+ *   (a) an in-process exit already rests  → modify its price lower (more marketable),
+ *   (b) a protective SL still rests        → convert THAT order into the exit in place
+ *                                            (trigger just below LTP + tight limit); the
+ *                                            single exchange order becomes the exit, so
+ *                                            there is no cancel gap and no double-sell,
+ *   (c) neither exists (SL placement had failed) → place a fresh LIMIT exit.
+ *
+ * On a modify failure we return and let the next tick re-evaluate against fresh position
+ * data (posQty), rather than racing a second order in — avoiding an oversell if the
+ * order we tried to modify had actually just filled.
+ */
+async function escalateExit(
   userId: string,
   exec: typeof signalExecutionsTable.$inferSelect,
   exchange: string,
@@ -403,20 +432,52 @@ async function placeInProcessExit(
   state: ExitState,
   exitReason: string
 ): Promise<void> {
-  // Cancel the resting exchange stop first so both can't sell (no double exit).
-  if (state.slOrderId) {
-    try {
-      await cancelOrder(userId, state.slOrderId);
-    } catch (err) {
-      logger.warn({ userId, orderId: state.slOrderId, err }, "position-monitor: cancel SL before in-process exit failed");
-    }
-    state.slOrderId = undefined;
-    state.slTrigger = undefined;
-  }
-
   const discountPct = state.exitAttempts === 0 ? 0.01 : state.exitAttempts === 1 ? 0.03 : 0.05;
   const exitLimitPrice = roundTick(currentPrice * (direction === "up" ? 1 - discountPct : 1 + discountPct));
 
+  // (a) An exit order is already working — re-price it in place, no cancel/replace gap.
+  if (state.exitOrderId) {
+    try {
+      await modifyOrder(userId, state.exitOrderId, "regular", { price: exitLimitPrice });
+      state.exitAttempts += 1;
+      state.exitReason = exitReason;
+      persistExitState(exec, state);
+      logger.info({ userId, execId: exec.id, exitOrderId: state.exitOrderId, exitLimitPrice, attempt: state.exitAttempts, exitReason }, "position-monitor: in-process exit re-priced (aggressive)");
+    } catch (err) {
+      // Modify failed — the order likely just filled or was rejected. Drop the ref and
+      // let the next tick re-evaluate against fresh position quantity (avoids oversell).
+      logger.warn({ userId, execId: exec.id, orderId: state.exitOrderId, err: err instanceof Error ? err.message : err }, "position-monitor: exit re-price failed, will re-evaluate next tick");
+      state.exitOrderId = undefined;
+    }
+    return;
+  }
+
+  // (b) A protective SL still rests — convert it into the exit rather than cancelling it.
+  // Modify its trigger to just below LTP so it fires immediately, and tighten the limit
+  // so it fills. The same order id now carries the exit; the position is protected the
+  // whole time.
+  if (state.slOrderId) {
+    const aggressiveTrigger = roundTick(currentPrice * (direction === "up" ? 0.999 : 1.001));
+    try {
+      await modifyOrder(userId, state.slOrderId, "regular", { triggerPrice: aggressiveTrigger, price: exitLimitPrice });
+      state.exitOrderId = state.slOrderId; // the SL order IS the exit now
+      state.slOrderId = undefined;
+      state.slTrigger = undefined;
+      state.slLimit = undefined;
+      state.exitAttempts += 1;
+      state.exitReason = exitReason;
+      markPendingExit(exec.userId, exec.assetId);
+      persistExitState(exec, state);
+      logger.info({ userId, execId: exec.id, exitOrderId: state.exitOrderId, aggressiveTrigger, exitLimitPrice, exitReason }, "position-monitor: converted resting SL into aggressive exit");
+    } catch (err) {
+      // Convert failed — the SL is likely still resting (and still protecting us) or has
+      // already fired. Either way, don't stack a second sell order this tick.
+      logger.warn({ userId, execId: exec.id, orderId: state.slOrderId, err: err instanceof Error ? err.message : err }, "position-monitor: SL→exit convert failed, SL still guards; re-evaluate next tick");
+    }
+    return;
+  }
+
+  // (c) Nothing resting to reuse (SL placement had failed) — place a fresh LIMIT exit.
   const exitOrderResult = await placeOrder(userId, {
     exchange,
     tradingsymbol: exec.assetSymbol,
@@ -436,7 +497,7 @@ async function placeInProcessExit(
 
   logger.info(
     { userId, execId: exec.id, exitOrderId: exitOrderResult.kiteOrderId, exitLimitPrice, attempt: state.exitAttempts, exitReason },
-    "position-monitor: in-process exit order placed"
+    "position-monitor: fresh in-process exit order placed"
   );
 }
 
@@ -456,12 +517,9 @@ async function runMonitorGuarded(): Promise<void> {
 export function startPositionMonitor(): void {
   if (started) return;
   started = true;
-  logger.info("position-monitor: starting (tick-driven + exchange SL-M backstop)");
+  logger.info("position-monitor: starting (tick-driven + exchange SL backstop)");
 
   marketTicker.on("tick", () => {
-    const now = Date.now();
-    if (now - lastEvalAt < EVAL_THROTTLE_MS) return;
-    lastEvalAt = now;
     void runMonitorGuarded();
   });
 

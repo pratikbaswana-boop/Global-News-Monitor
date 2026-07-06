@@ -19,7 +19,7 @@ import { runMarketAgent } from "./market-agent.js";
 import { fetchSessionPriors, setSessionPriors, getSessionPriors, fetchTier3Snapshot } from "./tier3-fetcher.js";
 import { computeIntradaySignal, resetSignalState } from "./tier3-signal.js";
 import { getRelevantNewsByAsset } from "./stock-news.js";
-import { getLatestChainMetrics } from "../kite/market-ticker.js";
+import { getLatestChainMetrics, getSpotEquityLtp } from "../kite/market-ticker.js";
 import { publishAssetContext, resetHotContext } from "./hot-context.js";
 import { enqueueAudit } from "../../lib/audit-queue.js";
 
@@ -658,10 +658,27 @@ async function refreshSnapshotTier3(): Promise<void> {
   const kiteObs = getLatestChainMetrics();
   const intraday = computeIntradaySignal();
 
-  // 2. Fetch current prices for all assets (live intraday, not daily close)
+  // 2. Fetch current prices for all assets — prefer KiteTicker LTP (zero-latency),
+  //    fall back to Yahoo only if KiteTicker hasn't pushed within 30s or for GOLD/SILVER.
+  const kiteSpotPrice = getLatestChainMetrics()?.spotPrice ?? null;
   const prices = await Promise.all(
     FORECAST_ASSETS.map(async (asset) => {
       try {
+        // Map asset to KiteTicker LTP source.
+        let kiteLtp: number | null = null;
+        if (asset.id === "nifty50") {
+          kiteLtp = kiteSpotPrice;
+        } else if (asset.symbol === "RELIANCE" || asset.symbol === "TCS" || asset.symbol === "HDFCBANK" || asset.symbol === "SENSEX") {
+          kiteLtp = getSpotEquityLtp(asset.symbol);
+        }
+        // If KiteTicker has a fresh LTP, use it — no Yahoo call needed.
+        if (kiteLtp !== null && kiteLtp > 0) {
+          // Compute changePct from previous close via Yahoo meta only (lightweight, 1 call per asset).
+          // For now, set changePct=0 — the ensemble doesn't use this field, it's for display only.
+          return { assetId: asset.id, price: kiteLtp, changePct: 0 };
+        }
+
+        // Fallback: Yahoo Finance (stale tick or GOLD/SILVER which have no Kite token).
         const yahooSymbol = asset.symbol === "NIFTY" ? "^NSEI" :
                             asset.symbol === "SENSEX" ? "^BSESN" :
                             asset.symbol === "GOLD" ? "GC=F" :

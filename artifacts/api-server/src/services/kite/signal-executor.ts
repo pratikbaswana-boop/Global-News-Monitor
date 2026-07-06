@@ -16,6 +16,7 @@ import {
   getPositionState,
   getAllPositionStates,
 } from "./position-state.js";
+import { trackEntryOrder } from "./entry-tracker.js";
 import { randomUUID } from "crypto";
 
 // Asset symbol → Kite trading symbol mapping
@@ -233,6 +234,31 @@ interface BaseSignalInput {
   realPrice: number | null;
 }
 
+// ── Hysteresis state for base signal (prevents threshold flapping) ─────────────
+// Hard cutoffs without hysteresis produce NO_TRADE→BUY_CALL→NO_TRADE→BUY_CALL edges
+// when price oscillates around a threshold. Each edge is a real order. Hysteresis
+// requires the value to cross a tighter "release" threshold before the signal clears.
+interface HysteresisState {
+  maxPainSignal: "BUY_CALL" | "BUY_PUT" | null;
+  pcrSignal: "BUY_CALL" | "BUY_PUT" | null;
+  mildConflict: boolean;
+}
+let hysteresis: HysteresisState = {
+  maxPainSignal: null,
+  pcrSignal: null,
+  mildConflict: false,
+};
+
+// Hysteresis bands: enter at the trigger threshold, release at the (tighter) release threshold.
+const MAX_PAIN_TRIGGER = 1.5;
+const MAX_PAIN_RELEASE = 1.2;
+const PCR_LOW_TRIGGER = 0.65;
+const PCR_LOW_RELEASE = 0.75;
+const PCR_HIGH_TRIGGER = 1.35;
+const PCR_HIGH_RELEASE = 1.25;
+const MILD_CONFLICT_TRIGGER = 1.0;
+const MILD_CONFLICT_RELEASE = 0.8;
+
 /**
  * Build the base-signal inputs from a persisted snapshot. Slow-path fields (direction,
  * short-covering, SGX) prefer the in-memory hot context (R2), falling back to the
@@ -283,20 +309,55 @@ function deriveBaseFromInputs(
 
   const suggestedStrike = realPrice ? Math.round(realPrice / NIFTY_STRIKE_INTERVAL) * NIFTY_STRIKE_INTERVAL : null;
 
-  // Reversal: Max Pain stretch
-  if (hasMaxPain && maxPainDistancePct! > 1.5) {
-    return { signal: "BUY_PUT", reason: `Max pain stretch +${maxPainDistancePct!.toFixed(1)}%`, suggestedStrike };
-  }
-  if (hasMaxPain && maxPainDistancePct! < -1.5) {
-    return { signal: "BUY_CALL", reason: `Max pain stretch ${maxPainDistancePct!.toFixed(1)}%`, suggestedStrike };
+  // ── Hysteresis: update persistent state for max pain and PCR signals ────────
+  // Max pain: enter at ±1.5%, release at ±1.2%.
+  if (hasMaxPain) {
+    const dist = maxPainDistancePct!;
+    if (dist > MAX_PAIN_TRIGGER) {
+      hysteresis.maxPainSignal = "BUY_PUT";
+    } else if (dist < -MAX_PAIN_TRIGGER) {
+      hysteresis.maxPainSignal = "BUY_CALL";
+    } else if (Math.abs(dist) < MAX_PAIN_RELEASE) {
+      hysteresis.maxPainSignal = null;
+    }
   }
 
-  // Reversal: PCR extremes
-  if (hasPcr && putCallRatio! < 0.65) {
-    return { signal: "BUY_PUT", reason: `PCR ${putCallRatio!.toFixed(2)} too bullish`, suggestedStrike };
+  // PCR: enter at 0.65/1.35, release at 0.75/1.25.
+  if (hasPcr) {
+    const pcr = putCallRatio!;
+    if (pcr < PCR_LOW_TRIGGER) {
+      hysteresis.pcrSignal = "BUY_PUT";
+    } else if (pcr > PCR_HIGH_TRIGGER) {
+      hysteresis.pcrSignal = "BUY_CALL";
+    } else if (pcr > PCR_LOW_RELEASE && pcr < PCR_HIGH_RELEASE) {
+      hysteresis.pcrSignal = null;
+    }
   }
-  if (hasPcr && putCallRatio! > 1.35) {
-    return { signal: "BUY_CALL", reason: `PCR ${putCallRatio!.toFixed(2)} too bearish`, suggestedStrike };
+
+  // Mild max pain conflict: enter at |dist|>1.0%, release at |dist|<0.8%.
+  if (hasMaxPain) {
+    const absDist = Math.abs(maxPainDistancePct!);
+    if (absDist > MILD_CONFLICT_TRIGGER) {
+      hysteresis.mildConflict = true;
+    } else if (absDist < MILD_CONFLICT_RELEASE) {
+      hysteresis.mildConflict = false;
+    }
+  }
+
+  // Reversal: Max Pain stretch (with hysteresis — stays active until release band)
+  if (hysteresis.maxPainSignal === "BUY_PUT") {
+    return { signal: "BUY_PUT", reason: `Max pain stretch +${maxPainDistancePct!.toFixed(1)}% (hysteresis)`, suggestedStrike };
+  }
+  if (hysteresis.maxPainSignal === "BUY_CALL") {
+    return { signal: "BUY_CALL", reason: `Max pain stretch ${maxPainDistancePct!.toFixed(1)}% (hysteresis)`, suggestedStrike };
+  }
+
+  // Reversal: PCR extremes (with hysteresis)
+  if (hysteresis.pcrSignal === "BUY_PUT") {
+    return { signal: "BUY_PUT", reason: `PCR ${putCallRatio!.toFixed(2)} too bullish (hysteresis)`, suggestedStrike };
+  }
+  if (hysteresis.pcrSignal === "BUY_CALL") {
+    return { signal: "BUY_CALL", reason: `PCR ${putCallRatio!.toFixed(2)} too bearish (hysteresis)`, suggestedStrike };
   }
 
   // Trend: Short covering
@@ -315,9 +376,9 @@ function deriveBaseFromInputs(
     return { signal: "NO_TRADE", reason: `SGX divergence +${sgxNiftyChangePct!.toFixed(1)}%`, suggestedStrike: null };
   }
 
-  // Mild max pain conflict
-  if (hasMaxPain && Math.abs(maxPainDistancePct!) > 1.0) {
-    return { signal: "NO_TRADE", reason: `Mild max pain conflict ${maxPainDistancePct!.toFixed(1)}%`, suggestedStrike: null };
+  // Mild max pain conflict (with hysteresis)
+  if (hysteresis.mildConflict) {
+    return { signal: "NO_TRADE", reason: `Mild max pain conflict ${maxPainDistancePct!.toFixed(1)}% (hysteresis)`, suggestedStrike: null };
   }
 
   // Default to AI direction
@@ -653,9 +714,10 @@ async function executeSpotSignalForUser(
   const trailGapPctVal = pref.trailGapPct ? parseFloat(pref.trailGapPct) : 15;
 
   // Record the signal execution
+  const execId = randomUUID();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const execValues: any = {
-    id: randomUUID(),
+    id: execId,
     signalSnapshotId: snapshot.id,
     userId,
     brokerAccountId: account.id,
@@ -665,7 +727,8 @@ async function executeSpotSignalForUser(
     direction,
     quantity,
     entryPrice: realPrice > 0 ? String(realPrice) : null,
-    status: "open",
+    // pending_entry until a fill is confirmed (R6) — the monitor only manages `open` rows.
+    status: "pending_entry",
     exitStrategy,
     product,
     trailGapPct: String(trailGapPctVal),
@@ -684,6 +747,17 @@ async function executeSpotSignalForUser(
 
   enqueueAudit("signal-execution-insert", async () => {
     await db.insert(signalExecutionsTable).values(execValues);
+  });
+
+  // Confirm the fill before treating this as an open position (spot has no option side).
+  trackEntryOrder({
+    kiteOrderId: orderResult.kiteOrderId,
+    userId,
+    assetId: snapshot.assetId,
+    execId,
+    symbol: snapshot.assetSymbol,
+    side: null,
+    intendedQty: quantity,
   });
 
   // Sync portfolio in background so we have latest positions
@@ -832,8 +906,9 @@ async function executeOptionSignalForUser(
   const hardStopPct = isFarOTM ? FAR_OTM_HARD_STOP_PCT : OPTION_HARD_STOP_PCT;
   const trailGapPct = isFarOTM ? FAR_OTM_TRAIL_GAP_PCT : OPTION_TRAIL_GAP_PCT;
 
+  const execId = randomUUID();
   const execValues: any = {
-    id: randomUUID(),
+    id: execId,
     signalSnapshotId: snapshot.id,
     userId,
     brokerAccountId: account.id,
@@ -842,8 +917,11 @@ async function executeOptionSignalForUser(
     assetSymbol: optionSymbol,
     direction,
     quantity,
-    entryPrice: String(premium),
-    status: "open",
+    entryPrice: String(premium), // provisional LTP; overwritten with the actual fill avg
+    // Persist as pending_entry, NOT open. The position monitor only manages `open` rows,
+    // so it never starts trailing / places an SL backstop against an unfilled entry. The
+    // entry tracker promotes this to `open` once a fill is confirmed (R6).
+    status: "pending_entry",
     exitStrategy: isFarOTM ? "trailing_ratchet_far_otm" : "trailing_ratchet",
     product,
     trailGapPct: String(trailGapPct),
@@ -865,6 +943,18 @@ async function executeOptionSignalForUser(
   enqueueAudit("signal-execution-insert", async () => {
     await db.insert(signalExecutionsTable).values(execValues);
   });
+
+  // Gate OPEN on an actual fill: confirm via order postback (fast) or poll (backstop),
+  // with a cancel-and-return-to-FLAT timeout for entries that never fill.
+  trackEntryOrder({
+    kiteOrderId: orderResult.kiteOrderId,
+    userId,
+    assetId: snapshot.assetId,
+    execId,
+    symbol: optionSymbol,
+    side: optionSig.signal === "BUY_CALL" ? "CALL" : "PUT",
+    intendedQty: quantity,
+  });
   void syncPortfolio(userId);
 
   logger.info({
@@ -877,7 +967,7 @@ async function executeOptionSignalForUser(
     quantity,
     signal: optionSig.signal,
     reason: optionSig.reason,
-  }, "signal-executor: option auto-trade executed");
+  }, "signal-executor: option entry order placed (awaiting fill)");
 
   return { executed: true, orderId: orderResult.kiteOrderId };
 }
@@ -989,8 +1079,10 @@ async function dispatchToEligibleUsers(
       try {
         const result = await run(account.userId, account, snapshot);
         if (result.executed) {
-          markOpen(account.userId, assetId, sideForState);
-          logger.info({ userId: account.userId, assetId, orderId: result.orderId }, "signal-executor: edge entry executed");
+          // Stay PENDING_ENTRY: the order was accepted, not yet filled. The entry tracker
+          // (R6) promotes to OPEN on a confirmed fill, or cancels + returns to FLAT on a
+          // fill timeout — so we never treat an unfilled entry as an open position.
+          logger.info({ userId: account.userId, assetId, orderId: result.orderId }, "signal-executor: edge entry placed (awaiting fill)");
         } else {
           // Declined (not actionable now) — revert to FLAT with no cooldown so a later
           // edge can retry, but the same side can't churn without a new transition.
