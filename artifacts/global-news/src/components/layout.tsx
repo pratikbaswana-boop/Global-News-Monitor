@@ -13,7 +13,7 @@ import {
   SidebarFooter,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
-import { LayoutDashboard, TrendingUp, Database, Globe, Brain, Wallet, Menu } from "lucide-react";
+import { LayoutDashboard, TrendingUp, Database, Globe, Brain, Wallet, Menu, FlaskConical } from "lucide-react";
 import React from "react";
 import { UserMenu } from "@/components/auth/user-menu";
 const basePath = import.meta.env.BASE_URL;
@@ -75,6 +75,14 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
                       <Link href={`${basePath}trading`}>
                         <Wallet className="h-4 w-4" />
                         <span>Trading</span>
+                      </Link>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                  <SidebarMenuItem>
+                    <SidebarMenuButton asChild isActive={location === "/paper-trading"} className="data-[active=true]:bg-primary/10 data-[active=true]:text-primary data-[active=true]:border-l-2 data-[active=true]:border-primary rounded-md px-3 py-2.5 text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-all">
+                      <Link href={`${basePath}paper-trading`}>
+                        <FlaskConical className="h-4 w-4" />
+                        <span>Paper Trading</span>
                       </Link>
                     </SidebarMenuButton>
                   </SidebarMenuItem>

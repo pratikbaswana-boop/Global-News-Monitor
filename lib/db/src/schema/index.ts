@@ -46,3 +46,7 @@ export * from "./broker-positions";
 export * from "./broker-holdings";
 export * from "./signal-executions";
 export * from "./user-trade-preferences";
+export * from "./paper-trades";
+
+// Tick Archive — raw Kite ticks + computed chain metrics for backtesting
+export * from "./tick-archive";

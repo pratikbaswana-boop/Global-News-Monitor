@@ -51,11 +51,17 @@ function roundTick(price: number): number {
 }
 
 /**
- * Compute the ratchet floor/ceiling for a given execution. (Unchanged.)
+ * Compute the ratchet floor/ceiling for a given execution.
  *
- * Milestones every `milestoneStep`% of profit from entry (10% for ATM/ITM, 5% for far
- * OTM). Floor = milestone_price * (1 - trailGapPct/100) for longs. Before the first
- * milestone, uses the hard stopLossPct from entry.
+ * New ratchet logic:
+ * - Below 10% profit: hard stop (hardStopPct below entry)
+ * - At 10% profit: lock 8% profit (stop = entry × 1.08)
+ * - Every 5% after: move stop 2% up
+ *   15% → lock 10%, 20% → lock 12%, 25% → lock 14%, 30% → lock 16%, etc.
+ *
+ * Formula (direction = "up", milestone >= 10):
+ *   lockedProfitPct = 8 + (milestone - 10) × (2 / 5)
+ *   stopPrice = entryPrice × (1 + lockedProfitPct / 100)
  */
 export function computeRatchetStop(
   entryPrice: number,
@@ -70,27 +76,28 @@ export function computeRatchetStop(
       ? ((peakPrice - entryPrice) / entryPrice) * 100
       : ((entryPrice - peakPrice) / entryPrice) * 100;
 
-  const milestoneLevel = Math.max(0, Math.floor(profitPct / milestoneStep) * milestoneStep);
+  // First milestone at 10%, then every 5% after
+  let milestoneLevel: number;
+  if (profitPct < 10) {
+    milestoneLevel = 0;
+  } else {
+    milestoneLevel = 10 + Math.floor((profitPct - 10) / 5) * 5;
+  }
 
   let stopPrice: number;
   if (milestoneLevel === 0) {
+    // Below 10% profit: use hard stop
     stopPrice =
       direction === "up"
         ? entryPrice * (1 - hardStopPct / 100)
         : entryPrice * (1 + hardStopPct / 100);
   } else {
-    const milestonePrice =
-      direction === "up"
-        ? entryPrice * (1 + milestoneLevel / 100)
-        : entryPrice * (1 - milestoneLevel / 100);
+    // At 10%+: lock 8% profit, then move 2% up every 5% milestone
+    const lockedProfitPct = 8 + ((milestoneLevel - 10) / 5) * 2;
     stopPrice =
       direction === "up"
-        ? milestonePrice * (1 - trailGapPct / 100)
-        : milestonePrice * (1 + trailGapPct / 100);
-    stopPrice =
-      direction === "up"
-        ? Math.max(stopPrice, entryPrice)
-        : Math.min(stopPrice, entryPrice);
+        ? entryPrice * (1 + lockedProfitPct / 100)
+        : entryPrice * (1 - lockedProfitPct / 100);
   }
 
   return { stopPrice, milestoneLevel };

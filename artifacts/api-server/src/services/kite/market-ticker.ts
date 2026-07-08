@@ -33,6 +33,16 @@ import {
   type ResolvedChain,
   type KiteOptionChainObservation,
 } from "./kite-option-chain.js";
+import {
+  archiveSpotTick,
+  archiveEquityTick,
+  archiveOptionTick,
+  archiveChainMetrics,
+  setTokenSymbolMap,
+  startTickArchive,
+} from "./tick-archive.js";
+import { computeIntradaySignal } from "../market/tier3-signal.js";
+import { broadcastMarketData } from "../../lib/ws-hub.js";
 
 // Minimum spacing between observations fed into the tier-3 buffer. Now that the direction
 // EMA is time-based (see tier3-signal.ts), the feed rate no longer changes the smoothing,
@@ -66,9 +76,15 @@ let resolving = false;
 let tickMap = new Map<number, TickData>();
 let chain: ResolvedChain | null = null;
 let subscribedOptionTokens: number[] = [];
+// Reverse lookup: token → tradingsymbol for tick archive
+const tokenToSymbolArchive = new Map<number, string>();
 let spotPrice = 0;
 let spotPrevClose = 0; // NIFTY previous-day close from the full-mode tick's ohlc.close
 let latestMetrics: KiteOptionChainObservation | null = null;
+
+// Short rolling history of NIFTY spot ticks for the intraday persistence (chop) read.
+const spotSamples: { t: number; p: number }[] = [];
+const SPOT_SAMPLE_WINDOW_MS = 30_000; // keep ~30s of spot ticks
 let lastRecordAt = 0;
 
 // Reverse lookup: token → equity symbol for spot tick parsing.
@@ -98,6 +114,30 @@ export function isTickerConnected(): boolean {
 export function getNiftySpotMovePct(): number | null {
   if (spotPrice <= 0 || spotPrevClose <= 0) return null;
   return ((spotPrice - spotPrevClose) / spotPrevClose) * 100;
+}
+
+/**
+ * Intraday persistence ("efficiency ratio") of NIFTY spot over the last ~30s:
+ * |net move| / total path travelled. ~1 = clean directional trend, ~0 = choppy
+ * oscillation that goes nowhere. Also returns the net % move over the window.
+ * `ready=false` until enough ticks have accumulated, so the chop gate fails open on
+ * a cold buffer rather than blocking the whole session at the open.
+ */
+export function getNiftySpotPersistence(): { persistence: number; netPct: number; ready: boolean } {
+  const n = spotSamples.length;
+  if (n < 5) return { persistence: 0, netPct: 0, ready: false };
+  const first = spotSamples[0]!;
+  const last = spotSamples[n - 1]!;
+  if (last.t - first.t < 10_000) return { persistence: 0, netPct: 0, ready: false }; // need ≥10s span
+  const net = last.p - first.p;
+  let path = 0;
+  for (let i = 1; i < n; i++) path += Math.abs(spotSamples[i]!.p - spotSamples[i - 1]!.p);
+  if (path <= 0) return { persistence: 0, netPct: 0, ready: false };
+  return {
+    persistence: Math.abs(net) / path,
+    netPct: first.p > 0 ? (net / first.p) * 100 : 0,
+    ready: true,
+  };
 }
 
 /** Latest tick LTP for a tracked trading symbol, or null if not subscribed / no tick yet. */
@@ -172,6 +212,11 @@ function onTicks(ticks: unknown[]): void {
       if (p.ltp > 0) {
         spotPrice = p.ltp;
         spotUpdated = true;
+        const now = Date.now();
+        spotSamples.push({ t: now, p: p.ltp });
+        const cutoff = now - SPOT_SAMPLE_WINDOW_MS;
+        while (spotSamples.length && spotSamples[0]!.t < cutoff) spotSamples.shift();
+        archiveSpotTick(p.token, p.ltp, p.prevClose);
       }
       if (p.prevClose > 0) spotPrevClose = p.prevClose;
       continue;
@@ -182,6 +227,7 @@ function onTicks(ticks: unknown[]): void {
     if (equitySymbol) {
       if (p.ltp > 0) {
         spotEquityPrices.set(equitySymbol, { ltp: p.ltp, lastTickAt: Date.now() });
+        archiveEquityTick(p.token, equitySymbol, p.ltp);
       }
       continue;
     }
@@ -194,6 +240,7 @@ function onTicks(ticks: unknown[]): void {
       volume: p.volume > 0 ? p.volume : prev?.volume ?? 0,
     });
     optionUpdated = true;
+    archiveOptionTick(p.token, p.ltp > 0 ? p.ltp : prev?.ltp ?? 0, p.oi > 0 ? p.oi : prev?.oi ?? 0, p.volume > 0 ? p.volume : prev?.volume ?? 0);
   }
 
   // Re-resolve the subscribed chain if spot moved into a new ATM band.
@@ -204,6 +251,9 @@ function onTicks(ticks: unknown[]): void {
     if (metrics) {
       latestMetrics = metrics;
       marketTicker.emit("chain", metrics);
+
+      // Broadcast to WebSocket clients for real-time UI updates
+      broadcastMarketData(metrics);
 
       // Feed the tier-3 buffer at the preserved cadence.
       const now = Date.now();
@@ -218,6 +268,28 @@ function onTicks(ticks: unknown[]): void {
           atmIV: metrics.atmIV,
           atmGamma: metrics.atmGamma,
         });
+
+        // Archive computed metrics + tier-3 state
+        const sig = computeIntradaySignal();
+        const pers = getNiftySpotPersistence();
+        archiveChainMetrics(
+          {
+            spotPrice: metrics.spotPrice,
+            callOI: metrics.callOI,
+            putOI: metrics.putOI,
+            optionVolume: metrics.optionVolume,
+            atmIV: metrics.atmIV,
+            atmGamma: metrics.atmGamma,
+            pcr: metrics.pcr,
+            maxPainStrike: metrics.maxPainStrike,
+          },
+          {
+            d: sig.ready ? sig.D : null,
+            p: sig.ready ? sig.P : null,
+            persistence: pers.persistence,
+            netPct: pers.netPct,
+          }
+        );
       }
     }
   }
@@ -253,7 +325,12 @@ function applyChain(next: ResolvedChain): void {
   const toRemove = subscribedOptionTokens.filter((t) => !nextSet.has(t) && !heldTokens.has(t));
 
   // Keep the symbol->token index current for LTP-by-symbol lookups.
-  for (const inst of next.relevantInstruments) symbolToToken.set(inst.tradingsymbol, inst.instrument_token);
+  for (const inst of next.relevantInstruments) {
+    symbolToToken.set(inst.tradingsymbol, inst.instrument_token);
+    tokenToSymbolArchive.set(inst.instrument_token, inst.tradingsymbol);
+  }
+  // Update the tick archive's reverse lookup
+  setTokenSymbolMap(tokenToSymbolArchive);
 
   if (ticker && ticker.connected()) {
     if (toRemove.length) ticker.unsubscribe(toRemove);
@@ -300,6 +377,7 @@ export async function startMarketTicker(): Promise<boolean> {
 
   ticker.on("connect", () => {
     logger.info("market-ticker: connected");
+    startTickArchive();
     // Always (re)subscribe spot; re-subscribe option tokens if a chain is already resolved.
     ticker!.subscribe([NIFTY_SPOT_TOKEN]);
     ticker!.setMode(ticker!.modeFull, [NIFTY_SPOT_TOKEN]);
@@ -370,6 +448,7 @@ export function stopMarketTicker(): void {
   subscribedOptionTokens = [];
   spotPrice = 0;
   spotPrevClose = 0;
+  spotSamples.length = 0;
   latestMetrics = null;
   lastRecordAt = 0;
   heldTokens.clear();

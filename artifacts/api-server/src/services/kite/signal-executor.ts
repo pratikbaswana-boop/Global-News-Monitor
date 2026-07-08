@@ -1,22 +1,24 @@
 import { db, brokerAccountsTable, brokerOrdersTable, brokerPositionsTable, signalExecutionsTable, marketSnapshotsTable, userTradePreferencesTable } from "@workspace/db";
 import { eq, desc, and, gt } from "drizzle-orm";
 import { logger } from "../../lib/logger.js";
-import { placeOrder, type PlaceOrderParams } from "./orders.js";
+import { placeOrder, cancelOrder, type PlaceOrderParams } from "./orders.js";
 import { getMargins, syncPortfolio } from "./portfolio.js";
 import { getGlobalKiteClient, getNearestExpiry } from "./kite-option-chain.js";
 import { computeIntradaySignal, type IntradaySignal } from "../market/tier3-signal.js";
 import { getHotContext } from "../market/hot-context.js";
-import { getLatestChainMetrics, getLtpBySymbol, getNiftySpotMovePct } from "./market-ticker.js";
+import { getLatestChainMetrics, getLtpBySymbol, getNiftySpotMovePct, getNiftySpotPersistence } from "./market-ticker.js";
 import { enqueueAudit } from "../../lib/audit-queue.js";
 import {
   canEnter,
   markPendingEntry,
   markOpen,
   markFlat,
+  markPendingExit,
   getPositionState,
   getAllPositionStates,
 } from "./position-state.js";
 import { trackEntryOrder } from "./entry-tracker.js";
+import { broadcastUserExecutions } from "./ws-broadcaster.js";
 import { randomUUID } from "crypto";
 
 // Asset symbol → Kite trading symbol mapping
@@ -42,7 +44,7 @@ const MAX_OPTION_LOTS = 20;
 // ── Stop-loss parameters by option moneyness ──────────────────────────────────
 // Far OTM options (delta < 0.15) move asymmetrically: slow on upside, fast on
 // downside due to theta decay. They need tighter stops and time-based exits.
-const OPTION_HARD_STOP_PCT = 30;       // ATM/ITM hard stop (30%)
+const OPTION_HARD_STOP_PCT = 20;       // ATM/ITM hard stop (20%)
 const OPTION_TRAIL_GAP_PCT = 15;       // ATM/ITM trail gap (15%)
 const OPTION_MILESTONE_STEP = 10;      // ATM/ITM milestone step (10%)
 
@@ -98,7 +100,7 @@ interface OptionCandidate {
  * Build 5 strike candidates around the suggested ATM strike.
  * For CALLs: lower strike = ITM. For PUTs: higher strike = ITM.
  */
-function buildStrikeCandidates(
+export function buildStrikeCandidates(
   suggestedStrike: number,
   signal: "BUY_CALL" | "BUY_PUT",
   expiry: Date
@@ -191,7 +193,7 @@ export function quoteCandidatesFromTicks(
  * Select the best option candidate based on capital and score = lots × delta.
  * High capital (≥₹50k): only delta >= 0.50. Low capital: all valid.
  */
-function selectBestOption(
+export function selectBestOption(
   candidates: OptionCandidate[],
   maxCapital: number
 ): OptionCandidate | null {
@@ -487,6 +489,33 @@ function applyRangeGate(
   return { ...base, reason: `${base.reason} ✓ range gate (${detail})` };
 }
 
+// ── Chop gate (NIFTY only) — the whipsaw guard ─────────────────────────────────
+// In a no-news, oscillating market the spot ticks up-and-down with little net
+// travel; entries there just bleed on stops + costs. We measure persistence
+// (|net move| / total path over ~30s) and refuse to enter when it's too low —
+// regardless of side. News stays the boss of DIRECTION; this only controls WHEN we
+// act on it. Veto-only + fail-open: it can never start a trade, and it passes
+// through on a cold buffer so it never freezes the session at the open.
+const MIN_PERSISTENCE = 0.35; // below this, spot is oscillating rather than trending
+
+function applyChopGate(
+  base: { signal: "BUY_CALL" | "BUY_PUT" | "NO_TRADE"; suggestedStrike: number | null; reason: string },
+  fast: { persistence: number; netPct: number; ready: boolean }
+): { signal: "BUY_CALL" | "BUY_PUT" | "NO_TRADE"; suggestedStrike: number | null; reason: string } {
+  if (base.signal === "NO_TRADE") return base;
+  if (!fast.ready) {
+    return { ...base, reason: `${base.reason} (chop gate: warming up, pass-through)` };
+  }
+  if (fast.persistence < MIN_PERSISTENCE) {
+    return {
+      signal: "NO_TRADE",
+      suggestedStrike: null,
+      reason: `Chop gate blocked — persistence ${fast.persistence.toFixed(2)} < ${MIN_PERSISTENCE} (oscillating, no net move)`,
+    };
+  }
+  return { ...base, reason: `${base.reason} ✓ chop gate (persistence ${fast.persistence.toFixed(2)})` };
+}
+
 function deriveOptionSignalFromSnapshot(
   snapshot: typeof marketSnapshotsTable.$inferSelect
 ): { signal: "BUY_CALL" | "BUY_PUT" | "NO_TRADE"; suggestedStrike: number | null; reason: string } {
@@ -497,7 +526,8 @@ function deriveOptionSignalFromSnapshot(
   const intraday = tier3Json.intradaySignal as IntradaySignal | undefined;
   const gated = applyTier3Gate(base, intraday);
   if (snapshot.assetId !== OPTION_ASSET_ID) return gated;
-  return applyRangeGate(gated, snapshot.priceImpactEstimate, getNiftySpotMovePct());
+  const ranged = applyRangeGate(gated, snapshot.priceImpactEstimate, getNiftySpotMovePct());
+  return applyChopGate(ranged, getNiftySpotPersistence());
 }
 
 /**
@@ -530,7 +560,8 @@ export function computeLiveOptionSide(
   // detection. computeIntradaySignal is idempotent w.r.t. redundant calls (time-based EMA).
   const gated = applyTier3Gate(base, computeIntradaySignal());
   if (assetId !== OPTION_ASSET_ID) return gated;
-  return applyRangeGate(gated, ctx?.priceImpactEstimate ?? null, getNiftySpotMovePct());
+  const ranged = applyRangeGate(gated, ctx?.priceImpactEstimate ?? null, getNiftySpotMovePct());
+  return applyChopGate(ranged, getNiftySpotPersistence());
 }
 
 /**
@@ -1095,6 +1126,260 @@ export async function reconcilePositionStates(): Promise<void> {
 }
 
 /**
+ * Extract the strike price from a NIFTY option symbol (e.g. "NIFTY2671025000CE" → 25000).
+ */
+function extractStrikeFromSymbol(symbol: string): number | null {
+  const match = symbol.match(/NIFTY\d{6}(\d+)(CE|PE)/);
+  if (!match) return null;
+  return parseInt(match[1]!, 10);
+}
+
+/**
+ * Override strategy: if a new signal arrives while the user has an open position,
+ * check if the new signal's selected strike is closer to the current spot price
+ * than the existing trade's strike. If so AND the user has capital to buy it,
+ * exit the current trade and enter the new one.
+ *
+ * Returns true if an override was performed, false otherwise.
+ */
+async function tryOverrideEntry(
+  userId: string,
+  account: typeof brokerAccountsTable.$inferSelect,
+  assetId: string,
+  snapshot: typeof marketSnapshotsTable.$inferSelect,
+  newSide: "CALL" | "PUT" | null
+): Promise<boolean> {
+  // Find the user's current open option execution
+  const openExecs = await db
+    .select()
+    .from(signalExecutionsTable)
+    .where(and(
+      eq(signalExecutionsTable.userId, userId),
+      eq(signalExecutionsTable.status, "open"),
+    ))
+    .orderBy(desc(signalExecutionsTable.executedAt))
+    .limit(1);
+
+  if (openExecs.length === 0) return false;
+
+  const currentExec = openExecs[0]!;
+  const currentStrike = extractStrikeFromSymbol(currentExec.assetSymbol);
+  if (currentStrike === null) return false;
+
+  // Get current spot price
+  const metrics = getLatestChainMetrics();
+  const spot = metrics?.spotPrice ?? 0;
+  if (spot <= 0) return false;
+
+  // Compute the new signal's suggested strike
+  const optionSig = deriveOptionSignalFromSnapshot(snapshot);
+  if (optionSig.signal === "NO_TRADE" || optionSig.suggestedStrike === null) return false;
+
+  const newStrike = optionSig.suggestedStrike;
+  const currentDistance = Math.abs(currentStrike - spot);
+  const newDistance = Math.abs(newStrike - spot);
+
+  // Only override if the new strike is closer to spot
+  if (newDistance >= currentDistance) {
+    logger.info({
+      userId, currentStrike, newStrike, spot,
+      currentDistance, newDistance,
+    }, "signal-executor: override skipped — new strike not closer to spot");
+    return false;
+  }
+
+  // Check if user has capital to buy the new option
+  const margins = await getMargins(userId);
+  if (!margins) return false;
+  const availableCash = margins.equity?.available?.cash || margins.equity?.available?.liveBalance || 0;
+
+  // Build candidates for the new signal to check affordability
+  const expiry = await getNearestExpiry();
+  const candidates = buildStrikeCandidates(newStrike, optionSig.signal, expiry);
+  let quotes = quoteCandidatesFromTicks(candidates);
+  if (quotes.length === 0) {
+    quotes = await fetchOptionQuotes(userId, candidates);
+  }
+  if (quotes.length === 0) return false;
+
+  const pref = await getUserTradePreference(userId, assetId);
+  if (!pref) return false;
+
+  const maxCapital = pref.maxCapitalPerTrade
+    ? parseFloat(pref.maxCapitalPerTrade)
+    : availableCash * 0.95;
+
+  if (maxCapital <= 0) return false;
+
+  const best = selectBestOption(quotes, maxCapital);
+  if (!best) {
+    logger.info({ userId, newStrike, maxCapital }, "signal-executor: override skipped — no affordable option for new strike");
+    return false;
+  }
+
+  // ── Exit the current trade at market rate ──────────────────────────────────
+  const currentLtp = getLtpBySymbol(currentExec.assetSymbol);
+  if (!currentLtp || currentLtp <= 0) {
+    logger.warn({ userId, symbol: currentExec.assetSymbol }, "signal-executor: override skipped — no LTP for current position");
+    return false;
+  }
+
+  const isOption = currentExec.assetSymbol.startsWith("NIFTY") &&
+    (currentExec.assetSymbol.endsWith("CE") || currentExec.assetSymbol.endsWith("PE"));
+  const exchange = isOption ? "NFO" : "NSE";
+  const direction = currentExec.direction ?? "up";
+  const exitDiscountPct = 0.02;
+  const exitLimitPrice = Math.round((currentLtp * (direction === "up" ? 1 - exitDiscountPct : 1 + exitDiscountPct)) / 0.05) * 0.05;
+
+  // Place SELL exit order for current position
+  await placeOrder(userId, {
+    exchange,
+    tradingsymbol: currentExec.assetSymbol,
+    transactionType: direction === "up" ? "SELL" : "BUY",
+    quantity: currentExec.quantity,
+    orderType: "LIMIT",
+    price: exitLimitPrice,
+    product: (currentExec.product ?? "MIS") as "CNC" | "MIS" | "NRML",
+    tag: `override-exit-${currentExec.id.slice(0, 14)}`,
+  });
+
+  // Cancel any resting SL orders for the current position
+  const slOrders = await db
+    .select()
+    .from(brokerOrdersTable)
+    .where(and(
+      eq(brokerOrdersTable.userId, userId),
+      eq(brokerOrdersTable.tradingsymbol, currentExec.assetSymbol),
+      eq(brokerOrdersTable.transactionType, "SELL"),
+      eq(brokerOrdersTable.status, "OPEN"),
+    ));
+
+  for (const slOrder of slOrders) {
+    try {
+      await cancelOrder(userId, slOrder.kiteOrderId, "regular");
+    } catch {
+      // ignore — SL may have already fired
+    }
+  }
+
+  // Close the current execution in DB
+  const entryPrice = Number(currentExec.entryPrice ?? 0);
+  const realisedPnl = direction === "up"
+    ? (exitLimitPrice - entryPrice) * currentExec.quantity
+    : (entryPrice - exitLimitPrice) * currentExec.quantity;
+
+  await db
+    .update(signalExecutionsTable)
+    .set({
+      status: "closed",
+      exitPrice: String(exitLimitPrice),
+      realisedPnl: String(realisedPnl.toFixed(2)),
+      exitReason: "override",
+      closedAt: new Date(),
+    })
+    .where(eq(signalExecutionsTable.id, currentExec.id));
+
+  markPendingExit(userId, assetId);
+
+  logger.info({
+    userId, oldSymbol: currentExec.assetSymbol, oldStrike: currentStrike,
+    newStrike, spot, oldDistance: currentDistance, newDistance,
+    exitPrice: exitLimitPrice, realisedPnl: realisedPnl.toFixed(2),
+  }, "signal-executor: override — exited current trade for closer strike");
+
+  // Broadcast updated executions
+  void broadcastUserExecutions(userId);
+
+  // ── Enter the new trade ────────────────────────────────────────────────────
+  // Mark flat with minimal cooldown so we can immediately re-enter
+  markFlat(userId, assetId, 0);
+
+  const optionSymbol = best.symbol;
+  const premium = best.premium;
+  const lots = best.lots;
+  const quantity = lots * NIFTY_LOT_SIZE;
+  const product = (pref.defaultProduct ?? account.defaultProduct ?? "MIS") as "CNC" | "MIS" | "NRML";
+
+  const orderParams: PlaceOrderParams = {
+    exchange: "NFO",
+    tradingsymbol: optionSymbol,
+    transactionType: "BUY",
+    quantity,
+    orderType: "LIMIT",
+    product,
+    tag: `auto-ovr-${assetId.slice(0, 3)}`,
+  };
+
+  if (premium > 0) {
+    const rawPrice = premium * 1.01;
+    orderParams.price = Math.round(rawPrice / 0.05) * 0.05;
+  }
+
+  const orderResult = await placeOrder(userId, orderParams);
+
+  // Record the new execution
+  const isFarOTM = best.deltaEstimate < FAR_OTM_DELTA_THRESHOLD;
+  const hardStopPct = isFarOTM ? FAR_OTM_HARD_STOP_PCT : OPTION_HARD_STOP_PCT;
+  const trailGapPct = isFarOTM ? FAR_OTM_TRAIL_GAP_PCT : OPTION_TRAIL_GAP_PCT;
+
+  const execId = randomUUID();
+  const execValues: any = {
+    id: execId,
+    signalSnapshotId: snapshot.id,
+    userId,
+    brokerAccountId: account.id,
+    brokerOrderId: orderResult.kiteOrderId,
+    assetId: snapshot.assetId,
+    assetSymbol: optionSymbol,
+    direction: "up",
+    quantity,
+    entryPrice: String(premium),
+    status: "pending_entry",
+    exitStrategy: isFarOTM ? "trailing_ratchet_far_otm" : "trailing_ratchet",
+    product,
+    trailGapPct: String(trailGapPct),
+    highestPriceReached: String(premium),
+    executedAt: new Date(),
+    targetPrice: null,
+    stopLossPrice: String(premium * (1 - hardStopPct / 100)),
+    notes: JSON.stringify({
+      deltaEstimate: best.deltaEstimate,
+      isFarOTM,
+      hardStopPct,
+      trailGapPct,
+      milestoneStep: isFarOTM ? FAR_OTM_MILESTONE_STEP : OPTION_MILESTONE_STEP,
+      timeStopMs: isFarOTM ? FAR_OTM_TIME_STOP_MS : null,
+      minGainPct: isFarOTM ? FAR_OTM_MIN_GAIN_PCT : null,
+      override: true,
+    }),
+  };
+
+  enqueueAudit("signal-execution-insert", async () => {
+    await db.insert(signalExecutionsTable).values(execValues);
+  });
+
+  trackEntryOrder({
+    kiteOrderId: orderResult.kiteOrderId,
+    userId,
+    assetId: snapshot.assetId,
+    execId,
+    symbol: optionSymbol,
+    side: optionSig.signal === "BUY_CALL" ? "CALL" : "PUT",
+    intendedQty: quantity,
+  });
+
+  markPendingEntry(userId, assetId, newSide);
+  void syncPortfolio(userId);
+
+  logger.info({
+    userId, newSymbol: optionSymbol, newStrike: best.strike,
+    premium, lots, quantity, signal: optionSig.signal,
+  }, "signal-executor: override — new entry order placed (awaiting fill)");
+
+  return true;
+}
+
+/**
  * Shared per-user gated dispatch (R3). Iterates active auto-trade accounts and places at
  * most one entry per user — but only when the state machine says canEnter. The state
  * machine (not a "does an execution row already exist" DB scan) is what prevents the
@@ -1135,25 +1420,38 @@ async function dispatchToEligibleUsers(
   // rate limit, instead of user 4 waiting behind users 1-3's full sequences.
   await Promise.all(
     activeAccounts.map(async (account) => {
-      if (!canEnter(account.userId, assetId)) return;
-
-      markPendingEntry(account.userId, assetId, sideForState);
-      try {
-        const result = await run(account.userId, account, snapshot);
-        if (result.executed) {
-          // Stay PENDING_ENTRY: the order was accepted, not yet filled. The entry tracker
-          // (R6) promotes to OPEN on a confirmed fill, or cancels + returns to FLAT on a
-          // fill timeout — so we never treat an unfilled entry as an open position.
-          logger.info({ userId: account.userId, assetId, orderId: result.orderId }, "signal-executor: edge entry placed (awaiting fill)");
-        } else {
-          // Declined (not actionable now) — revert to FLAT with no cooldown so a later
-          // edge can retry, but the same side can't churn without a new transition.
+      if (canEnter(account.userId, assetId)) {
+        // Normal entry path — user is FLAT
+        markPendingEntry(account.userId, assetId, sideForState);
+        try {
+          const result = await run(account.userId, account, snapshot);
+          if (result.executed) {
+            logger.info({ userId: account.userId, assetId, orderId: result.orderId }, "signal-executor: edge entry placed (awaiting fill)");
+          } else {
+            markFlat(account.userId, assetId, 0);
+            logger.info({ userId: account.userId, assetId, reason: result.reason }, "signal-executor: edge entry skipped");
+          }
+        } catch (err) {
           markFlat(account.userId, assetId, 0);
-          logger.info({ userId: account.userId, assetId, reason: result.reason }, "signal-executor: edge entry skipped");
+          logger.error({ userId: account.userId, assetId, err }, "signal-executor: edge entry failed");
+        }
+        return;
+      }
+
+      // Override path — user is OPEN/PENDING. Check if new signal's strike is closer to spot.
+      // Only applies to option trades (NIFTY) where we can compare strike proximity.
+      if (assetId !== OPTION_ASSET_ID) return;
+
+      const state = getPositionState(account.userId, assetId);
+      if (state.state !== "OPEN") return;
+
+      try {
+        const overridden = await tryOverrideEntry(account.userId, account, assetId, snapshot, sideForState);
+        if (overridden) {
+          logger.info({ userId: account.userId, assetId }, "signal-executor: override entry completed");
         }
       } catch (err) {
-        markFlat(account.userId, assetId, 0);
-        logger.error({ userId: account.userId, assetId, err }, "signal-executor: edge entry failed");
+        logger.error({ userId: account.userId, assetId, err }, "signal-executor: override entry failed");
       }
     })
   );

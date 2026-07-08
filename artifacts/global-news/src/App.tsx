@@ -8,6 +8,7 @@ import Trending from "@/pages/trending";
 import Sources from "@/pages/sources";
 import Intelligence from "@/pages/intelligence";
 import Trading from "@/pages/trading";
+import PaperTrading from "@/pages/paper-trading";
 import LandingPage from "@/pages/landing";
 import { AuthProvider } from "@/hooks/use-auth";
 import { AuthGuard } from "@/components/auth/auth-guard";
@@ -57,6 +58,13 @@ function Router() {
         {() => (
           <AuthGuard>
             <Trading />
+          </AuthGuard>
+        )}
+      </Route>
+      <Route path="/paper-trading">
+        {() => (
+          <AuthGuard>
+            <PaperTrading />
           </AuthGuard>
         )}
       </Route>

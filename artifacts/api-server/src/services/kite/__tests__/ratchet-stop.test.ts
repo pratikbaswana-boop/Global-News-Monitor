@@ -18,31 +18,52 @@ import { computeRatchetStop } from "../position-monitor.js";
 
 describe("computeRatchetStop", () => {
   it("uses the hard stop before the first milestone", () => {
-    // entry 100, peak 105 (5% < 10% step) → milestone 0 → hard stop 30% below.
+    // entry 100, peak 105 (5% < 10%) → milestone 0 → hard stop 30% below.
     const { stopPrice, milestoneLevel } = computeRatchetStop(100, 105, "up", 15, 30, 10);
     expect(milestoneLevel).toBe(0);
     expect(stopPrice).toBeCloseTo(70, 6);
   });
 
-  it("caps the first milestone stop at breakeven (never gives back below entry)", () => {
-    // Blueprint example: peak 115 → milestone 10% → 110*0.85=93.5 → capped at entry 100.
+  it("locks 8% profit at the 10% milestone", () => {
+    // peak 115 → 15% profit → milestone 10 → lock 8% → stop = 108.
     const { stopPrice, milestoneLevel } = computeRatchetStop(100, 115, "up", 15, 30, 10);
     expect(milestoneLevel).toBe(10);
-    expect(stopPrice).toBeCloseTo(100, 6);
+    expect(stopPrice).toBeCloseTo(108, 6);
   });
 
-  it("ratchets the stop up past breakeven at higher milestones", () => {
-    // Blueprint example: peak 125 → milestone 20% → 120*0.85 = 102.
+  it("ratchets the stop 2% up at the 15% milestone", () => {
+    // peak 116 → 16% profit → milestone 15 → lock 10% → stop = 110.
+    const { stopPrice, milestoneLevel } = computeRatchetStop(100, 116, "up", 15, 30, 10);
+    expect(milestoneLevel).toBe(15);
+    expect(stopPrice).toBeCloseTo(110, 6);
+  });
+
+  it("ratchets the stop 2% up at the 20% milestone", () => {
+    // peak 125 → 25% profit → milestone 20 → lock 12% → stop = 112.
     const { stopPrice, milestoneLevel } = computeRatchetStop(100, 125, "up", 15, 30, 10);
     expect(milestoneLevel).toBe(20);
-    expect(stopPrice).toBeCloseTo(102, 6);
+    expect(stopPrice).toBeCloseTo(112, 6);
   });
 
-  it("honours a tighter far-OTM config (5% step, 8% gap)", () => {
-    // peak 110 → 10% profit → milestone 10 (step 5) → 110*(0.92)=101.2 (> entry).
+  it("ratchets further at the 30% milestone", () => {
+    // peak 135 → 35% profit → milestone 30 → lock 16% → stop = 116.
+    const { stopPrice, milestoneLevel } = computeRatchetStop(100, 135, "up", 15, 30, 10);
+    expect(milestoneLevel).toBe(30);
+    expect(stopPrice).toBeCloseTo(116, 6);
+  });
+
+  it("honours far-OTM hard stop (15%) below 10% profit", () => {
+    // peak 105 → 5% profit → milestone 0 → hard stop 15% → stop = 85.
+    const { stopPrice, milestoneLevel } = computeRatchetStop(100, 105, "up", 8, 15, 5);
+    expect(milestoneLevel).toBe(0);
+    expect(stopPrice).toBeCloseTo(85, 6);
+  });
+
+  it("locks 8% profit for far-OTM at 10% milestone too", () => {
+    // peak 110 → 10% profit → milestone 10 → lock 8% → stop = 108.
     const { stopPrice, milestoneLevel } = computeRatchetStop(100, 110, "up", 8, 15, 5);
     expect(milestoneLevel).toBe(10);
-    expect(stopPrice).toBeCloseTo(101.2, 6);
+    expect(stopPrice).toBeCloseTo(108, 6);
   });
 
   it("is monotonic non-decreasing as the peak rises (long)", () => {

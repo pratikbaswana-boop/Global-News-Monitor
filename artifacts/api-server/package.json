@@ -22,7 +22,8 @@
     "web-push": "^3.6.7",
     "neo4j-driver": "^5.27.0",
     "chromadb": "^1.9.2",
-    "kiteconnect": "^5.3.0"
+    "kiteconnect": "^5.3.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/cookie-parser": "^1.4.10",
@@ -30,6 +31,7 @@
     "@types/express": "^5.0.6",
     "@types/node": "catalog:",
     "@types/web-push": "^3.6.4",
+    "@types/ws": "^8.5.12",
     "esbuild": "^0.27.3",
     "esbuild-plugin-pino": "^2.3.3",
     "pino-pretty": "^13",

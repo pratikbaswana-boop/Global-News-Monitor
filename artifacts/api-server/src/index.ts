@@ -1,5 +1,7 @@
+import http from "node:http";
 import app from "./app";
 import { logger } from "./lib/logger";
+import { attachWebSocketServer } from "./lib/ws-hub.js";
 import { WorkerManager } from "./lib/worker-manager.js";
 // Phase 4 + broker schedulers stay on main thread (latency-critical + in-process coupling).
 import { startMarketScheduler } from "./services/market/index.js";
@@ -10,6 +12,8 @@ import { startPositionMonitor } from "./services/kite/position-monitor.js";
 import { startEntryTracker } from "./services/kite/entry-tracker.js";
 import { startTokenRefreshScheduler } from "./services/kite/token-refresh-scheduler.js";
 import { startMarketTicker } from "./services/kite/market-ticker.js";
+import { startWsBroadcaster } from "./services/kite/ws-broadcaster.js";
+import { startPaperTradeEngine } from "./services/kite/paper-trade-engine.js";
 import { startEventLoopMonitor } from "./lib/event-loop-monitor.js";
 // Phase 1-3/5 scheduler imports are deliberately NOT static here — they're loaded
 // via dynamic import() only in the BG_IN_WORKER=false rollback path, so the main
@@ -29,13 +33,18 @@ if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
 
-app.listen(port, (err) => {
+const server = http.createServer(app);
+
+server.listen(port, (err) => {
   if (err) {
     logger.error({ err }, "Error listening on port");
     process.exit(1);
   }
 
   logger.info({ port }, "Server listening");
+
+  // Attach WebSocket server for real-time UI updates (eliminates polling lag)
+  attachWebSocketServer(server);
 
   // Probe main-loop latency continuously — tells us whether the Phase 1-3 worker-thread
   // split (WORKER_THREADS_PLAN.md) is actually urgent. Runs regardless of the kill-switch.
@@ -149,5 +158,11 @@ app.listen(port, (err) => {
 
     // Broker: Token refresh (runs every 6h, refreshes tokens expiring within 6h).
     startTokenRefreshScheduler();
+
+    // WebSocket: Broadcast enriched executions + orders to connected UI clients.
+    startWsBroadcaster();
+
+    // Paper trading: Virtual trading engine with Rs 1L compounding capital.
+    startPaperTradeEngine();
   }
 });

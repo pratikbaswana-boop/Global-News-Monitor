@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
+import { useMarketDataWs, useExecutionsWs, useOrdersWs } from "@/hooks/use-trading-ws";
 import { AppLayout } from "@/components/layout";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -112,83 +113,65 @@ interface OrderInfo {
 }
 
 function useMarketData() {
-  const [data, setData] = useState<MarketData | null>(null);
+  const { data, connected } = useMarketDataWs();
   const [loading, setLoading] = useState(true);
 
-  const fetchData = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_BASE}/trading/market-data`);
-      if (res.ok) {
-        setData(await res.json());
-      }
-    } catch {
-      // ignore
-    } finally {
-      setLoading(false);
-    }
+  // Initial fetch via REST (for first load before WS connects)
+  useEffect(() => {
+    fetch(`${API_BASE}/trading/market-data`)
+      .then((res) => res.ok ? res.json() : null)
+      .then((d) => { if (d) setLoading(false); })
+      .catch(() => setLoading(false));
   }, []);
 
   useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 10000);
-    return () => clearInterval(interval);
-  }, [fetchData]);
+    if (data) setLoading(false);
+  }, [data]);
 
-  return { data, loading, refetch: fetchData };
+  return { data, loading, refetch: () => {} };
 }
 
 function useExecutions(userId: string | undefined) {
-  const [data, setData] = useState<{ executions: Execution[] } | null>(null);
+  const { data, connected } = useExecutionsWs(userId);
   const [loading, setLoading] = useState(true);
+  const [restData, setRestData] = useState<{ executions: Execution[] } | null>(null);
 
-  const fetchData = useCallback(async () => {
+  // Initial REST fetch for immediate data
+  useEffect(() => {
     if (!userId) return;
-    try {
-      const res = await fetch(`${API_BASE}/trading/executions?userId=${encodeURIComponent(userId)}`);
-      if (res.ok) {
-        setData(await res.json());
-      }
-    } catch {
-      // ignore
-    } finally {
-      setLoading(false);
-    }
+    fetch(`${API_BASE}/trading/executions?userId=${encodeURIComponent(userId)}`)
+      .then((res) => res.ok ? res.json() : null)
+      .then((d) => { if (d) { setRestData(d); setLoading(false); } })
+      .catch(() => setLoading(false));
   }, [userId]);
 
   useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 5000);
-    return () => clearInterval(interval);
-  }, [fetchData]);
+    if (data) setLoading(false);
+  }, [data]);
 
-  return { data, loading, refetch: fetchData };
+  // Use WS data if available, fall back to REST data
+  return { data: data ?? restData, loading, refetch: () => {} };
 }
 
 function useOrders(userId: string | undefined) {
-  const [data, setData] = useState<{ orders: OrderInfo[] } | null>(null);
+  const { data, connected } = useOrdersWs(userId);
   const [loading, setLoading] = useState(true);
+  const [restData, setRestData] = useState<{ orders: OrderInfo[] } | null>(null);
 
-  const fetchData = useCallback(async () => {
+  // Initial REST fetch
+  useEffect(() => {
     if (!userId) return;
-    try {
-      const res = await fetch(`${API_BASE}/trading/orders?userId=${encodeURIComponent(userId)}`);
-      if (res.ok) {
-        setData(await res.json());
-      }
-    } catch {
-      // ignore
-    } finally {
-      setLoading(false);
-    }
+    fetch(`${API_BASE}/trading/orders?userId=${encodeURIComponent(userId)}`)
+      .then((res) => res.ok ? res.json() : null)
+      .then((d) => { if (d) { setRestData(d); setLoading(false); } })
+      .catch(() => setLoading(false));
   }, [userId]);
 
   useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 10000);
-    return () => clearInterval(interval);
-  }, [fetchData]);
+    if (data) setLoading(false);
+  }, [data]);
 
-  return { data, loading, refetch: fetchData };
+  return { data: data ?? restData, loading, refetch: () => {} };
 }
 
 function formatNumber(n: number | null | undefined, decimals = 2): string {
@@ -272,6 +255,8 @@ export default function TradingPage() {
   const [updatingPrefs, setUpdatingPrefs] = useState<Record<string, boolean>>({});
   const [configuringAsset, setConfiguringAsset] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [exitingId, setExitingId] = useState<string | null>(null);
+  const [exitingAll, setExitingAll] = useState(false);
 
   // Handle Kite OAuth callback redirect (full-page redirect flow for mobile)
   useEffect(() => {
@@ -459,6 +444,46 @@ export default function TradingPage() {
       await refetchStatus();
     } catch {
       // ignore
+    }
+  }
+
+  async function handleExitTrade(execId: string) {
+    if (!userId) return;
+    setExitingId(execId);
+    try {
+      const res = await fetch(`${API_BASE}/trading/executions/${execId}/exit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        setError(err.error || "Exit failed");
+      }
+    } catch {
+      setError("Exit request failed");
+    } finally {
+      setExitingId(null);
+    }
+  }
+
+  async function handleExitAll() {
+    if (!userId) return;
+    setExitingAll(true);
+    try {
+      const res = await fetch(`${API_BASE}/trading/executions/exit-all`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        setError(err.error || "Exit all failed");
+      }
+    } catch {
+      setError("Exit all request failed");
+    } finally {
+      setExitingAll(false);
     }
   }
 
@@ -928,6 +953,21 @@ export default function TradingPage() {
                         }
                         return (
                           <div className="space-y-2">
+                            <div className="flex justify-end mb-2">
+                              <Button
+                                variant="destructive"
+                                size="sm"
+                                onClick={handleExitAll}
+                                disabled={exitingAll}
+                                className="h-7 text-xs"
+                              >
+                                {exitingAll ? (
+                                  <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Exiting All...</>
+                                ) : (
+                                  <>Exit All</>
+                                )}
+                              </Button>
+                            </div>
                             {openExecs.map((exec) => {
                               const pnl = formatPnl(exec.unrealizedPnl);
                               const pnlPct = exec.entryPrice > 0 && exec.currentPrice
@@ -947,13 +987,28 @@ export default function TradingPage() {
                                         </p>
                                       </div>
                                     </div>
-                                    <div className="text-right">
-                                      <p className={`text-sm font-mono font-bold ${pnl.color}`}>{pnl.text}</p>
-                                      {pnlPct !== null && (
-                                        <p className={`text-[10px] ${pnlPct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                                          {pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(1)}%
-                                        </p>
-                                      )}
+                                    <div className="flex items-center gap-3">
+                                      <div className="text-right">
+                                        <p className={`text-sm font-mono font-bold ${pnl.color}`}>{pnl.text}</p>
+                                        {pnlPct !== null && (
+                                          <p className={`text-[10px] ${pnlPct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                            {pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(1)}%
+                                          </p>
+                                        )}
+                                      </div>
+                                      <Button
+                                        variant="destructive"
+                                        size="sm"
+                                        onClick={() => handleExitTrade(exec.id)}
+                                        disabled={exitingId === exec.id}
+                                        className="h-7 text-[10px] px-2"
+                                      >
+                                        {exitingId === exec.id ? (
+                                          <Loader2 className="h-3 w-3 animate-spin" />
+                                        ) : (
+                                          "Exit"
+                                        )}
+                                      </Button>
                                     </div>
                                   </div>
                                   <div className="grid grid-cols-4 gap-2 mt-2 text-[10px]">

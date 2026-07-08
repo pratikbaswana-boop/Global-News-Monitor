@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { logger } from "../lib/logger.js";
-import { db, signalExecutionsTable } from "@workspace/db";
-import { eq, desc, and } from "drizzle-orm";
+import { db, signalExecutionsTable, brokerOrdersTable } from "@workspace/db";
+import { eq, desc, and, inArray } from "drizzle-orm";
 import {
   placeOrder,
   cancelOrder,
@@ -20,6 +20,8 @@ import {
 } from "../services/kite/portfolio.js";
 import { fetchKiteOptionChain, getGlobalKiteClient } from "../services/kite/kite-option-chain.js";
 import { getKiteClientForUser } from "../services/kite/kite-client.js";
+import { getLtpBySymbol } from "../services/kite/market-ticker.js";
+import { broadcastUserExecutions } from "../services/kite/ws-broadcaster.js";
 
 const router = Router();
 
@@ -369,6 +371,256 @@ router.get("/trading/executions", async (req, res) => {
   } catch (err) {
     logger.error({ err }, "get executions failed");
     res.status(500).json({ error: err instanceof Error ? err.message : "Failed to fetch executions" });
+  }
+});
+
+// POST /trading/executions/:execId/exit — Exit a single trade at market rate
+router.post("/trading/executions/:execId/exit", async (req, res) => {
+  try {
+    const { execId } = req.params;
+    const { userId } = req.body;
+
+    if (!userId) {
+      res.status(400).json({ error: "userId is required" });
+      return;
+    }
+
+    const execs = await db
+      .select()
+      .from(signalExecutionsTable)
+      .where(and(
+        eq(signalExecutionsTable.id, execId),
+        eq(signalExecutionsTable.userId, userId),
+        eq(signalExecutionsTable.status, "open"),
+      ))
+      .limit(1);
+
+    if (execs.length === 0) {
+      res.status(404).json({ error: "Open execution not found" });
+      return;
+    }
+
+    const exec = execs[0];
+
+    // Get current LTP from tick map or REST quote
+    let currentPrice = getLtpBySymbol(exec.assetSymbol);
+    if (!currentPrice || currentPrice <= 0) {
+      try {
+        const kite = await getGlobalKiteClient();
+        if (kite) {
+          const isOption = exec.assetSymbol.startsWith("NIFTY") &&
+            (exec.assetSymbol.endsWith("CE") || exec.assetSymbol.endsWith("PE"));
+          const exchange = isOption ? "NFO" : "NSE";
+          const quotes = await kite.getQuote([`${exchange}:${exec.assetSymbol}`]) as Record<string, any>;
+          const q = quotes[`${exchange}:${exec.assetSymbol}`];
+          if (q) currentPrice = Number(q.last_price ?? 0);
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    if (!currentPrice || currentPrice <= 0) {
+      res.status(400).json({ error: "Could not determine current price" });
+      return;
+    }
+
+    const isOption = exec.assetSymbol.startsWith("NIFTY") &&
+      (exec.assetSymbol.endsWith("CE") || exec.assetSymbol.endsWith("PE"));
+    const exchange = isOption ? "NFO" : "NSE";
+    const direction = exec.direction ?? "up";
+
+    // Place SELL (for long) / BUY (for short) at LIMIT slightly below LTP for aggressive fill
+    const discountPct = 0.02; // 2% below LTP
+    const exitLimitPrice = Math.round((currentPrice * (direction === "up" ? 1 - discountPct : 1 + discountPct)) / 0.05) * 0.05;
+
+    const exitOrder = await placeOrder(userId, {
+      exchange,
+      tradingsymbol: exec.assetSymbol,
+      transactionType: direction === "up" ? "SELL" : "BUY",
+      quantity: exec.quantity,
+      orderType: "LIMIT",
+      price: exitLimitPrice,
+      product: (exec.product ?? "MIS") as "CNC" | "MIS" | "NRML",
+      tag: `manual-exit-${exec.id.slice(0, 14)}`,
+    });
+
+    // Cancel any resting protective SL order for this execution
+    const slOrders = await db
+      .select()
+      .from(brokerOrdersTable)
+      .where(and(
+        eq(brokerOrdersTable.userId, userId),
+        eq(brokerOrdersTable.tradingsymbol, exec.assetSymbol),
+        eq(brokerOrdersTable.transactionType, "SELL"),
+        eq(brokerOrdersTable.status, "OPEN"),
+      ));
+
+    for (const slOrder of slOrders) {
+      try {
+        await cancelOrder(userId, slOrder.kiteOrderId, "regular");
+      } catch {
+        // ignore cancel errors — the SL may have already fired
+      }
+    }
+
+    // Mark execution as closed with provisional exit price
+    const entryPrice = Number(exec.entryPrice ?? 0);
+    const realisedPnl = direction === "up"
+      ? (exitLimitPrice - entryPrice) * exec.quantity
+      : (entryPrice - exitLimitPrice) * exec.quantity;
+
+    await db
+      .update(signalExecutionsTable)
+      .set({
+        status: "closed",
+        exitPrice: String(exitLimitPrice),
+        realisedPnl: String(realisedPnl.toFixed(2)),
+        exitReason: "manual",
+        closedAt: new Date(),
+      })
+      .where(eq(signalExecutionsTable.id, execId));
+
+    // Broadcast updated executions via WebSocket
+    void broadcastUserExecutions(userId);
+
+    logger.info({ userId, execId, exitOrderId: exitOrder.kiteOrderId, exitLimitPrice, currentPrice }, "trading: manual exit placed");
+
+    res.json({
+      success: true,
+      orderId: exitOrder.kiteOrderId,
+      exitPrice: exitLimitPrice,
+      message: "Exit order placed at market rate",
+    });
+  } catch (err) {
+    logger.error({ err, execId: req.params.execId }, "trading: manual exit failed");
+    res.status(500).json({ error: err instanceof Error ? err.message : "Exit failed" });
+  }
+});
+
+// POST /trading/executions/exit-all — Exit all open trades at market rate
+router.post("/trading/executions/exit-all", async (req, res) => {
+  try {
+    const { userId } = req.body;
+
+    if (!userId) {
+      res.status(400).json({ error: "userId is required" });
+      return;
+    }
+
+    const openExecs = await db
+      .select()
+      .from(signalExecutionsTable)
+      .where(and(
+        eq(signalExecutionsTable.userId, userId),
+        eq(signalExecutionsTable.status, "open"),
+      ));
+
+    if (openExecs.length === 0) {
+      res.json({ success: true, message: "No open trades to exit", exited: 0 });
+      return;
+    }
+
+    const results: Array<{ execId: string; symbol: string; success: boolean; error?: string }> = [];
+
+    for (const exec of openExecs) {
+      try {
+        let currentPrice = getLtpBySymbol(exec.assetSymbol);
+        if (!currentPrice || currentPrice <= 0) {
+          try {
+            const kite = await getGlobalKiteClient();
+            if (kite) {
+              const isOption = exec.assetSymbol.startsWith("NIFTY") &&
+                (exec.assetSymbol.endsWith("CE") || exec.assetSymbol.endsWith("PE"));
+              const exchange = isOption ? "NFO" : "NSE";
+              const quotes = await kite.getQuote([`${exchange}:${exec.assetSymbol}`]) as Record<string, any>;
+              const q = quotes[`${exchange}:${exec.assetSymbol}`];
+              if (q) currentPrice = Number(q.last_price ?? 0);
+            }
+          } catch {
+            // ignore
+          }
+        }
+
+        if (!currentPrice || currentPrice <= 0) {
+          results.push({ execId: exec.id, symbol: exec.assetSymbol, success: false, error: "No price" });
+          continue;
+        }
+
+        const isOption = exec.assetSymbol.startsWith("NIFTY") &&
+          (exec.assetSymbol.endsWith("CE") || exec.assetSymbol.endsWith("PE"));
+        const exchange = isOption ? "NFO" : "NSE";
+        const direction = exec.direction ?? "up";
+        const discountPct = 0.02;
+        const exitLimitPrice = Math.round((currentPrice * (direction === "up" ? 1 - discountPct : 1 + discountPct)) / 0.05) * 0.05;
+
+        await placeOrder(userId, {
+          exchange,
+          tradingsymbol: exec.assetSymbol,
+          transactionType: direction === "up" ? "SELL" : "BUY",
+          quantity: exec.quantity,
+          orderType: "LIMIT",
+          price: exitLimitPrice,
+          product: (exec.product ?? "MIS") as "CNC" | "MIS" | "NRML",
+          tag: `exit-all-${exec.id.slice(0, 14)}`,
+        });
+
+        // Cancel resting SL orders
+        const slOrders = await db
+          .select()
+          .from(brokerOrdersTable)
+          .where(and(
+            eq(brokerOrdersTable.userId, userId),
+            eq(brokerOrdersTable.tradingsymbol, exec.assetSymbol),
+            eq(brokerOrdersTable.transactionType, "SELL"),
+            eq(brokerOrdersTable.status, "OPEN"),
+          ));
+
+        for (const slOrder of slOrders) {
+          try {
+            await cancelOrder(userId, slOrder.kiteOrderId, "regular");
+          } catch {
+            // ignore
+          }
+        }
+
+        const entryPrice = Number(exec.entryPrice ?? 0);
+        const realisedPnl = direction === "up"
+          ? (exitLimitPrice - entryPrice) * exec.quantity
+          : (entryPrice - exitLimitPrice) * exec.quantity;
+
+        await db
+          .update(signalExecutionsTable)
+          .set({
+            status: "closed",
+            exitPrice: String(exitLimitPrice),
+            realisedPnl: String(realisedPnl.toFixed(2)),
+            exitReason: "manual_exit_all",
+            closedAt: new Date(),
+          })
+          .where(eq(signalExecutionsTable.id, exec.id));
+
+        results.push({ execId: exec.id, symbol: exec.assetSymbol, success: true });
+      } catch (err) {
+        results.push({ execId: exec.id, symbol: exec.assetSymbol, success: false, error: err instanceof Error ? err.message : "Failed" });
+      }
+    }
+
+    // Broadcast updated executions via WebSocket
+    void broadcastUserExecutions(userId);
+
+    const succeeded = results.filter((r) => r.success).length;
+    logger.info({ userId, total: openExecs.length, succeeded }, "trading: exit-all completed");
+
+    res.json({
+      success: true,
+      exited: succeeded,
+      total: openExecs.length,
+      results,
+    });
+  } catch (err) {
+    logger.error({ err }, "trading: exit-all failed");
+    res.status(500).json({ error: err instanceof Error ? err.message : "Exit all failed" });
   }
 });
 

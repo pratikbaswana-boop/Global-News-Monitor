@@ -8,6 +8,7 @@ import authRouter from "./auth";
 import engagementRouter from "./engagement";
 import brokerRouter from "./broker";
 import tradingRouter from "./trading";
+import paperTradingRouter from "./paper-trading";
 
 const router: IRouter = Router();
 
@@ -20,5 +21,6 @@ router.use(authRouter);
 router.use(engagementRouter);
 router.use(brokerRouter);
 router.use(tradingRouter);
+router.use(paperTradingRouter);
 
 export default router;
