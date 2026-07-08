@@ -113,22 +113,24 @@ interface OrderInfo {
 }
 
 function useMarketData() {
-  const { data, connected } = useMarketDataWs();
+  const { data: wsData, connected } = useMarketDataWs();
+  const [restData, setRestData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
   // Initial fetch via REST (for first load before WS connects)
   useEffect(() => {
     fetch(`${API_BASE}/trading/market-data`)
       .then((res) => res.ok ? res.json() : null)
-      .then((d) => { if (d) setLoading(false); })
+      .then((d) => { if (d) { setRestData(d); setLoading(false); } })
       .catch(() => setLoading(false));
   }, []);
 
   useEffect(() => {
-    if (data) setLoading(false);
-  }, [data]);
+    if (wsData) setLoading(false);
+  }, [wsData]);
 
-  return { data, loading, refetch: () => {} };
+  // Use WS data if available, fall back to REST data
+  return { data: wsData ?? restData, loading, refetch: () => {} };
 }
 
 function useExecutions(userId: string | undefined) {

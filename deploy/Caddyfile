@@ -17,6 +17,11 @@
         }
     }
 
+    # WebSocket → api-server container
+    handle /ws {
+        reverse_proxy gnm_api_prod:3000
+    }
+
     # Everything else → static frontend
     handle {
         reverse_proxy gnm_frontend_prod:80
