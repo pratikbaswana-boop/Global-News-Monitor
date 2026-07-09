@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useTradingWs } from "@/hooks/use-trading-ws";
+import { CondorSection } from "@/components/trading/condor-section";
 import {
   TrendingUp,
   TrendingDown,
@@ -308,6 +309,10 @@ export default function PaperTradingPage() {
               )}
             </CardContent>
           </Card>
+
+          <div className="border-t border-border/20 pt-6">
+            <CondorSection />
+          </div>
         </div>
       </div>
     </AppLayout>

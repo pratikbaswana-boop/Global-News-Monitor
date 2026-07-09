@@ -14,6 +14,7 @@ import { startTokenRefreshScheduler } from "./services/kite/token-refresh-schedu
 import { startMarketTicker } from "./services/kite/market-ticker.js";
 import { startWsBroadcaster } from "./services/kite/ws-broadcaster.js";
 import { startPaperTradeEngine } from "./services/kite/paper-trade-engine.js";
+import { startCondorPaperEngine } from "./services/kite/condor-paper-engine.js";
 import { startEventLoopMonitor } from "./lib/event-loop-monitor.js";
 // Phase 1-3/5 scheduler imports are deliberately NOT static here — they're loaded
 // via dynamic import() only in the BG_IN_WORKER=false rollback path, so the main
@@ -164,5 +165,9 @@ server.listen(port, (err) => {
 
     // Paper trading: Virtual trading engine with Rs 1L compounding capital.
     startPaperTradeEngine();
+
+    // Iron Condor paper trading: separate Rs 1L capital pool, option-SELLING strategy
+    // (see nifty_master_guide.md) — fully independent of the option-buying engines above.
+    startCondorPaperEngine();
   }
 });

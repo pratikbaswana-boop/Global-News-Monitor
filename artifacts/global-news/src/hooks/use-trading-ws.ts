@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from "react";
 
-type Channel = "market-data" | "executions" | "orders" | "paper-trading";
+type Channel = "market-data" | "executions" | "orders" | "paper-trading" | "condor";
 
 interface WsMessage {
   channel: Channel;
@@ -26,7 +26,7 @@ function ensureWs(userId?: string): WebSocket {
   if (globalWs && globalWs.readyState === WebSocket.CLOSING) globalWs = null;
   if (globalWs && globalWs.readyState === WebSocket.CONNECTING) return globalWs;
 
-  const allChannels: Channel[] = ["market-data", "executions", "orders", "paper-trading"];
+  const allChannels: Channel[] = ["market-data", "executions", "orders", "paper-trading", "condor"];
   globalWs = new WebSocket(getWsUrl(userId, allChannels));
 
   globalWs.onmessage = (event) => {
