@@ -204,7 +204,7 @@ async function enterPaperTrade(signal: "BUY_CALL" | "BUY_PUT"): Promise<void> {
     lots: best.lots, quantity: best.lots * NIFTY_LOT_SIZE, signal, capital: paperCapital,
   }, "paper-trade: entered virtual trade");
 
-  broadcastState();
+  void broadcastState();
 }
 
 async function exitPaperTrade(reason: string, exitPrice: number): Promise<void> {
@@ -231,7 +231,7 @@ async function exitPaperTrade(reason: string, exitPrice: number): Promise<void> 
 
   activeTradeId = null;
   activeState = null;
-  broadcastState();
+  void broadcastState();
 }
 
 async function monitorPaperTrade(): Promise<void> {
@@ -296,7 +296,7 @@ async function monitorPaperTrade(): Promise<void> {
       })
       .where(eq(paperTradesTable.id, activeState.id));
 
-    broadcastState();
+    void broadcastState();
   }
 }
 
@@ -317,11 +317,21 @@ async function evaluatePaperTrade(): Promise<void> {
   await monitorPaperTrade();
 }
 
-function broadcastState(): void {
+async function broadcastState(): Promise<void> {
   const currentPrice = activeState ? getLtpBySymbol(activeState.symbol) : null;
   const unrealizedPnl = activeState && currentPrice
     ? (currentPrice - activeState.entryPrice) * activeState.quantity
     : null;
+
+  const trades = await db
+    .select()
+    .from(paperTradesTable)
+    .orderBy(desc(paperTradesTable.executedAt))
+    .limit(100);
+
+  const closedTrades = trades.filter((t) => t.status === "closed");
+  const totalPnl = closedTrades.reduce((sum, t) => sum + Number(t.realisedPnl ?? 0), 0);
+  const winningTrades = closedTrades.filter((t) => Number(t.realisedPnl ?? 0) > 0).length;
 
   broadcastPaperTrading({
     capital: paperCapital,
@@ -341,6 +351,10 @@ function broadcastState(): void {
       isFarOTM: activeState.isFarOTM,
       executedAt: new Date(activeState.executedAt).toISOString(),
     } : null,
+    trades,
+    totalPnl,
+    totalTrades: closedTrades.length,
+    winningTrades,
   });
 }
 
@@ -361,7 +375,7 @@ export function startPaperTradeEngine(): void {
   logger.info("paper-trade: starting virtual trading engine (Rs 1L compounding)");
 
   void loadStateFromDb().then(() => {
-    broadcastState();
+    void broadcastState();
   });
 
   marketTicker.on("tick", () => {

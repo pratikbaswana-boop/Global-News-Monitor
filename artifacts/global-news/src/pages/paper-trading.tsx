@@ -76,7 +76,7 @@ export default function PaperTradingPage() {
   const [wsState, setWsState] = useState<PaperTradingState | null>(null);
 
   useTradingWs<PaperTradingState>("paper-trading", (d) => {
-    setWsState(d);
+    setWsState((prev) => prev ? { ...prev, ...d } : d);
   });
 
   useEffect(() => {
