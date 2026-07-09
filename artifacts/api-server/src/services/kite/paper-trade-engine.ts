@@ -9,8 +9,8 @@ import { randomUUID } from "crypto";
 
 const PAPER_CAPITAL_INITIAL = 100_000;
 const NIFTY_LOT_SIZE = 65;
-const OPTION_HARD_STOP_PCT = 20;
-const OPTION_TRAIL_GAP_PCT = 15;
+const OPTION_HARD_STOP_PCT = 15;
+const OPTION_TRAIL_GAP_PCT = 8;
 const OPTION_MILESTONE_STEP = 10;
 const FAR_OTM_HARD_STOP_PCT = 15;
 const FAR_OTM_TRAIL_GAP_PCT = 8;
@@ -106,21 +106,26 @@ function computeRatchetStop(
 ): { stopPrice: number; milestoneLevel: number } {
   const profitPct = ((peakPrice - entryPrice) / entryPrice) * 100;
 
-  let milestoneLevel: number;
+  // Below first milestone: use hard stop
   if (profitPct < milestoneStep) {
-    milestoneLevel = 0;
-  } else {
-    const stepAfterFirst = milestoneStep === 5 ? 5 : 5;
-    milestoneLevel = milestoneStep + Math.floor((profitPct - milestoneStep) / stepAfterFirst) * 5;
+    return {
+      stopPrice: entryPrice * (1 - hardStopPct / 100),
+      milestoneLevel: 0,
+    };
   }
 
-  let stopPrice: number;
-  if (milestoneLevel === 0) {
-    stopPrice = entryPrice * (1 - hardStopPct / 100);
-  } else {
-    const lockedProfitPct = (milestoneStep === 5 ? 3 : 8) + ((milestoneLevel - milestoneStep) / 5) * 2;
-    stopPrice = entryPrice * (1 + lockedProfitPct / 100);
-  }
+  // Trailing: trailGapPct below peak (caps giveback at 8%)
+  const trailingStop = peakPrice * (1 - trailGapPct / 100);
+
+  // Floor: lock 70% of profit, minimum 8% (ATM/ITM) or 3% (far OTM)
+  const floorMinPct = milestoneStep === 5 ? 3 : 8;
+  const floorLockPct = Math.max(floorMinPct, profitPct * 0.70);
+  const floorStop = entryPrice * (1 + floorLockPct / 100);
+
+  const stopPrice = Math.max(trailingStop, floorStop);
+
+  // Milestone level for SL modification cadence (every 5%)
+  const milestoneLevel = milestoneStep + Math.floor((profitPct - milestoneStep) / 5) * 5;
 
   return { stopPrice, milestoneLevel };
 }

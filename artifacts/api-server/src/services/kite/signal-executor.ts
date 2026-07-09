@@ -44,8 +44,8 @@ const MAX_OPTION_LOTS = 20;
 // ── Stop-loss parameters by option moneyness ──────────────────────────────────
 // Far OTM options (delta < 0.15) move asymmetrically: slow on upside, fast on
 // downside due to theta decay. They need tighter stops and time-based exits.
-const OPTION_HARD_STOP_PCT = 20;       // ATM/ITM hard stop (20%)
-const OPTION_TRAIL_GAP_PCT = 15;       // ATM/ITM trail gap (15%)
+const OPTION_HARD_STOP_PCT = 15;       // ATM/ITM hard stop (15%)
+const OPTION_TRAIL_GAP_PCT = 8;        // ATM/ITM trail gap (8% below peak)
 const OPTION_MILESTONE_STEP = 10;      // ATM/ITM milestone step (10%)
 
 const FAR_OTM_HARD_STOP_PCT = 15;      // Far OTM hard stop (15%)
