@@ -121,13 +121,15 @@ export function CondorSection() {
           <CardContent className="p-4">
             <div className="flex items-center gap-2 mb-2">
               <Wallet className="h-4 w-4 text-muted-foreground" />
-              <span className="text-xs text-muted-foreground">Capital Invested (margin)</span>
+              <span className="text-xs text-muted-foreground">Available Capital</span>
             </div>
             <p className="text-xl font-bold font-mono">
-              {active ? `₹${fmt(active.capitalInvested, 0)}` : "—"}
+              ₹{fmt(state?.capital ?? 0, 0)}
             </p>
             <p className="text-[10px] text-muted-foreground mt-1">
-              {active ? `${active.lots} lot(s) · ${active.quantity} qty` : "No active condor"}
+              {active
+                ? `₹${fmt(active.capitalInvested, 0)} margin blocked · ${active.lots} lot(s)`
+                : `of ₹${fmt(state?.initialCapital ?? 100000, 0)} initial pool`}
             </p>
           </CardContent>
         </Card>
