@@ -39,9 +39,9 @@ const LOT_SIZE = 65;
 const STRIKE_INTERVAL = 50;
 
 const CAPITAL_INITIAL = 100_000;
-const SOLD_LEG_OFFSET = 700;   // sweet-spot: sold strikes ~700pts OTM
-const HEDGE_GAP = 400;         // hedge strikes 400pts beyond the sold strikes
-const TILT_SHIFT = 200;        // bullish/bearish tilt shifts one side closer by this much
+const SOLD_LEG_OFFSET = 250;   // tightened: sold strikes ~250pts OTM for higher premium
+const HEDGE_GAP = 150;         // hedge strikes 150pts beyond sold strikes (tighter = better risk:reward)
+const TILT_SHIFT = 100;        // tilt shifts one side closer by 100pts
 
 const MARGIN_CAPITAL_PCT = 0.55;   // Money Rule #1: max 55% of capital as margin
 const MAX_LOTS = 3;                 // paper-trading cap, mirrors "start with 1 lot" (Rule #4) with room to scale
