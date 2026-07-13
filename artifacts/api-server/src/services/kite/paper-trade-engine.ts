@@ -6,6 +6,7 @@ import { computeLiveOptionSide, quoteCandidatesFromTicks, buildStrikeCandidates,
 import { getNearestExpiry } from "./kite-option-chain.js";
 import { broadcastPaperTrading } from "../../lib/ws-hub.js";
 import { randomUUID } from "crypto";
+import { getLatestRegime } from "./condor-state.js";
 
 const PAPER_CAPITAL_INITIAL = 100_000;
 const NIFTY_LOT_SIZE = 65;
@@ -18,6 +19,16 @@ const FAR_OTM_MILESTONE_STEP = 5;
 const FAR_OTM_TIME_STOP_MS = 15 * 60 * 1000;
 const FAR_OTM_DELTA_THRESHOLD = 0.15;
 const FAR_OTM_MIN_GAIN_PCT = 5;
+
+// ── New exit strategy constants ───────────────────────────────────────────────
+const EOD_SQUAREOFF_IST_MIN = 915;             // 3:15 PM IST (broker MIS squareoff starts ~3:20)
+const MOMENTUM_WINDOW_MS = 5 * 60 * 1000;      // 5-minute rolling window
+const MOMENTUM_DROPPCT = 8;                     // 8% drop from window-peak → fast reversal
+const SIGNAL_FLIP_CONFIRM_TICKS = 2;            // 2 consecutive flipped ticks → confirmed
+const SPOT_PROXIMITY_THRESHOLD = 50;            // 50pts from strike → gamma cliff risk
+const VIX_SPIKE_PCT = 20;                       // 20% above 15-min baseline → exit
+const VIX_BASELINE_WINDOW_MS = 15 * 60 * 1000;  // 15-minute VIX baseline
+const VIX_CHECK_THROTTLE_MS = 30_000;           // only query regime every 30s
 
 const OPTION_ASSET_ID = "nifty50";
 
@@ -43,9 +54,16 @@ interface ActiveTradeState {
   lastMilestoneLevel: number;
   executedAt: number;
   capitalAtEntry: number;
+  // New: momentum reversal tracking (in-memory only, not persisted)
+  tickHistory: { ts: number; price: number }[];
+  // New: signal flip confirmation counter (in-memory only)
+  signalFlipCount: number;
+  // New: VIX baseline tracking (in-memory only)
+  vixHistory: { ts: number; vix: number }[];
 }
 
 let activeState: ActiveTradeState | null = null;
+let lastVixCheckAt = 0;
 
 async function loadStateFromDb(): Promise<void> {
   const openTrades = await db
@@ -76,6 +94,9 @@ async function loadStateFromDb(): Promise<void> {
       lastMilestoneLevel: notes.lastMilestoneLevel ?? 0,
       executedAt: t.executedAt.getTime(),
       capitalAtEntry: Number(t.capitalAtEntry),
+      tickHistory: [],
+      signalFlipCount: 0,
+      vixHistory: [],
     };
     paperCapital = Number(t.capitalAtEntry);
     logger.info({ tradeId: t.id, symbol: t.assetSymbol, capital: paperCapital }, "paper-trade: loaded active trade from DB");
@@ -130,6 +151,29 @@ function computeRatchetStop(
   return { stopPrice, milestoneLevel };
 }
 
+/**
+ * Adaptive trailing gap — scales the trail tighter as profit grows.
+ * Only applies above the first milestone (below milestone, hard stop is used).
+ *
+ * | Profit range | ATM/ITM gap | Far-OTM gap | Rationale                         |
+ * |  < 20%       | 6%          | 7%          | Tighter than old 8%, lock early   |
+ * | 20-35%       | 5%          | 6%          | Sweet spot, most exits happen     |
+ * | 35-50%       | 4%          | 5%          | Big move, protect aggressively    |
+ * |  50%+        | 3%          | 4%          | Let it run but cap giveback       |
+ */
+function adaptiveTrailGap(profitPct: number, isFarOTM: boolean): number {
+  if (isFarOTM) {
+    if (profitPct < 20) return 7;
+    if (profitPct < 35) return 6;
+    if (profitPct < 50) return 5;
+    return 4;
+  }
+  if (profitPct < 20) return 6;
+  if (profitPct < 35) return 5;
+  if (profitPct < 50) return 4;
+  return 3;
+}
+
 async function enterPaperTrade(signal: "BUY_CALL" | "BUY_PUT"): Promise<void> {
   if (activeState !== null) return;
 
@@ -177,6 +221,9 @@ async function enterPaperTrade(signal: "BUY_CALL" | "BUY_PUT"): Promise<void> {
     lastMilestoneLevel: 0,
     executedAt: Date.now(),
     capitalAtEntry: paperCapital,
+    tickHistory: [],
+    signalFlipCount: 0,
+    vixHistory: [],
   };
 
   await db.insert(paperTradesTable).values({
@@ -239,7 +286,7 @@ async function exitPaperTrade(reason: string, exitPrice: number): Promise<void> 
   void broadcastState();
 }
 
-async function monitorPaperTrade(): Promise<void> {
+async function monitorPaperTrade(currentSignal: "BUY_CALL" | "BUY_PUT" | "NO_TRADE"): Promise<void> {
   if (!activeState) return;
 
   const ltp = getLtpBySymbol(activeState.symbol);
@@ -249,10 +296,96 @@ async function monitorPaperTrade(): Promise<void> {
     activeState.highestPrice = ltp;
   }
 
+  // Track tick history for momentum reversal (5-min rolling window)
+  activeState.tickHistory.push({ ts: Date.now(), price: ltp });
+  const momentumCutoff = Date.now() - MOMENTUM_WINDOW_MS;
+  activeState.tickHistory = activeState.tickHistory.filter((t) => t.ts >= momentumCutoff);
+
+  // ── Exit 1: EOD square off (3:15 PM IST) ──────────────────────────────────
+  // Matches broker MIS auto-squareoff. Paper must mirror real trading.
+  const now = new Date();
+  const istMin = (now.getUTCHours() * 60 + now.getUTCMinutes() + 330) % (24 * 60);
+  if (istMin >= EOD_SQUAREOFF_IST_MIN) {
+    await exitPaperTrade("eod_squareoff", ltp);
+    return;
+  }
+
+  // ── Exit 2: Signal flip (AI direction reversed) ───────────────────────────
+  // If the signal that triggered our entry has now flipped against us, exit.
+  // Requires 2 consecutive flipped ticks to avoid noise.
+  const isSignalFlipped =
+    (activeState.signal === "BUY_CALL" && currentSignal === "BUY_PUT") ||
+    (activeState.signal === "BUY_PUT" && currentSignal === "BUY_CALL");
+  if (isSignalFlipped) {
+    activeState.signalFlipCount++;
+  } else {
+    activeState.signalFlipCount = 0;
+  }
+  if (activeState.signalFlipCount >= SIGNAL_FLIP_CONFIRM_TICKS) {
+    await exitPaperTrade("signal_flip", ltp);
+    return;
+  }
+
+  // ── Exit 3: Momentum reversal (fast adverse move) ─────────────────────────
+  // If premium dropped ≥8% from its window-peak within 5 minutes, exit.
+  // This catches velocity, not just level — a slow drift is handled by trailing stop.
+  if (activeState.tickHistory.length >= 5) {
+    const peakInWindow = Math.max(...activeState.tickHistory.map((t) => t.price));
+    const dropPct = ((peakInWindow - ltp) / peakInWindow) * 100;
+    if (dropPct >= MOMENTUM_DROPPCT) {
+      await exitPaperTrade("momentum_reversal", ltp);
+      return;
+    }
+  }
+
+  // ── Exit 4: Spot proximity / delta risk ───────────────────────────────────
+  // If spot is within 50pts of our strike (approaching from ITM side), exit.
+  // The option is about to go ATM→OTM and gamma will crush the premium.
+  const metrics = getLatestChainMetrics();
+  const spot = metrics?.spotPrice ?? 0;
+  if (spot > 0 && activeState.strike > 0) {
+    if (activeState.signal === "BUY_CALL") {
+      if (spot > activeState.strike && (spot - activeState.strike) <= SPOT_PROXIMITY_THRESHOLD) {
+        await exitPaperTrade("spot_proximity", ltp);
+        return;
+      }
+    } else {
+      if (spot < activeState.strike && (activeState.strike - spot) <= SPOT_PROXIMITY_THRESHOLD) {
+        await exitPaperTrade("spot_proximity", ltp);
+        return;
+      }
+    }
+  }
+
+  // ── Exit 5: VIX spike ─────────────────────────────────────────────────────
+  // If VIX spikes 20%+ above its 15-min baseline, a volatility event is underway.
+  // Throttled to every 30s to avoid DB queries on every tick.
+  if (Date.now() - lastVixCheckAt >= VIX_CHECK_THROTTLE_MS) {
+    lastVixCheckAt = Date.now();
+    const regime = await getLatestRegime();
+    if (regime?.vixLevel) {
+      activeState.vixHistory.push({ ts: Date.now(), vix: regime.vixLevel });
+      const vixCutoff = Date.now() - VIX_BASELINE_WINDOW_MS;
+      activeState.vixHistory = activeState.vixHistory.filter((v) => v.ts >= vixCutoff);
+      if (activeState.vixHistory.length >= 3) {
+        const baseline = activeState.vixHistory.reduce((sum, v) => sum + v.vix, 0) / activeState.vixHistory.length;
+        const spikePct = ((regime.vixLevel - baseline) / baseline) * 100;
+        if (spikePct >= VIX_SPIKE_PCT) {
+          await exitPaperTrade("vix_spike", ltp);
+          return;
+        }
+      }
+    }
+  }
+
+  // ── Exit 6: Adaptive trailing stop + floor lock (enhanced existing) ────────
+  // Trail gap now scales with profit level instead of fixed 8%.
+  const profitPct = ((activeState.highestPrice - activeState.entryPrice) / activeState.entryPrice) * 100;
+  const adaptiveGap = adaptiveTrailGap(profitPct, activeState.isFarOTM);
   const { stopPrice, milestoneLevel } = computeRatchetStop(
     activeState.entryPrice,
     activeState.highestPrice,
-    activeState.trailGapPct,
+    adaptiveGap,
     activeState.hardStopPct,
     activeState.milestoneStep,
     activeState.lastMilestoneLevel,
@@ -271,6 +404,7 @@ async function monitorPaperTrade(): Promise<void> {
     exitReason = activeState.lastMilestoneLevel > 0 ? "trailing_stop" : "stop_loss";
   }
 
+  // Existing: far-OTM time stop (unchanged)
   if (activeState.isFarOTM) {
     const elapsed = Date.now() - activeState.executedAt;
     if (elapsed >= FAR_OTM_TIME_STOP_MS) {
@@ -294,7 +428,7 @@ async function monitorPaperTrade(): Promise<void> {
           deltaEstimate: 0,
           isFarOTM: activeState.isFarOTM,
           hardStopPct: activeState.hardStopPct,
-          trailGapPct: activeState.trailGapPct,
+          trailGapPct: adaptiveGap,
           milestoneStep: activeState.milestoneStep,
           lastMilestoneLevel: activeState.lastMilestoneLevel,
         }),
@@ -319,7 +453,7 @@ async function evaluatePaperTrade(): Promise<void> {
     }
   }
 
-  await monitorPaperTrade();
+  await monitorPaperTrade(optionSide);
 }
 
 async function broadcastState(): Promise<void> {
