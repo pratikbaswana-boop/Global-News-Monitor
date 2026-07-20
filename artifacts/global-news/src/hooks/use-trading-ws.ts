@@ -79,7 +79,7 @@ export function useTradingWs<T>(
     const ws = ensureWs(userId);
 
     const checkConn = setInterval(() => {
-      setConnected(ws.readyState === WebSocket.OPEN);
+      setConnected(globalWs?.readyState === WebSocket.OPEN);
     }, 500);
 
     return () => {

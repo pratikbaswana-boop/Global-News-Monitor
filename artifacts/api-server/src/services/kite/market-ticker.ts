@@ -43,6 +43,7 @@ import {
 } from "./tick-archive.js";
 import { computeIntradaySignal } from "../market/tier3-signal.js";
 import { broadcastMarketData } from "../../lib/ws-hub.js";
+import { AMF_STOCKS, AMF_STOCK_SYMBOLS } from "./amf-stock-universe.js";
 
 // Minimum spacing between observations fed into the tier-3 buffer. Now that the direction
 // EMA is time-based (see tier3-signal.ts), the feed rate no longer changes the smoothing,
@@ -89,6 +90,55 @@ let lastRecordAt = 0;
 
 // Reverse lookup: token → equity symbol for spot tick parsing.
 const tokenToEquitySymbol = new Map<number, string>();
+
+// AMF stock tokens resolved dynamically from Kite NSE instruments.
+// Populated on connect by resolveAmfStockTokens().
+const amfStockTokens = new Map<string, number>(); // symbol → token
+
+/**
+ * Resolve Kite instrument tokens for all AMF stocks by fetching NSE instruments.
+ * Called once on ticker connect. Stores results in amfStockTokens + tokenToEquitySymbol.
+ */
+async function resolveAmfStockTokens(kite: Awaited<ReturnType<typeof getGlobalKiteClient>>): Promise<void> {
+  if (!kite) return;
+  try {
+    const raw = await kite.getInstruments("NSE");
+    let allInstruments: Array<Record<string, unknown>>;
+    if (typeof raw === "string") {
+      // Manual CSV parse — same approach as kite-option-chain.ts
+      const csvStr = raw as string;
+      const lines = csvStr.trim().split("\n");
+      const header = lines[0]!.split(",");
+      allInstruments = lines.slice(1).map((line: string) => {
+        const vals = line.split(",");
+        const row: Record<string, unknown> = {};
+        for (let i = 0; i < header.length; i++) {
+          row[header[i]!] = vals[i];
+        }
+        return row;
+      });
+    } else if (Array.isArray(raw)) {
+      allInstruments = raw as Array<Record<string, unknown>>;
+    } else {
+      allInstruments = [];
+    }
+    const symbolSet = new Set(AMF_STOCK_SYMBOLS);
+    let resolved = 0;
+    for (const inst of allInstruments) {
+      const ts = String(inst["tradingsymbol"] ?? "");
+      if (symbolSet.has(ts) && inst["instrument_token"] != null) {
+        const token = Number(inst["instrument_token"]);
+        amfStockTokens.set(ts, token);
+        tokenToEquitySymbol.set(token, ts);
+        symbolToToken.set(ts, token);
+        resolved++;
+      }
+    }
+    logger.info({ resolved, total: AMF_STOCKS.length }, "market-ticker: resolved AMF stock tokens from NSE instruments");
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : err }, "market-ticker: failed to resolve AMF stock tokens");
+  }
+}
 
 // Held-position instruments subscribed for tick-driven exits (R5), plus a symbol->token
 // index covering both the chain and held instruments.
@@ -148,12 +198,29 @@ export function getLtpBySymbol(tradingsymbol: string): number | null {
   return t && t.ltp > 0 ? t.ltp : null;
 }
 
-/** Latest LTP for a spot equity (RELIANCE/TCS/HDFCBANK/SENSEX) from KiteTicker, or null if stale. */
+/** Latest LTP for a spot equity (RELIANCE/TCS/HDFCBANK/SENSEX + AMF stocks) from KiteTicker, or null if stale. */
 export function getSpotEquityLtp(symbol: string): number | null {
   const entry = spotEquityPrices.get(symbol);
   if (!entry) return null;
   if (Date.now() - entry.lastTickAt > SPOT_EQUITY_STALE_MS) return null;
   return entry.ltp > 0 ? entry.ltp : null;
+}
+
+/** Get LTP for any AMF stock by symbol. Alias for getSpotEquityLtp. */
+export function getAmfStockLtp(symbol: string): number | null {
+  return getSpotEquityLtp(symbol);
+}
+
+/** Get all AMF stock LTPs as a map of symbol → { ltp, lastTickAt }. */
+export function getAllAmfStockPrices(): Map<string, { ltp: number; lastTickAt: number }> {
+  const result = new Map<string, { ltp: number; lastTickAt: number }>();
+  for (const stock of AMF_STOCKS) {
+    const entry = spotEquityPrices.get(stock.symbol);
+    if (entry && entry.ltp > 0) {
+      result.set(stock.symbol, entry);
+    }
+  }
+  return result;
 }
 
 /** Subscribe a held position's instrument so its ticks flow into the feed (R5). */
@@ -371,7 +438,7 @@ export async function startMarketTicker(): Promise<boolean> {
     api_key: creds.apiKey,
     access_token: creds.accessToken,
     reconnect: true,
-    max_retry: 10,
+    max_retry: 300,
     max_delay: 60,
   });
 
@@ -394,6 +461,14 @@ export async function startMarketTicker(): Promise<boolean> {
     const equityTokens = Object.values(SPOT_EQUITY_TOKENS).map((e) => e.token);
     ticker!.subscribe(equityTokens);
     ticker!.setMode(ticker!.modeFull, equityTokens);
+
+    // Subscribe AMF stock universe (resolved from NSE instruments).
+    if (amfStockTokens.size > 0) {
+      const amfTokens = [...amfStockTokens.values()];
+      ticker!.subscribe(amfTokens);
+      ticker!.setMode(ticker!.modeFull, amfTokens);
+      logger.info({ count: amfTokens.length }, "market-ticker: subscribed AMF stock universe");
+    }
   });
 
   ticker.on("ticks", (ticks: unknown[]) => {
@@ -428,6 +503,19 @@ export async function startMarketTicker(): Promise<boolean> {
   for (const [symbol, info] of Object.entries(SPOT_EQUITY_TOKENS)) {
     tokenToEquitySymbol.set(info.token, symbol);
   }
+
+  // Resolve AMF stock tokens from NSE instruments, then subscribe if ticker is already connected.
+  void getGlobalKiteClient().then(async (kite) => {
+    await resolveAmfStockTokens(kite);
+    // If ticker already connected (connect handler ran before resolution finished),
+    // subscribe the AMF tokens now.
+    if (ticker && ticker.connected() && amfStockTokens.size > 0) {
+      const amfTokens = [...amfStockTokens.values()];
+      ticker.subscribe(amfTokens);
+      ticker.setMode(ticker.modeFull, amfTokens);
+      logger.info({ count: amfTokens.length }, "market-ticker: subscribed AMF stock universe (post-resolve)");
+    }
+  });
 
   logger.info("market-ticker: started");
   return true;

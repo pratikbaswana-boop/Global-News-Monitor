@@ -9,9 +9,11 @@ import Sources from "@/pages/sources";
 import Intelligence from "@/pages/intelligence";
 import Trading from "@/pages/trading";
 import PaperTrading from "@/pages/paper-trading";
+import AmfPage from "@/pages/amf";
 import LandingPage from "@/pages/landing";
 import { AuthProvider } from "@/hooks/use-auth";
 import { AuthGuard } from "@/components/auth/auth-guard";
+import { PAPER_TRADING_ALLOWED_EMAILS } from "@/lib/paper-trading-access";
 import { useAppOpenTracking, usePageViewTracking } from "@/hooks/use-engagement";
 
 const queryClient = new QueryClient();
@@ -63,8 +65,15 @@ function Router() {
       </Route>
       <Route path="/paper-trading">
         {() => (
-          <AuthGuard>
+          <AuthGuard allowedEmails={PAPER_TRADING_ALLOWED_EMAILS}>
             <PaperTrading />
+          </AuthGuard>
+        )}
+      </Route>
+      <Route path="/amf">
+        {() => (
+          <AuthGuard>
+            <AmfPage />
           </AuthGuard>
         )}
       </Route>

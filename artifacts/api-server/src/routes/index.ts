@@ -10,6 +10,7 @@ import brokerRouter from "./broker";
 import tradingRouter from "./trading";
 import paperTradingRouter from "./paper-trading";
 import condorRouter from "./condor";
+import amfRouter from "./amf";
 
 const router: IRouter = Router();
 
@@ -24,5 +25,6 @@ router.use(brokerRouter);
 router.use(tradingRouter);
 router.use(paperTradingRouter);
 router.use(condorRouter);
+router.use(amfRouter);
 
 export default router;

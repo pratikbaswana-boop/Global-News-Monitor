@@ -18,6 +18,7 @@ async function buildAll() {
     entryPoints: [
       path.resolve(artifactDir, "src/index.ts"),
       path.resolve(artifactDir, "src/worker.ts"),
+      path.resolve(artifactDir, "src/scripts/condor-backtest.ts"),
     ],
     platform: "node",
     bundle: true,

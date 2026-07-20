@@ -4,17 +4,23 @@ import { useAuth } from "@/hooks/use-auth";
 
 interface AuthGuardProps {
   children: React.ReactNode;
+  allowedEmails?: string[];
 }
 
-export function AuthGuard({ children }: AuthGuardProps) {
+export function AuthGuard({ children, allowedEmails }: AuthGuardProps) {
   const { user, loading } = useAuth();
   const [, setLocation] = useLocation();
+
+  const email = user?.email ?? null;
+  const emailAllowed = !allowedEmails || (email !== null && allowedEmails.includes(email.toLowerCase()));
 
   useEffect(() => {
     if (!loading && !user) {
       setLocation("/");
+    } else if (!loading && user && !emailAllowed) {
+      setLocation("/dashboard");
     }
-  }, [user, loading, setLocation]);
+  }, [user, loading, emailAllowed, setLocation]);
 
   if (loading) {
     return (
@@ -24,7 +30,7 @@ export function AuthGuard({ children }: AuthGuardProps) {
     );
   }
 
-  if (!user) return null;
+  if (!user || !emailAllowed) return null;
 
   return <>{children}</>;
 }

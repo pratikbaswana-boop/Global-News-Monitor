@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useTradingWs } from "@/hooks/use-trading-ws";
+import { useAuth } from "@/hooks/use-auth";
 import { CondorSection } from "@/components/trading/condor-section";
 import {
   TrendingUp,
@@ -73,6 +74,7 @@ function formatPnl(n: number | null | undefined): { text: string; color: string 
 export default function PaperTradingPage() {
   const [restState, setRestState] = useState<PaperTradingState | null>(null);
   const [loading, setLoading] = useState(true);
+  const { user } = useAuth();
 
   const [wsState, setWsState] = useState<PaperTradingState | null>(null);
 
@@ -81,11 +83,13 @@ export default function PaperTradingPage() {
   });
 
   useEffect(() => {
-    fetch(`${API_BASE}/paper-trading/state`)
+    fetch(`${API_BASE}/paper-trading/state`, {
+      headers: { "x-user-email": user?.email ?? "" },
+    })
       .then((res) => res.ok ? res.json() : null)
       .then((d) => { if (d) { setRestState(d); setLoading(false); } })
       .catch(() => setLoading(false));
-  }, []);
+  }, [user?.email]);
 
   const state = wsState ?? restState;
 

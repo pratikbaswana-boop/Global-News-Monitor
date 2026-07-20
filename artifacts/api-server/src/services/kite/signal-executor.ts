@@ -28,6 +28,33 @@ const ASSET_KITE_MAP: Record<string, { tradingsymbol: string; exchange: string }
   reliance: { tradingsymbol: "RELIANCE", exchange: "NSE" },
   tcs: { tradingsymbol: "TCS", exchange: "NSE" },
   "hdfc-bank": { tradingsymbol: "HDFCBANK", exchange: "NSE" },
+  // AMF Stock Universe
+  ongc: { tradingsymbol: "ONGC", exchange: "NSE" },
+  ntpc: { tradingsymbol: "NTPC", exchange: "NSE" },
+  powergrid: { tradingsymbol: "POWERGRID", exchange: "NSE" },
+  infosys: { tradingsymbol: "INFY", exchange: "NSE" },
+  wipro: { tradingsymbol: "WIPRO", exchange: "NSE" },
+  hcltech: { tradingsymbol: "HCLTECH", exchange: "NSE" },
+  techm: { tradingsymbol: "TECHM", exchange: "NSE" },
+  "icici-bank": { tradingsymbol: "ICICIBANK", exchange: "NSE" },
+  sbin: { tradingsymbol: "SBIN", exchange: "NSE" },
+  "axis-bank": { tradingsymbol: "AXISBANK", exchange: "NSE" },
+  "kotak-bank": { tradingsymbol: "KOTAKBANK", exchange: "NSE" },
+  maruti: { tradingsymbol: "MARUTI", exchange: "NSE" },
+  "tata-motors": { tradingsymbol: "TATAMOTORS", exchange: "NSE" },
+  "m-and-m": { tradingsymbol: "M&M", exchange: "NSE" },
+  hindunilvr: { tradingsymbol: "HINDUNILVR", exchange: "NSE" },
+  itc: { tradingsymbol: "ITC", exchange: "NSE" },
+  nestleind: { tradingsymbol: "NESTLEIND", exchange: "NSE" },
+  sunpharma: { tradingsymbol: "SUNPHARMA", exchange: "NSE" },
+  drreddy: { tradingsymbol: "DRREDDY", exchange: "NSE" },
+  cipla: { tradingsymbol: "CIPLA", exchange: "NSE" },
+  "tata-steel": { tradingsymbol: "TATASTEEL", exchange: "NSE" },
+  hindalco: { tradingsymbol: "HINDALCO", exchange: "NSE" },
+  "jsw-steel": { tradingsymbol: "JSWSTEEL", exchange: "NSE" },
+  lt: { tradingsymbol: "LT", exchange: "NSE" },
+  ultracemco: { tradingsymbol: "ULTRACEMCO", exchange: "NSE" },
+  "bharti-artl": { tradingsymbol: "BHARTIARTL", exchange: "NSE" },
 };
 
 interface ExecutionResult {
@@ -675,7 +702,8 @@ async function executeSpotSignalForUser(
   snapshot: typeof marketSnapshotsTable.$inferSelect,
   tradingsymbol: string,
   exchange: string,
-  direction: "up" | "down"
+  direction: "up" | "down",
+  skipConfidenceCheck = false
 ): Promise<ExecutionResult> {
   // Spot trades require a clear directional signal
   if (direction !== "up" && direction !== "down") {
@@ -693,11 +721,13 @@ async function executeSpotSignalForUser(
     return { executed: false, reason: `Auto-trade disabled for ${snapshot.assetId}` };
   }
 
-  // 2. Check per-asset confidence threshold
-  const signalConfidenceRank = CONFIDENCE_RANK[snapshot.predictedConfidence] ?? 0;
-  const requiredConfidenceRank = CONFIDENCE_RANK[pref.minConfidence] ?? 1;
-  if (signalConfidenceRank < requiredConfidenceRank) {
-    return { executed: false, reason: `Signal confidence ${snapshot.predictedConfidence} below threshold ${pref.minConfidence}` };
+  // 2. Check per-asset confidence threshold — skipped for tick-driven entries
+  if (!skipConfidenceCheck) {
+    const signalConfidenceRank = CONFIDENCE_RANK[snapshot.predictedConfidence] ?? 0;
+    const requiredConfidenceRank = CONFIDENCE_RANK[pref.minConfidence] ?? 1;
+    if (signalConfidenceRank < requiredConfidenceRank) {
+      return { executed: false, reason: `Signal confidence ${snapshot.predictedConfidence} below threshold ${pref.minConfidence}` };
+    }
   }
 
   // 3. Check intraday-only setting
@@ -745,10 +775,15 @@ async function executeSpotSignalForUser(
     return { executed: false, reason: "Already holding position" };
   }
 
-  // Get margins to compute order size
-  const margins = await getMargins(userId);
+  // Get margins to compute order size — retry up to 3 times
+  let margins = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    margins = await getMargins(userId);
+    if (margins) break;
+    if (attempt < 2) await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+  }
   if (!margins) {
-    return { executed: false, reason: "Could not fetch margins" };
+    return { executed: false, reason: "Could not fetch margins after 3 retries" };
   }
 
   const availableCash = margins.equity?.available?.cash || margins.equity?.available?.liveBalance || 0;
@@ -866,7 +901,8 @@ async function executeSpotSignalForUser(
 async function executeOptionSignalForUser(
   userId: string,
   account: typeof brokerAccountsTable.$inferSelect,
-  snapshot: typeof marketSnapshotsTable.$inferSelect
+  snapshot: typeof marketSnapshotsTable.$inferSelect,
+  skipConfidenceCheck = false
 ): Promise<ExecutionResult> {
   const pref = await getUserTradePreference(userId, snapshot.assetId);
   if (!pref) {
@@ -877,11 +913,13 @@ async function executeOptionSignalForUser(
     return { executed: false, reason: `Auto-trade disabled for ${snapshot.assetId}` };
   }
 
-  // Confidence check
-  const signalConfidenceRank = CONFIDENCE_RANK[snapshot.predictedConfidence] ?? 0;
-  const requiredConfidenceRank = CONFIDENCE_RANK[pref.minConfidence] ?? 1;
-  if (signalConfidenceRank < requiredConfidenceRank) {
-    return { executed: false, reason: `Signal confidence ${snapshot.predictedConfidence} below threshold ${pref.minConfidence}` };
+  // Confidence check — skipped for tick-driven entries (paper engine parity)
+  if (!skipConfidenceCheck) {
+    const signalConfidenceRank = CONFIDENCE_RANK[snapshot.predictedConfidence] ?? 0;
+    const requiredConfidenceRank = CONFIDENCE_RANK[pref.minConfidence] ?? 1;
+    if (signalConfidenceRank < requiredConfidenceRank) {
+      return { executed: false, reason: `Signal confidence ${snapshot.predictedConfidence} below threshold ${pref.minConfidence}` };
+    }
   }
 
   // Intraday check
@@ -909,10 +947,15 @@ async function executeOptionSignalForUser(
     return { executed: false, reason: "Could not fetch option quotes" };
   }
 
-  // Determine capital to deploy
-  const margins = await getMargins(userId);
+  // Determine capital to deploy — retry up to 3 times (Kite API may not be ready at startup)
+  let margins = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    margins = await getMargins(userId);
+    if (margins) break;
+    if (attempt < 2) await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+  }
   if (!margins) {
-    return { executed: false, reason: "Could not fetch margins" };
+    return { executed: false, reason: "Could not fetch margins after 3 retries" };
   }
   const availableCash = margins.equity?.available?.cash || margins.equity?.available?.liveBalance || 0;
   // Use 95% of available cash to leave buffer — Kite margin requirement is
@@ -1074,7 +1117,8 @@ async function executeSignalForUser(
   snapshot: typeof marketSnapshotsTable.$inferSelect,
   tradingsymbol: string,
   exchange: string,
-  direction: "up" | "down"
+  direction: "up" | "down",
+  skipConfidenceCheck = false
 ): Promise<ExecutionResult> {
   const pref = await getUserTradePreference(userId, snapshot.assetId);
   // Only NIFTY supports option trading via Kite. SENSEX options use a different
@@ -1085,9 +1129,9 @@ async function executeSignalForUser(
   }
   const isIndexAsset = snapshot.assetId === "nifty50";
   if (pref?.useOptions || isIndexAsset) {
-    return executeOptionSignalForUser(userId, account, snapshot);
+    return executeOptionSignalForUser(userId, account, snapshot, skipConfidenceCheck);
   }
-  return executeSpotSignalForUser(userId, account, snapshot, tradingsymbol, exchange, direction);
+  return executeSpotSignalForUser(userId, account, snapshot, tradingsymbol, exchange, direction, skipConfidenceCheck);
 }
 
 /**
@@ -1466,7 +1510,7 @@ export async function dispatchEntryForSide(assetId: string, side: "BUY_CALL" | "
   }
   const sideShort = side === "BUY_CALL" ? "CALL" : "PUT";
   await dispatchToEligibleUsers(assetId, sideShort, (userId, account, snapshot) =>
-    executeSignalForUser(userId, account, snapshot, kiteSymbol.tradingsymbol, kiteSymbol.exchange, "up")
+    executeSignalForUser(userId, account, snapshot, kiteSymbol.tradingsymbol, kiteSymbol.exchange, "up", true)
   );
 }
 
@@ -1478,7 +1522,7 @@ export async function dispatchSpotForDirection(assetId: string, direction: "up" 
     return;
   }
   await dispatchToEligibleUsers(assetId, null, (userId, account, snapshot) =>
-    executeSignalForUser(userId, account, snapshot, kiteSymbol.tradingsymbol, kiteSymbol.exchange, direction)
+    executeSignalForUser(userId, account, snapshot, kiteSymbol.tradingsymbol, kiteSymbol.exchange, direction, true)
   );
 }
 

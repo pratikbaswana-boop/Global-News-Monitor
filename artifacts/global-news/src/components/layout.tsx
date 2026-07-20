@@ -13,13 +13,16 @@ import {
   SidebarFooter,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
-import { LayoutDashboard, TrendingUp, Database, Globe, Brain, Wallet, Menu, FlaskConical } from "lucide-react";
+import { LayoutDashboard, TrendingUp, Database, Globe, Brain, Wallet, Menu, FlaskConical, Rocket } from "lucide-react";
 import React from "react";
 import { UserMenu } from "@/components/auth/user-menu";
+import { useAuth } from "@/hooks/use-auth";
+import { canAccessPaperTrading } from "@/lib/paper-trading-access";
 const basePath = import.meta.env.BASE_URL;
 
 export function AppLayout({ children }: { children: React.ReactNode }) {
   const [location] = useLocation();
+  const { user } = useAuth();
 
   return (
     <SidebarProvider defaultOpen>
@@ -78,11 +81,21 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
                       </Link>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
+                  {canAccessPaperTrading(user?.email) && (
+                    <SidebarMenuItem>
+                      <SidebarMenuButton asChild isActive={location === "/paper-trading"} className="data-[active=true]:bg-primary/10 data-[active=true]:text-primary data-[active=true]:border-l-2 data-[active=true]:border-primary rounded-md px-3 py-2.5 text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-all">
+                        <Link href={`${basePath}paper-trading`}>
+                          <FlaskConical className="h-4 w-4" />
+                          <span>Paper Trading</span>
+                        </Link>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  )}
                   <SidebarMenuItem>
-                    <SidebarMenuButton asChild isActive={location === "/paper-trading"} className="data-[active=true]:bg-primary/10 data-[active=true]:text-primary data-[active=true]:border-l-2 data-[active=true]:border-primary rounded-md px-3 py-2.5 text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-all">
-                      <Link href={`${basePath}paper-trading`}>
-                        <FlaskConical className="h-4 w-4" />
-                        <span>Paper Trading</span>
+                    <SidebarMenuButton asChild isActive={location === "/amf"} className="data-[active=true]:bg-emerald-500/10 data-[active=true]:text-emerald-400 data-[active=true]:border-l-2 data-[active=true]:border-emerald-500 rounded-md px-3 py-2.5 text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-all">
+                      <Link href={`${basePath}amf`}>
+                        <Rocket className="h-4 w-4" />
+                        <span>AMF</span>
                       </Link>
                     </SidebarMenuButton>
                   </SidebarMenuItem>

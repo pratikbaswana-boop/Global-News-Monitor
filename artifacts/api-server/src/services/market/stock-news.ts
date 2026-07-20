@@ -82,6 +82,52 @@ const ASSET_NEWS_DRIVERS: Record<string, string[]> = {
     "gold-silver ratio", "industrial metal", "solar demand", "photovoltaic",
     "fed rate", "real yields", "dollar index", "safe haven",
   ],
+
+  // ── AMF Stock Universe ──────────────────────────────────────────────────────
+
+  // Energy
+  ongc: ["ongc", "oil and natural gas", "crude oil", "brent", "oil exploration", "upstream oil", "government disinvestment", "oil subsidy"],
+  ntpc: ["ntpc", "power generation", "thermal power", "renewable energy", "coal", "power tariff", "capacity addition", "electricity"],
+  powergrid: ["powergrid", "power grid", "transmission", "inter-regional", "grid", "power infrastructure", "renewable transmission"],
+
+  // IT
+  infosys: ["infosys", "infy", "it services", "indian it", "software exporter", "outsourcing", "deal wins", "digital transformation", "guidance", "attrition", "h-1b", "visa", "rupee", "usd/inr", "bfsi spending"],
+  wipro: ["wipro", "it services", "indian it", "software exporter", "outsourcing", "deal wins", "attrition", "h-1b", "visa", "rupee", "usd/inr", "guidance"],
+  hcltech: ["hcltech", "hcl technologies", "it services", "indian it", "software exporter", "outsourcing", "deal wins", "attrition", "h-1b", "visa", "rupee", "engineering services"],
+  techm: ["tech mahindra", "techm", "it services", "indian it", "software exporter", "outsourcing", "5g", "telecom it", "deal wins", "attrition", "h-1b", "visa", "rupee"],
+
+  // Banking
+  "icici-bank": ["icici bank", "icicibank", "icici", "private banks", "banking sector", "bank nifty", "net interest margin", "nim", "credit growth", "loan growth", "deposit growth", "casa", "asset quality", "npa", "provisioning", "rbi", "repo rate"],
+  sbin: ["state bank of india", "sbin", "sbi", "psu banks", "banking sector", "bank nifty", "net interest margin", "credit growth", "loan growth", "deposit growth", "asset quality", "npa", "provisioning", "rbi", "repo rate", "government stake"],
+  "axis-bank": ["axis bank", "axisbank", "private banks", "banking sector", "bank nifty", "net interest margin", "credit growth", "loan growth", "deposit growth", "casa", "asset quality", "npa", "provisioning", "rbi", "repo rate"],
+  "kotak-bank": ["kotak mahindra", "kotakbank", "kotak bank", "private banks", "banking sector", "bank nifty", "net interest margin", "credit growth", "deposit growth", "casa", "asset quality", "npa", "rbi", "repo rate"],
+
+  // Auto
+  maruti: ["maruti", "maruti suzuki", "auto sector", "car sales", "passenger vehicle", "pv sales", "automobile", "vehicle dispatch", "semiconductor shortage", "rural demand", "fuel price"],
+  "tata-motors": ["tata motors", "tatamotors", "jlr", "jaguar land rover", "auto sector", "commercial vehicle", "cv sales", "passenger vehicle", "ev", "electric vehicle", "vehicle sales", "brexit"],
+  "m-and-m": ["mahindra", "m&m", "auto sector", "tractor sales", "farm equipment", "suv", "passenger vehicle", "ev", "electric vehicle", "rural demand"],
+
+  // FMCG
+  hindunilvr: ["hindustan unilever", "hul", "hindunilvr", "fmcg", "consumer goods", "volume growth", "rural demand", "input cost", "palm oil", "crude palm oil", "premiumisation", "d2c"],
+  itc: ["itc", "itc limited", "fmcg", "cigarette", "tobacco", "gst on tobacco", "hotel business", "paperboard", "agri business", "volume growth", "rural demand"],
+  nestleind: ["nestle india", "nestleind", "nestle", "fmcg", "consumer goods", "volume growth", "input cost", "coffee", "milk prices", "premiumisation", "maggi", "kitkat"],
+
+  // Pharma
+  sunpharma: ["sun pharma", "sunpharma", "pharma sector", "usfda", "fda approval", "generic", "andaman", "specialty pharma", "ranbaxy", "us pharma", "drug recall"],
+  drreddy: ["dr reddy", "drreddy", "dr reddy's", "pharma sector", "usfda", "fda approval", "generic", "andaman", "api", "us pharma", "drug recall", "russia"],
+  cipla: ["cipla", "pharma sector", "usfda", "fda approval", "generic", "respiratory", "api", "us pharma", "drug recall", "south africa"],
+
+  // Metals
+  "tata-steel": ["tata steel", "tatasteel", "steel sector", "steel price", "hot rolled coil", "hrc", "iron ore", "coking coal", "china steel", "anti-dumping", "corus", "europe steel"],
+  hindalco: ["hindalco", "novelis", "aluminium", "aluminum", "copper", "lme", "london metal exchange", "metal sector", "china demand", "auto demand"],
+  "jsw-steel": ["jsw steel", "jswsteel", "steel sector", "steel price", "hot rolled coil", "hrc", "iron ore", "coking coal", "china steel", "anti-dumping", "capacity addition"],
+
+  // Infra / Cement
+  lt: ["larsen", "l&t", "lt", "infrastructure", "order book", "order inflow", "construction", "engineering", "ePC", "hydrocarbon", "power", "middle east order"],
+  ultracemco: ["ultratech", "ultracemco", "cement sector", "cement demand", "real estate", "infrastructure spending", "capacity addition", "clinker", "fuel cost"],
+
+  // Telecom
+  "bharti-artl": ["bharti airtel", "bhartiartl", "airtel", "telecom sector", "arpu", "5g", "tariff hike", "subscriber addition", "fiber", "africa telecom", "vodafone idea", "jio"],
 };
 
 // ── Time window: back to the last trading day ─────────────────────────────────

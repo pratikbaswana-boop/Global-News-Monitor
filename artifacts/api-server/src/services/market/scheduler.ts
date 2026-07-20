@@ -40,6 +40,33 @@ const FORECAST_ASSETS: Array<{ id: string; name: string; symbol: string }> = [
   { id: "hdfc-bank",  name: "HDFC Bank",              symbol: "HDFCBANK" },
   { id: "gold",       name: "Gold (₹/10g)",           symbol: "GOLD" },
   { id: "silver",     name: "Silver (₹/kg)",          symbol: "SILVER" },
+  // AMF Stock Universe
+  { id: "ongc",        name: "Oil & Natural Gas Corp",   symbol: "ONGC" },
+  { id: "ntpc",        name: "NTPC Ltd",                 symbol: "NTPC" },
+  { id: "powergrid",   name: "Power Grid Corp",          symbol: "POWERGRID" },
+  { id: "infosys",     name: "Infosys Ltd",              symbol: "INFY" },
+  { id: "wipro",       name: "Wipro Ltd",                symbol: "WIPRO" },
+  { id: "hcltech",     name: "HCL Technologies",         symbol: "HCLTECH" },
+  { id: "techm",       name: "Tech Mahindra",            symbol: "TECHM" },
+  { id: "icici-bank",  name: "ICICI Bank",               symbol: "ICICIBANK" },
+  { id: "sbin",        name: "State Bank of India",      symbol: "SBIN" },
+  { id: "axis-bank",   name: "Axis Bank",                symbol: "AXISBANK" },
+  { id: "kotak-bank",  name: "Kotak Mahindra Bank",      symbol: "KOTAKBANK" },
+  { id: "maruti",      name: "Maruti Suzuki India",      symbol: "MARUTI" },
+  { id: "tata-motors", name: "Tata Motors",              symbol: "TATAMOTORS" },
+  { id: "m-and-m",     name: "Mahindra & Mahindra",      symbol: "M&M" },
+  { id: "hindunilvr",  name: "Hindustan Unilever",       symbol: "HINDUNILVR" },
+  { id: "itc",         name: "ITC Ltd",                  symbol: "ITC" },
+  { id: "nestleind",   name: "Nestle India",             symbol: "NESTLEIND" },
+  { id: "sunpharma",   name: "Sun Pharmaceutical",       symbol: "SUNPHARMA" },
+  { id: "drreddy",     name: "Dr Reddy's Labs",          symbol: "DRREDDY" },
+  { id: "cipla",       name: "Cipla Ltd",                symbol: "CIPLA" },
+  { id: "tata-steel",  name: "Tata Steel",               symbol: "TATASTEEL" },
+  { id: "hindalco",    name: "Hindalco Industries",      symbol: "HINDALCO" },
+  { id: "jsw-steel",   name: "JSW Steel",                symbol: "JSWSTEEL" },
+  { id: "lt",          name: "Larsen & Toubro",          symbol: "LT" },
+  { id: "ultracemco",  name: "UltraTech Cement",         symbol: "ULTRACEMCO" },
+  { id: "bharti-artl", name: "Bharti Airtel",            symbol: "BHARTIARTL" },
 ];
 
 type Window = "pre-market" | "open" | "closed";
@@ -669,7 +696,10 @@ async function refreshSnapshotTier3(): Promise<void> {
         let kiteLtp: number | null = null;
         if (asset.id === "nifty50") {
           kiteLtp = kiteSpotPrice;
-        } else if (asset.symbol === "RELIANCE" || asset.symbol === "TCS" || asset.symbol === "HDFCBANK" || asset.symbol === "SENSEX") {
+        } else if (asset.symbol === "SENSEX") {
+          kiteLtp = getSpotEquityLtp("SENSEX");
+        } else {
+          // All AMF stocks (including RELIANCE, TCS, HDFCBANK) use getSpotEquityLtp
           kiteLtp = getSpotEquityLtp(asset.symbol);
         }
         // If KiteTicker has a fresh LTP, use it — no Yahoo call needed.
