@@ -83,6 +83,12 @@ let spotPrice = 0;
 let spotPrevClose = 0; // NIFTY previous-day close from the full-mode tick's ohlc.close
 let latestMetrics: KiteOptionChainObservation | null = null;
 
+// Intraday day's high/low for NIFTY spot — used by the spot momentum override
+// in computeLiveOptionSide to detect market turns when AI direction is stale.
+let spotDayHigh = 0;
+let spotDayLow = 0;
+let spotDayKey = ""; // YYYY-MM-DD IST — reset on new trading day
+
 // Short rolling history of NIFTY spot ticks for the intraday persistence (chop) read.
 const spotSamples: { t: number; p: number }[] = [];
 const SPOT_SAMPLE_WINDOW_MS = 30_000; // keep ~30s of spot ticks
@@ -161,6 +167,23 @@ export function isTickerConnected(): boolean {
  * band (priceImpactEstimate) lives on. Null until both a live tick and the ohlc
  * previous close have been seen, so the range gate can safely pass-through on warmup.
  */
+/**
+ * Intraday high/low for NIFTY spot. Returns null until at least one tick has been
+ * seen today. Used by the spot momentum override to detect market turns.
+ */
+export function getNiftySpotIntradayRange(): { dayHigh: number; dayLow: number; spot: number; moveFromLowPct: number; moveFromHighPct: number } | null {
+  if (spotPrice <= 0 || spotDayHigh <= 0 || spotDayLow <= 0) return null;
+  const range = spotDayHigh - spotDayLow;
+  if (range <= 0) return null;
+  return {
+    dayHigh: spotDayHigh,
+    dayLow: spotDayLow,
+    spot: spotPrice,
+    moveFromLowPct: ((spotPrice - spotDayLow) / spotDayLow) * 100,
+    moveFromHighPct: ((spotPrice - spotDayHigh) / spotDayHigh) * 100,
+  };
+}
+
 export function getNiftySpotMovePct(): number | null {
   if (spotPrice <= 0 || spotPrevClose <= 0) return null;
   return ((spotPrice - spotPrevClose) / spotPrevClose) * 100;
@@ -283,6 +306,18 @@ function onTicks(ticks: unknown[]): void {
         spotSamples.push({ t: now, p: p.ltp });
         const cutoff = now - SPOT_SAMPLE_WINDOW_MS;
         while (spotSamples.length && spotSamples[0]!.t < cutoff) spotSamples.shift();
+
+        // Track intraday high/low — reset on new IST trading day
+        const istDate = new Date(now + 330 * 60 * 1000).toISOString().slice(0, 10);
+        if (spotDayKey !== istDate) {
+          spotDayKey = istDate;
+          spotDayHigh = p.ltp;
+          spotDayLow = p.ltp;
+        } else {
+          if (p.ltp > spotDayHigh) spotDayHigh = p.ltp;
+          if (p.ltp < spotDayLow) spotDayLow = p.ltp;
+        }
+
         archiveSpotTick(p.token, p.ltp, p.prevClose);
       }
       if (p.prevClose > 0) spotPrevClose = p.prevClose;
@@ -539,6 +574,9 @@ export function stopMarketTicker(): void {
   spotSamples.length = 0;
   latestMetrics = null;
   lastRecordAt = 0;
+  spotDayHigh = 0;
+  spotDayLow = 0;
+  spotDayKey = "";
   heldTokens.clear();
   symbolToToken.clear();
   spotEquityPrices.clear();

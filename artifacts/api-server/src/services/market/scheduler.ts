@@ -231,9 +231,18 @@ async function runEnsembleForAllAssets(window: Window): Promise<void> {
     FORECAST_ASSETS.map(a => ({ id: a.id, name: a.name })),
   );
 
+  // ── NIFTY-first priority: run NIFTY ensemble before all other assets so the ──
+  // hot context gets a fresh direction ASAP. The tick evaluator depends on it for
+  // entry decisions. Then run the remaining assets in parallel batches.
+  const NIFTY_IDX = FORECAST_ASSETS.findIndex(a => a.id === "nifty50");
+  const niftyAsset = NIFTY_IDX >= 0 ? FORECAST_ASSETS[NIFTY_IDX]! : null;
+  const otherAssets = FORECAST_ASSETS.filter(a => a.id !== "nifty50");
+
   let ok = 0;
   let failed = 0;
-  for (const asset of FORECAST_ASSETS) {
+
+  // Helper: run ensemble for a single asset (extracted from the original loop body)
+  const runOneAsset = async (asset: { id: string; name: string; symbol: string }): Promise<void> => {
     try {
       // Fetch real OHLCV from Yahoo Finance for this asset
       let candleSummary = "Historical price data unavailable";
@@ -500,7 +509,31 @@ async function runEnsembleForAllAssets(window: Window): Promise<void> {
       failed++;
       logger.warn({ asset: asset.id, err: err instanceof Error ? err.message : err }, "market-scheduler: ensemble failed");
     }
+  };
+
+  // ── Run NIFTY first (priority) ──────────────────────────────────────────────
+  if (niftyAsset) {
+    const t0 = Date.now();
+    await runOneAsset(niftyAsset);
+    ok++;
+    logger.info({ assetId: "nifty50", elapsedMs: Date.now() - t0 }, "market-scheduler: NIFTY ensemble completed (priority)");
   }
+
+  // ── Run remaining assets in parallel batches of 5 ───────────────────────────
+  const BATCH_SIZE = 5;
+  for (let i = 0; i < otherAssets.length; i += BATCH_SIZE) {
+    const batch = otherAssets.slice(i, i + BATCH_SIZE);
+    const results = await Promise.allSettled(
+      batch.map(async (asset) => {
+        await runOneAsset(asset);
+        ok++;
+      })
+    );
+    for (const r of results) {
+      if (r.status === "rejected") failed++;
+    }
+  }
+
   logger.info({ window, ok, failed }, "market-scheduler: ensemble cycle complete");
   // touch cutoff so the linter doesn't complain in case we wire it later
   void cutoff;

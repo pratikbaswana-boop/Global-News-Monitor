@@ -6,7 +6,7 @@ import { getMargins, syncPortfolio } from "./portfolio.js";
 import { getGlobalKiteClient, getNearestExpiry } from "./kite-option-chain.js";
 import { computeIntradaySignal, type IntradaySignal } from "../market/tier3-signal.js";
 import { getHotContext } from "../market/hot-context.js";
-import { getLatestChainMetrics, getLtpBySymbol, getNiftySpotMovePct, getNiftySpotPersistence } from "./market-ticker.js";
+import { getLatestChainMetrics, getLtpBySymbol, getNiftySpotMovePct, getNiftySpotPersistence, getNiftySpotIntradayRange } from "./market-ticker.js";
 import { enqueueAudit } from "../../lib/audit-queue.js";
 import {
   canEnter,
@@ -574,8 +574,49 @@ export function computeLiveOptionSide(
       ? ((spot - metrics.maxPainStrike) / metrics.maxPainStrike) * 100
       : null;
 
+  // ── Spot momentum override: detect market turns when AI direction is stale ──
+  // When the hot context hasn't been refreshed in >10 min and spot has reversed
+  // significantly from the day's extreme, override the AI direction so the tick
+  // evaluator can fire a side transition without waiting for the next ensemble.
+  let aiDirection = ctx?.direction ?? "neutral";
+  const ctxAgeMs = ctx ? Date.now() - ctx.publishedAt : Infinity;
+  const STALE_CTX_MS = 10 * 60 * 1000; // 10 min
+  const REVERSAL_THRESHOLD_PCT = 0.25; // spot reversed 0.25% from day's extreme
+
+  if (ctxAgeMs > STALE_CTX_MS) {
+    const intradayRange = getNiftySpotIntradayRange();
+    if (intradayRange && intradayRange.dayHigh - intradayRange.dayLow > 20) {
+      // AI says down but spot has bounced significantly from the day's low → market turning up
+      if (aiDirection === "down" && intradayRange.moveFromLowPct > REVERSAL_THRESHOLD_PCT) {
+        aiDirection = "up";
+        logger.info({
+          assetId,
+          oldDir: ctx?.direction,
+          newDir: "up",
+          ctxAgeMin: Math.round(ctxAgeMs / 60000),
+          moveFromLowPct: intradayRange.moveFromLowPct.toFixed(2),
+          dayLow: intradayRange.dayLow,
+          spot: intradayRange.spot,
+        }, "signal-executor: spot momentum override (stale AI down → up)");
+      }
+      // AI says up but spot has dropped significantly from the day's high → market turning down
+      else if (aiDirection === "up" && intradayRange.moveFromHighPct < -REVERSAL_THRESHOLD_PCT) {
+        aiDirection = "down";
+        logger.info({
+          assetId,
+          oldDir: ctx?.direction,
+          newDir: "down",
+          ctxAgeMin: Math.round(ctxAgeMs / 60000),
+          moveFromHighPct: intradayRange.moveFromHighPct.toFixed(2),
+          dayHigh: intradayRange.dayHigh,
+          spot: intradayRange.spot,
+        }, "signal-executor: spot momentum override (stale AI up → down)");
+      }
+    }
+  }
+
   const base = deriveBaseFromInputs({
-    aiDirectionRaw: ctx?.direction ?? "neutral",
+    aiDirectionRaw: aiDirection,
     maxPainDistancePct,
     putCallRatio: metrics?.pcr ?? null,
     shortCoveringSignal: ctx?.shortCoveringSignal ?? "none",
