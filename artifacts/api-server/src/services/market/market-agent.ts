@@ -559,7 +559,7 @@ export async function runMarketAgent(
   candleSummary: string,
   marketStats: string,
   lessons: string | null,
-  options: { force?: boolean; ohlcvCandles?: YahooOHLCV[]; relevantNews?: string } = {},
+  options: { force?: boolean; ohlcvCandles?: YahooOHLCV[]; relevantNews?: string; breakingNewsContext?: { title: string; previousSignal?: string }; previousSignal?: { predictedDirection: string; predictedConfidence: string; dominantNarrative: string; triggerNewsSummary: string; snapshotAt: Date } | null } = {},
 ): Promise<MarketSignal> {
   if (!options.force) {
     const cached = _cache.get(assetId);
@@ -640,6 +640,16 @@ export async function runMarketAgent(
     logger.warn({ assetId }, "market-agent: no news block for prompt");
   }
 
+  const breakingBlock = options.breakingNewsContext
+    ? `\n⚠️ BREAKING NEWS TRIGGERED RE-EVALUATION\n${options.breakingNewsContext.previousSignal ? `Previous signal: ${options.breakingNewsContext.previousSignal}\n` : ""}Breaking headline: "${options.breakingNewsContext.title}"\nYou MUST evaluate whether this news changes the previous signal.\nIf it does, state what changed and why. If it doesn't, say "no change" and maintain previous direction.\n`
+    : "";
+
+  const prevSig = options.previousSignal;
+  const timeAgo = prevSig ? Math.round((Date.now() - prevSig.snapshotAt.getTime()) / 60000) : 0;
+  const previousSignalBlock = prevSig
+    ? `\nPREVIOUS SIGNAL (your last evaluation, ${timeAgo} min ago):\n- Direction: ${prevSig.predictedDirection}\n- Confidence: ${prevSig.predictedConfidence}\n- Rationale: ${prevSig.dominantNarrative}\n- Key drivers: ${prevSig.triggerNewsSummary.slice(0, 200)}\n\nYou are re-evaluating. Has the narrative changed since your last call?\nIf yes → state what changed and adjust direction/confidence.\nIf no → maintain previous direction with same or slightly higher confidence.\n`
+    : "";
+
   const context6h = `
 HORIZON: 6 hours (intraday)
 CURRENT SESSION DATA (use this, not historical closes):
@@ -647,7 +657,7 @@ CURRENT SESSION DATA (use this, not historical closes):
 - Current price vs open: ${sessionOpenPrice > 0 ? (((latestCandle?.close ?? 0) - sessionOpenPrice) / sessionOpenPrice * 100).toFixed(2) : "0"}%
 - Candle trust score: ${candleTrust.trustScore.toFixed(2)} (1.0=clean, <0.5=flagged)
 - Candle flags: ${candleTrust.flags.length > 0 ? candleTrust.flags.join(", ") : "none"}
-- Live put/call ratio: ${tier3.putCallRatio !== null ? tier3.putCallRatio.toFixed(2) + " (below 0.8=bullish, above 1.1=bearish)" : "unavailable"}
+- Live put/call ratio: ${tier3.putCallRatio !== null ? tier3.putCallRatio.toFixed(2) + " (below 0.8=bullish, above 1.1=bearish, BUT >1.5=contrarian bullish=everyone hedged, <0.5=contrarian bearish=everyone bought calls)" : "unavailable"}
 - Advance/decline ratio: ${tier3.advanceDeclineRatio !== null ? tier3.advanceDeclineRatio.toFixed(2) + " (above 1.5=bullish breadth)" : "unavailable"}
 - India VIX: ${tier3.indiaVix !== null ? tier3.indiaVix.toFixed(1) + " (5d change: " + (tier3.indiaVix5dChange !== null && tier3.indiaVix5dChange > 0 ? "+" : "") + (tier3.indiaVix5dChange !== null ? tier3.indiaVix5dChange.toFixed(1) : "N/A") + ")" : "unavailable"}
 - Live implied volatility: ${tier3.impliedVolPct !== null ? tier3.impliedVolPct.toFixed(1) + "%" : "unavailable"}
@@ -662,7 +672,11 @@ HMM REGIME: ${currentRegime} (active for ${regimeAge} consecutive cycles)
 REGIME INSTRUCTION: If regime says RISK_OFF but live microstructure data is unavailable, rely on candle quality, price momentum, and geopolitical channels instead. Do not default to NEUTRAL just because NSE data is missing.
 ACTIVE GEOPOLITICAL CHANNELS (only channels with daysSinceTrigger <= 3 and decayedWeight > 0.3):
 ${activeChannelsRaw.filter(c => c.decayedWeight > 0.3).map(c => `- ${c.name}: weight ${c.decayedWeight.toFixed(2)}`).join("\n") || "- none active"}
-${newsBlock}NEWS INSTRUCTION: You MUST reference specific headlines from the DRIVER NEWS section in your rationale. If news contradicts the quantitative signals, state the conflict explicitly and reduce confidence. If no news block is present, say so.
+${breakingBlock}${previousSignalBlock}${newsBlock}NEWS INSTRUCTION: You are seeing narrative-threaded news grouped by developing stories.
+- Reference the STORY (not just individual headlines) in your rationale.
+- If a story shows a reversal arc (e.g., HOLD → CUT), weight this heavily.
+- If your previous signal conflicts with the latest story arc, you MUST address the conflict explicitly.
+- If no new stories have appeared since your last evaluation, say "no new narrative" and maintain.
 Return JSON: { "call": "BULLISH" | "BEARISH" | "NEUTRAL", "confidence": 0.0-1.0, "rationale": "string max 80 words, MUST mention at least one news headline if present" }
 `.trim();
 
@@ -690,7 +704,10 @@ HMM REGIME: ${currentRegime} (active for ${regimeAge} cycles)
 REGIME INSTRUCTION: If FII net is positive AND delivery % exceeds 38%, treat this as a potential regime transition away from RISK_OFF regardless of the HMM label. State this explicitly in your rationale.
 PRICED-IN CONTEXT:
 ${activeScenariosWithDecay.map(s => `- ${s.label}: ${s.alreadyTransmitted ? "[ALREADY TRANSMITTED to market on " + s.transmissionDate + ", decay factor " + s.decayFactor.toFixed(2) + "]" : "active"}`).join("\n") || "- no active scenarios"}
-${newsBlock}NEWS INSTRUCTION: You MUST reference specific headlines from the DRIVER NEWS section in your rationale. If news contradicts the quantitative signals, state the conflict explicitly and reduce confidence.
+${breakingBlock}${previousSignalBlock}${newsBlock}NEWS INSTRUCTION: You are seeing narrative-threaded news grouped by developing stories.
+- Reference the STORY (not just individual headlines) in your rationale.
+- If a story shows a reversal arc, weight this heavily.
+- If your previous signal conflicts with the latest story arc, you MUST address the conflict explicitly.
 Return JSON: { "call": "BULLISH" | "BEARISH" | "NEUTRAL", "confidence": 0.0-1.0, "rationale": "string max 80 words, MUST mention at least one news headline if present" }
 `.trim();
 
@@ -711,7 +728,10 @@ OPTIONS STRUCTURE (3-day view):
 ACTIVE GEOPOLITICAL SCENARIOS (structural, 72h view):
 ${activeScenariosWithDecay.map(s => `- ${s.label} (prob: ${(s.probability * 100).toFixed(0)}%, channel: ${s.channel}, decay: ${s.decayFactor.toFixed(2)})`).join("\n") || "- none"}
 HMM REGIME: ${currentRegime} (${regimeAge} cycles). Weight this at 30% of your reasoning. Macro signals above are 70%.
-${newsBlock}NEWS INSTRUCTION: You MUST reference specific headlines from the DRIVER NEWS section in your rationale. If news contradicts the quantitative signals, state the conflict explicitly and reduce confidence.
+${breakingBlock}${previousSignalBlock}${newsBlock}NEWS INSTRUCTION: You are seeing narrative-threaded news grouped by developing stories.
+- Reference the STORY (not just individual headlines) in your rationale.
+- If a story shows a reversal arc, weight this heavily.
+- If your previous signal conflicts with the latest story arc, you MUST address the conflict explicitly.
 Return JSON: { "call": "BULLISH" | "BEARISH" | "NEUTRAL", "confidence": 0.0-1.0, "rationale": "string max 80 words, MUST mention at least one news headline if present" }
 `.trim();
 

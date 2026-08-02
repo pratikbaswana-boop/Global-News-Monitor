@@ -3,7 +3,7 @@ import { InsertFeedRegistry } from "@workspace/db";
 // 50+ free & open sources per the blueprint spec.
 // credibilityTier: 1=wire service, 2=established, 3=state media, 4=think tank/analysis
 export const FEED_REGISTRY_SEED: InsertFeedRegistry[] = [
-  // ─── Tier-1 Wire Services (5 min) ──────────────────────────────────────────
+  // ─── Tier-1 Wire Services (3 min) ──────────────────────────────────────────
   {
     id: "reuters-world",
     name: "Reuters World News",
@@ -11,7 +11,7 @@ export const FEED_REGISTRY_SEED: InsertFeedRegistry[] = [
     type: "rss",
     credibilityTier: 1,
     isStateMedia: false,
-    fetchIntervalSeconds: 300,
+    fetchIntervalSeconds: 180,
     parser: "rss",
   },
   {
@@ -21,7 +21,7 @@ export const FEED_REGISTRY_SEED: InsertFeedRegistry[] = [
     type: "rss",
     credibilityTier: 1,
     isStateMedia: false,
-    fetchIntervalSeconds: 300,
+    fetchIntervalSeconds: 180,
     parser: "rss",
   },
   {
@@ -31,7 +31,7 @@ export const FEED_REGISTRY_SEED: InsertFeedRegistry[] = [
     type: "rss",
     credibilityTier: 1,
     isStateMedia: false,
-    fetchIntervalSeconds: 300,
+    fetchIntervalSeconds: 180,
     parser: "rss",
   },
   {
@@ -41,7 +41,7 @@ export const FEED_REGISTRY_SEED: InsertFeedRegistry[] = [
     type: "rss",
     credibilityTier: 1,
     isStateMedia: false,
-    fetchIntervalSeconds: 300,
+    fetchIntervalSeconds: 180,
     parser: "rss",
   },
   {
@@ -51,7 +51,7 @@ export const FEED_REGISTRY_SEED: InsertFeedRegistry[] = [
     type: "rss",
     credibilityTier: 1,
     isStateMedia: false,
-    fetchIntervalSeconds: 300,
+    fetchIntervalSeconds: 180,
     parser: "rss",
   },
   {
@@ -61,11 +61,11 @@ export const FEED_REGISTRY_SEED: InsertFeedRegistry[] = [
     type: "rss",
     credibilityTier: 1,
     isStateMedia: false,
-    fetchIntervalSeconds: 300,
+    fetchIntervalSeconds: 180,
     parser: "rss",
   },
 
-  // ─── Tier-2 Established Media (15 min) ────────────────────────────────────
+  // ─── Tier-2 Established Media (10 min) ────────────────────────────────────
   {
     id: "aljazeera-all",
     name: "Al Jazeera All",
@@ -73,7 +73,7 @@ export const FEED_REGISTRY_SEED: InsertFeedRegistry[] = [
     type: "rss",
     credibilityTier: 2,
     isStateMedia: false,
-    fetchIntervalSeconds: 900,
+    fetchIntervalSeconds: 600,
     parser: "rss",
   },
   {
@@ -83,7 +83,7 @@ export const FEED_REGISTRY_SEED: InsertFeedRegistry[] = [
     type: "rss",
     credibilityTier: 2,
     isStateMedia: false,
-    fetchIntervalSeconds: 900,
+    fetchIntervalSeconds: 600,
     parser: "rss",
   },
   {
@@ -93,7 +93,7 @@ export const FEED_REGISTRY_SEED: InsertFeedRegistry[] = [
     type: "rss",
     credibilityTier: 2,
     isStateMedia: false,
-    fetchIntervalSeconds: 900,
+    fetchIntervalSeconds: 600,
     parser: "rss",
   },
   {
@@ -103,7 +103,7 @@ export const FEED_REGISTRY_SEED: InsertFeedRegistry[] = [
     type: "rss",
     credibilityTier: 2,
     isStateMedia: false,
-    fetchIntervalSeconds: 900,
+    fetchIntervalSeconds: 600,
     parser: "rss",
   },
   {
@@ -113,7 +113,7 @@ export const FEED_REGISTRY_SEED: InsertFeedRegistry[] = [
     type: "rss",
     credibilityTier: 2,
     isStateMedia: false,
-    fetchIntervalSeconds: 900,
+    fetchIntervalSeconds: 600,
     parser: "rss",
   },
   {
@@ -123,7 +123,7 @@ export const FEED_REGISTRY_SEED: InsertFeedRegistry[] = [
     type: "rss",
     credibilityTier: 2,
     isStateMedia: false,
-    fetchIntervalSeconds: 900,
+    fetchIntervalSeconds: 600,
     parser: "rss",
   },
   {
@@ -133,7 +133,7 @@ export const FEED_REGISTRY_SEED: InsertFeedRegistry[] = [
     type: "rss",
     credibilityTier: 2,
     isStateMedia: false,
-    fetchIntervalSeconds: 900,
+    fetchIntervalSeconds: 600,
     parser: "rss",
   },
   {
@@ -143,7 +143,7 @@ export const FEED_REGISTRY_SEED: InsertFeedRegistry[] = [
     type: "rss",
     credibilityTier: 2,
     isStateMedia: false,
-    fetchIntervalSeconds: 900,
+    fetchIntervalSeconds: 300,
     parser: "rss",
   },
   {
@@ -153,7 +153,7 @@ export const FEED_REGISTRY_SEED: InsertFeedRegistry[] = [
     type: "rss",
     credibilityTier: 2,
     isStateMedia: false,
-    fetchIntervalSeconds: 900,
+    fetchIntervalSeconds: 300,
     parser: "rss",
   },
   {
@@ -163,7 +163,7 @@ export const FEED_REGISTRY_SEED: InsertFeedRegistry[] = [
     type: "rss",
     credibilityTier: 2,
     isStateMedia: false,
-    fetchIntervalSeconds: 900,
+    fetchIntervalSeconds: 600,
     parser: "rss",
   },
   {
@@ -173,7 +173,7 @@ export const FEED_REGISTRY_SEED: InsertFeedRegistry[] = [
     type: "rss",
     credibilityTier: 2,
     isStateMedia: false,
-    fetchIntervalSeconds: 900,
+    fetchIntervalSeconds: 600,
     parser: "rss",
   },
   {
@@ -183,7 +183,7 @@ export const FEED_REGISTRY_SEED: InsertFeedRegistry[] = [
     type: "rss",
     credibilityTier: 2,
     isStateMedia: false,
-    fetchIntervalSeconds: 900,
+    fetchIntervalSeconds: 600,
     parser: "rss",
   },
   {
@@ -193,7 +193,7 @@ export const FEED_REGISTRY_SEED: InsertFeedRegistry[] = [
     type: "rss",
     credibilityTier: 2,
     isStateMedia: false,
-    fetchIntervalSeconds: 900,
+    fetchIntervalSeconds: 600,
     parser: "rss",
   },
 

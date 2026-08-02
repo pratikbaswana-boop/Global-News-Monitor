@@ -15,14 +15,17 @@
 //   crisis-regime news shock; skip entry on event-risk days or when VIX is too thin;
 //   monthly max-loss circuit breaker + a revenge-trade cooldown after a big loss.
 
-import { db, condorPositionsTable } from "@workspace/db";
-import { eq, desc } from "drizzle-orm";
+import { db, condorPositionsTable, brokerAccountsTable } from "@workspace/db";
+import { eq, desc, and } from "drizzle-orm";
 import { randomUUID } from "crypto";
 import { logger } from "../../lib/logger.js";
 import { marketTicker, getLatestChainMetrics, getLtpBySymbol } from "./market-ticker.js";
-import { getGlobalKiteClient, getNearestExpiry } from "./kite-option-chain.js";
+import { getGlobalKiteClient, getNearestWeeklyExpiry, getNextWeeklyExpiry, lookupOptionSymbol } from "./kite-option-chain.js";
 import { getHotContext } from "../market/hot-context.js";
-import { broadcastCondor } from "../../lib/ws-hub.js";
+import { broadcastCondor, broadcastCondorUser } from "../../lib/ws-hub.js";
+import { pushTradeNotification } from "../../lib/trade-notifications.js";
+import { placeOrder } from "./orders.js";
+import { getMargins } from "./portfolio.js";
 import {
   startDayRangeTracker,
   getDayRange,
@@ -44,7 +47,6 @@ const HEDGE_GAP = 150;         // hedge strikes 150pts beyond sold strikes (tigh
 const TILT_SHIFT = 100;        // tilt shifts one side closer by 100pts
 
 const MARGIN_CAPITAL_PCT = 0.55;   // Money Rule #1: max 55% of capital as margin
-const MAX_LOTS = 3;                 // paper-trading cap, mirrors "start with 1 lot" (Rule #4) with room to scale
 
 const SOLD_LEG_EXIT_MULT = 1.5;     // Rule #9: 1.5x premium → exit that leg
 const BOOK_PROFIT_FRACTION = 0.65;  // Rule #10: book at 50-70% of max profit
@@ -60,10 +62,15 @@ const MONTHLY_MAX_LOSS_PCT = 5; // Rule #16
 
 const ENTRY_WINDOW_START_MIN = 615; // 10:15 IST
 const ENTRY_WINDOW_END_MIN = 660;   // 11:00 IST
+const REENTRY_WINDOW_START_MIN = 780; // 13:00 IST (1:00 PM)
+const REENTRY_WINDOW_END_MIN = 870;   // 14:30 IST (2:30 PM)
 
 let started = false;
 let lastEntryAttemptDay = "";
 let crisisExitedToday = false;
+let condorClosedToday = false;   // set on ANY close — enables afternoon re-entry
+let reEntryDoneToday = false;    // caps at 2 entries/day (1 morning + 1 afternoon)
+let lastResetDay = "";           // tracks daily flag reset
 
 type LegRole = "sold_put" | "sold_call" | "hedge_put" | "hedge_call";
 
@@ -86,7 +93,9 @@ interface ActiveCondorState {
   expiryDate: string;
   directionTilt: "bullish" | "bearish" | "neutral";
   netPremium: number;
+  netPremiumPerUnit: number;
   maxLoss: number;
+  maxLossPerLot: number;
   maxProfit: number;
   lots: number;
   quantity: number;
@@ -121,6 +130,11 @@ function isEntryWindow(d: Date = new Date()): boolean {
   const min = istMinutesOfDay(d);
   return min >= ENTRY_WINDOW_START_MIN && min < ENTRY_WINDOW_END_MIN;
 }
+function isReEntryWindow(d: Date = new Date()): boolean {
+  if (!isTradingOpen(d)) return false;
+  const min = istMinutesOfDay(d);
+  return min >= REENTRY_WINDOW_START_MIN && min < REENTRY_WINDOW_END_MIN;
+}
 /** Days remaining until expiry (calendar days, IST). */
 function daysToExpiry(expiryDate: string, d: Date = new Date()): number {
   const expiry = new Date(`${expiryDate}T15:30:00+05:30`);
@@ -133,17 +147,6 @@ function isPastGammaCutoff(expiryDate: string, d: Date = new Date()): boolean {
   return dte <= 1.5; // roughly Wed afternoon / Thu morning for a Thu expiry
 }
 
-// ── Symbol construction (self-contained — mirrors signal-executor's private helper
-// so we never need to modify or import a private function from that file) ─────────
-function formatExpiryForSymbol(expiry: Date): string {
-  const yy = String(expiry.getFullYear()).slice(-2);
-  const mm = String(expiry.getMonth() + 1);
-  const dd = String(expiry.getDate()).padStart(2, "0");
-  return `${yy}${mm}${dd}`;
-}
-function buildOptionSymbol(expiry: Date, strike: number, type: "CE" | "PE"): string {
-  return `NIFTY${formatExpiryForSymbol(expiry)}${strike}${type}`;
-}
 function formatExpiryDateKey(expiry: Date): string {
   const y = expiry.getFullYear();
   const m = String(expiry.getMonth() + 1).padStart(2, "0");
@@ -163,7 +166,8 @@ async function getOptionPremium(symbol: string): Promise<number | null> {
     const q = (quotes as Record<string, unknown>)[`NFO:${symbol}`] as Record<string, unknown> | undefined;
     const ltp = Number(q?.["last_price"] ?? 0);
     return ltp > 0 ? ltp : null;
-  } catch {
+  } catch (err) {
+    logger.warn({ symbol, err: err instanceof Error ? err.message : err }, "condor-paper: REST quote fallback failed");
     return null;
   }
 }
@@ -189,7 +193,9 @@ async function loadStateFromDb(): Promise<void> {
       expiryDate: openRow.expiryDate,
       directionTilt: openRow.directionTilt as "bullish" | "bearish" | "neutral",
       netPremium: Number(openRow.netPremium),
+      netPremiumPerUnit: notes.netPremiumPerUnit ?? Number(openRow.netPremium) / openRow.quantity,
       maxLoss: Number(openRow.maxLoss),
+      maxLossPerLot: notes.maxLossPerLot ?? Number(openRow.maxLoss) / openRow.lots,
       maxProfit: Number(openRow.maxProfit),
       lots: openRow.lots,
       quantity: openRow.quantity,
@@ -242,12 +248,23 @@ async function tryEnterCondor(): Promise<void> {
   if (activeState !== null) return;
 
   const today = istDateKey();
-  if (lastEntryAttemptDay === today && !crisisExitedToday) return;
-  lastEntryAttemptDay = today;
+
+  // Three entry paths:
+  // 1. Morning entry: isEntryWindow() + not yet attempted today
+  // 2. Crisis re-entry: crisisExitedToday (news shock passed, re-enter with richer premiums)
+  // 3. Afternoon re-entry: isReEntryWindow() + condorClosedToday + !reEntryDoneToday
+  const isMorning = isEntryWindow();
+  const isAfternoonReEntry = isReEntryWindow() && condorClosedToday && !reEntryDoneToday;
+  const isCrisisReEntry = crisisExitedToday;
+
+  if (!isMorning && !isAfternoonReEntry && !isCrisisReEntry) return;
+  if (lastEntryAttemptDay === today && !isCrisisReEntry && !isAfternoonReEntry) return;
+  if (reEntryDoneToday && isAfternoonReEntry) return;
 
   // Rule #7 / Edge #5 — event-risk day guard (static calendar + dynamic crisis check below).
   if (isEventRiskDay()) {
     logger.info("condor-paper: skipping entry — event-risk day");
+    pushTradeNotification("condor", "skip", "Iron Condor entry skipped — today is an event-risk day (RBI policy, budget, expiry, or major event). Selling options on these days is dangerous due to sudden volatility spikes.");
     return;
   }
 
@@ -255,6 +272,7 @@ async function tryEnterCondor(): Promise<void> {
   const mtdPnl = await getMonthToDateRealisedPnl(MODE);
   if (mtdPnl <= -(CAPITAL_INITIAL * MONTHLY_MAX_LOSS_PCT) / 100) {
     logger.info({ mtdPnl }, "condor-paper: skipping entry — monthly max loss hit");
+    pushTradeNotification("condor", "skip", `Iron Condor entry skipped — monthly loss limit reached. Month-to-date P&L is ₹${mtdPnl.toFixed(0)}, which exceeds the maximum allowed loss of ${MONTHLY_MAX_LOSS_PCT}% of capital. The engine will resume next month.`, { mtdPnl });
     return;
   }
 
@@ -262,6 +280,7 @@ async function tryEnterCondor(): Promise<void> {
   const cooldownUntil = await getRevengeCooldownUntil(MODE);
   if (cooldownUntil !== null) {
     logger.info({ cooldownUntil }, "condor-paper: skipping entry — revenge-trade cooldown active");
+    pushTradeNotification("condor", "skip", `Iron Condor entry skipped — revenge-trade cooldown is active until ${new Date(cooldownUntil).toLocaleString("en-IN")}. This prevents emotional re-entry after a significant loss.`, { cooldownUntil });
     return;
   }
 
@@ -271,15 +290,18 @@ async function tryEnterCondor(): Promise<void> {
   if (!crisisExit) {
     if (regime && regime.crisisProbability > CRISIS_PROB_ENTRY_MAX) {
       logger.info({ regime }, "condor-paper: skipping entry — elevated crisis probability");
+      pushTradeNotification("condor", "skip", `Iron Condor entry skipped — market crisis probability is ${(regime.crisisProbability * 100).toFixed(1)}%, which is above the safe entry threshold of ${(CRISIS_PROB_ENTRY_MAX * 100).toFixed(1)}%. Selling options during high crisis risk can lead to large losses.`, { crisisProbability: regime.crisisProbability });
       return;
     }
     if (regime?.vixLevel !== null && regime?.vixLevel !== undefined && regime.vixLevel < VIX_LOW_THRESHOLD) {
       logger.info({ vix: regime.vixLevel }, "condor-paper: skipping entry — VIX too low, premiums too thin");
+      pushTradeNotification("condor", "skip", `Iron Condor entry skipped — VIX is ${regime.vixLevel.toFixed(2)}, which is below the minimum threshold of ${VIX_LOW_THRESHOLD}. Option premiums are too thin to sell profitably at this volatility level.`, { vix: regime.vixLevel });
       return;
     }
   } else {
     // Edge #4 — fear re-entry: only re-enter same day once the panic has genuinely passed.
     if (!regime || regime.regime === "CRISIS" || regime.crisisProbability > CRISIS_PROB_ENTRY_MAX) {
+      pushTradeNotification("condor", "skip", "Iron Condor fear re-entry skipped — market is still in crisis regime. Waiting for the panic to genuinely subside before re-entering.");
       return;
     }
     crisisExitedToday = false;
@@ -288,7 +310,10 @@ async function tryEnterCondor(): Promise<void> {
 
   const metrics = getLatestChainMetrics();
   const spot = metrics?.spotPrice ?? 0;
-  if (spot <= 0) return;
+  if (spot <= 0) {
+    pushTradeNotification("condor", "skip", "Iron Condor entry skipped — no live NIFTY spot price available from the tick feed. Cannot calculate strike prices without knowing the current index level.");
+    return;
+  }
 
   // Edge #8 / Rule #14 — self-audit the direction signal before trusting a tilt.
   const accuracy = await getTiltAccuracyPct();
@@ -299,6 +324,12 @@ async function tryEnterCondor(): Promise<void> {
     if (hot!.direction === "up") tilt = "bullish";
     else if (hot!.direction === "down") tilt = "bearish";
   }
+
+  // Directional mode: when AI has a clear direction, sell only that side's spread.
+  // AI up → sell Put spread only (bullish). AI down → sell Call spread only (bearish).
+  // Neutral/uncertain → sell both sides (full iron condor, current behavior).
+  const sellPutSide = tilt === "bullish" || tilt === "neutral";
+  const sellCallSide = tilt === "bearish" || tilt === "neutral";
 
   // Edge #2 — shift strikes toward (but never past) the live day-range, not blindly fixed.
   const dayRange = getDayRange();
@@ -320,29 +351,65 @@ async function tryEnterCondor(): Promise<void> {
   const hedgePutStrike = soldPutStrike - HEDGE_GAP;
   const hedgeCallStrike = soldCallStrike + HEDGE_GAP;
 
-  const expiry = await getNearestExpiry();
-  const soldPutSymbol = buildOptionSymbol(expiry, soldPutStrike, "PE");
-  const soldCallSymbol = buildOptionSymbol(expiry, soldCallStrike, "CE");
-  const hedgePutSymbol = buildOptionSymbol(expiry, hedgePutStrike, "PE");
-  const hedgeCallSymbol = buildOptionSymbol(expiry, hedgeCallStrike, "CE");
+  // Pick expiry — if nearest is past gamma cutoff (Wed afternoon/Thu), roll to next week.
+  let expiry = getNearestWeeklyExpiry();
+  const nearestExpiryKey = formatExpiryDateKey(expiry);
+  if (isPastGammaCutoff(nearestExpiryKey)) {
+    expiry = getNextWeeklyExpiry();
+    logger.info({ nearestExpiryKey, rolledTo: formatExpiryDateKey(expiry) }, "condor-paper: nearest expiry past gamma cutoff, rolling to next week");
+  }
 
-  const [soldPutPremium, soldCallPremium, hedgePutPremium, hedgeCallPremium] = await Promise.all([
-    getOptionPremium(soldPutSymbol),
-    getOptionPremium(soldCallSymbol),
-    getOptionPremium(hedgePutSymbol),
-    getOptionPremium(hedgeCallSymbol),
-  ]);
+  // Fetch only the premiums for the sides we're actually selling.
+  const fetchTasks: Promise<{ symbol: string; premium: number }>[] = [];
+  if (sellPutSide) {
+    fetchTasks.push(
+      getOptionPremium(lookupOptionSymbol(soldPutStrike, "PE", expiry)).then(p => ({ symbol: "soldPut", premium: p ?? 0 })),
+      getOptionPremium(lookupOptionSymbol(hedgePutStrike, "PE", expiry)).then(p => ({ symbol: "hedgePut", premium: p ?? 0 })),
+    );
+  }
+  if (sellCallSide) {
+    fetchTasks.push(
+      getOptionPremium(lookupOptionSymbol(soldCallStrike, "CE", expiry)).then(p => ({ symbol: "soldCall", premium: p ?? 0 })),
+      getOptionPremium(lookupOptionSymbol(hedgeCallStrike, "CE", expiry)).then(p => ({ symbol: "hedgeCall", premium: p ?? 0 })),
+    );
+  }
+  const results = await Promise.all(fetchTasks);
+  const premiumMap = new Map(results.map(r => [r.symbol, r.premium]));
 
-  if (!soldPutPremium || !soldCallPremium || !hedgePutPremium || !hedgeCallPremium) {
-    logger.info({ soldPutPremium, soldCallPremium, hedgePutPremium, hedgeCallPremium }, "condor-paper: missing quotes, skipping entry");
+  const soldPutPremium = premiumMap.get("soldPut") ?? null;
+  const hedgePutPremium = premiumMap.get("hedgePut") ?? null;
+  const soldCallPremium = premiumMap.get("soldCall") ?? null;
+  const hedgeCallPremium = premiumMap.get("hedgeCall") ?? null;
+
+  // Validate premiums for the sides we're selling
+  if (sellPutSide && (!soldPutPremium || !hedgePutPremium)) {
+    logger.info({ soldPutPremium, hedgePutPremium }, "condor-paper: missing put-side quotes, skipping entry");
+    pushTradeNotification("condor", "skip", `Iron Condor entry skipped — could not fetch live prices for the Put side options (sold Put at strike ${soldPutStrike} and/or hedge Put at strike ${hedgePutStrike}). The option symbol format may not match Kite's current format, or these strikes are not in the tick feed.`, { soldPutPremium, hedgePutPremium, soldPutStrike, hedgePutStrike });
+    return;
+  }
+  if (sellCallSide && (!soldCallPremium || !hedgeCallPremium)) {
+    logger.info({ soldCallPremium, hedgeCallPremium }, "condor-paper: missing call-side quotes, skipping entry");
+    pushTradeNotification("condor", "skip", `Iron Condor entry skipped — could not fetch live prices for the Call side options (sold Call at strike ${soldCallStrike} and/or hedge Call at strike ${hedgeCallStrike}). The option symbol format may not match Kite's current format, or these strikes are not in the tick feed.`, { soldCallPremium, hedgeCallPremium, soldCallStrike, hedgeCallStrike });
     return;
   }
 
-  const netPremiumPerUnit = (soldPutPremium + soldCallPremium) - (hedgePutPremium + hedgeCallPremium);
+  const soldPutSymbol = lookupOptionSymbol(soldPutStrike, "PE", expiry);
+  const soldCallSymbol = lookupOptionSymbol(soldCallStrike, "CE", expiry);
+  const hedgePutSymbol = lookupOptionSymbol(hedgePutStrike, "PE", expiry);
+  const hedgeCallSymbol = lookupOptionSymbol(hedgeCallStrike, "CE", expiry);
+
+  const soldPremiumTotal = (sellPutSide ? soldPutPremium! : 0) + (sellCallSide ? soldCallPremium! : 0);
+  const hedgePremiumTotal = (sellPutSide ? hedgePutPremium! : 0) + (sellCallSide ? hedgeCallPremium! : 0);
+  const netPremiumPerUnit = soldPremiumTotal - hedgePremiumTotal;
   if (netPremiumPerUnit <= 0) {
     logger.info({ netPremiumPerUnit }, "condor-paper: non-positive net premium, skipping entry");
+    pushTradeNotification("condor", "skip", `Iron Condor entry skipped — the net premium (sold income minus hedge cost) is ₹${netPremiumPerUnit.toFixed(2)} per unit, which is not profitable. The hedge is costing more than the sold legs are earning.`, { netPremiumPerUnit });
     return;
   }
+
+  // All gates passed and quotes validated — mark today's attempt as consumed.
+  lastEntryAttemptDay = today;
+  if (isAfternoonReEntry) reEntryDoneToday = true;
 
   const maxLossPerUnit = HEDGE_GAP - netPremiumPerUnit;
   const maxLossPerLot = maxLossPerUnit * LOT_SIZE;
@@ -350,21 +417,26 @@ async function tryEnterCondor(): Promise<void> {
 
   const marginBudget = paperCapital * MARGIN_CAPITAL_PCT;
   let lots = Math.floor(marginBudget / maxLossPerLot);
-  // Edge #6 — VIX bonus: size up slightly (still capped) when premiums are fat.
+  // Edge #6 — VIX bonus: size up slightly when premiums are fat.
   if (regime?.vixLevel && regime.vixLevel >= VIX_HIGH_THRESHOLD) lots += 1;
-  lots = Math.max(1, Math.min(lots, MAX_LOTS));
+  lots = Math.max(1, lots);
 
   const quantity = lots * LOT_SIZE;
   const netPremium = netPremiumPerUnit * quantity;
   const maxLoss = maxLossPerUnit * quantity;
   const maxProfit = netPremium;
 
-  const legs: CondorLeg[] = [
-    { leg: 3, role: "hedge_put", strike: hedgePutStrike, symbol: hedgePutSymbol, entryPremium: hedgePutPremium, quantity, closed: false, exitPremium: null, closedAt: null },
-    { leg: 4, role: "hedge_call", strike: hedgeCallStrike, symbol: hedgeCallSymbol, entryPremium: hedgeCallPremium, quantity, closed: false, exitPremium: null, closedAt: null },
-    { leg: 1, role: "sold_put", strike: soldPutStrike, symbol: soldPutSymbol, entryPremium: soldPutPremium, quantity, closed: false, exitPremium: null, closedAt: null },
-    { leg: 2, role: "sold_call", strike: soldCallStrike, symbol: soldCallSymbol, entryPremium: soldCallPremium, quantity, closed: false, exitPremium: null, closedAt: null },
-  ];
+  // Build legs array — only include the sides we're selling
+  const legs: CondorLeg[] = [];
+  let legNum = 1;
+  if (sellPutSide) {
+    legs.push({ leg: legNum++ as 1 | 2 | 3 | 4, role: "hedge_put", strike: hedgePutStrike, symbol: hedgePutSymbol, entryPremium: hedgePutPremium!, quantity, closed: false, exitPremium: null, closedAt: null });
+    legs.push({ leg: legNum++ as 1 | 2 | 3 | 4, role: "sold_put", strike: soldPutStrike, symbol: soldPutSymbol, entryPremium: soldPutPremium!, quantity, closed: false, exitPremium: null, closedAt: null });
+  }
+  if (sellCallSide) {
+    legs.push({ leg: legNum++ as 1 | 2 | 3 | 4, role: "hedge_call", strike: hedgeCallStrike, symbol: hedgeCallSymbol, entryPremium: hedgeCallPremium!, quantity, closed: false, exitPremium: null, closedAt: null });
+    legs.push({ leg: legNum++ as 1 | 2 | 3 | 4, role: "sold_call", strike: soldCallStrike, symbol: soldCallSymbol, entryPremium: soldCallPremium!, quantity, closed: false, exitPremium: null, closedAt: null });
+  }
   // Order-sequence rule: hedges are recorded/"placed" first, sold legs second (paper — no
   // real margin engine to protect, but we preserve the sequence semantics for parity with
   // the real-money engine that will reuse this same leg ordering).
@@ -379,7 +451,9 @@ async function tryEnterCondor(): Promise<void> {
     expiryDate: expiryDateKey,
     directionTilt: tilt,
     netPremium,
+    netPremiumPerUnit,
     maxLoss,
+    maxLossPerLot,
     maxProfit,
     lots,
     quantity,
@@ -413,15 +487,31 @@ async function tryEnterCondor(): Promise<void> {
       sameDirectionDays: 0,
       lastTrendDirection: activeState.lastTrendDirection,
       lastTrendCheckDay: today,
+      netPremiumPerUnit,
+      maxLossPerLot,
     }),
   });
 
   logger.info({
-    id, spot, tilt, soldPutStrike, soldCallStrike, hedgePutStrike, hedgeCallStrike,
+    id, spot, tilt, sellPutSide, sellCallSide,
+    soldPutStrike: sellPutSide ? soldPutStrike : null,
+    soldCallStrike: sellCallSide ? soldCallStrike : null,
+    hedgePutStrike: sellPutSide ? hedgePutStrike : null,
+    hedgeCallStrike: sellCallSide ? hedgeCallStrike : null,
     netPremium, maxLoss, maxProfit, lots,
-  }, "condor-paper: entered iron condor");
+  }, "condor-paper: entered directional condor");
+
+  const sideDesc = sellPutSide && sellCallSide ? "both sides (full iron condor)" : sellPutSide ? "Put side only (bullish)" : "Call side only (bearish)";
+  pushTradeNotification("condor", "entry", `Entered Iron Condor (${sideDesc}) with ${lots} lots. Net premium: ₹${netPremium.toFixed(2)}, Max profit: ₹${maxProfit.toFixed(0)}, Max loss: ₹${maxLoss.toFixed(0)}. Spot at entry: ${spot.toFixed(0)}.`, { id, tilt, lots, netPremium, maxLoss, maxProfit });
 
   void broadcastState();
+
+  // Fan out real broker orders to all condor-strategy users.
+  // Awaited (not fire-and-forget) to prevent a race condition where the monitor
+  // triggers an exit on the next tick before real DB rows are saved.
+  try { await fanOutCondorEntry(activeState); } catch (err) {
+    logger.error({ err }, "condor-real: fan-out entry failed");
+  }
 }
 
 // ── Exit helpers ───────────────────────────────────────────────────────────────
@@ -454,10 +544,288 @@ async function closeFullCondor(reason: string, liveQuotes: Map<string, number>):
 
   logger.info({ id: activeState.id, reason, realized, netAfterCosts, capital: paperCapital }, "condor-paper: closed condor");
 
+  const humanReason: Record<string, string> = {
+    gamma_cutoff: "Approaching expiry — gamma risk too high",
+    news_shock: "Crisis news detected — exiting for safety",
+    both_sold_legs_exited: "Both sold legs were closed at 1.5x premium",
+    profit_booked: "Profit target reached (65% of max profit)",
+    slow_bleed: "Slow bleed — 5 consecutive days of adverse trend",
+  };
+  pushTradeNotification("condor", "exit", `Closed Iron Condor position. P&L: ${realized >= 0 ? "+" : ""}₹${realized.toFixed(0)}. Reason: ${humanReason[reason] ?? reason}. Capital after exit: ₹${paperCapital.toFixed(0)}.`, { id: activeState.id, reason, realized, capital: paperCapital });
+
   if (reason === "news_shock") crisisExitedToday = true;
+  condorClosedToday = true;
+
+  // Fan out real broker exit orders to all condor-strategy users
+  try { await fanOutCondorExit(activeState, reason, netAfterCosts); } catch (err) {
+    logger.error({ err }, "condor-real: fan-out exit failed");
+  }
 
   activeState = null;
   void broadcastState();
+}
+
+// ── Real broker fan-out ─────────────────────────────────────────────────────────
+// After the paper engine enters a condor, we fan out real 4-leg orders to every
+// user with strategy_preference='condor' and an active broker account. Each user
+// gets their own condor_positions row (mode='real', userId set) so the trading
+// page can display it per-user.
+
+async function getCondorUsers(): Promise<typeof brokerAccountsTable.$inferSelect[]> {
+  const allActive = await db
+    .select()
+    .from(brokerAccountsTable)
+    .where(and(
+      eq(brokerAccountsTable.isActive, true),
+      eq(brokerAccountsTable.autoTradeEnabled, true),
+    ));
+  return allActive.filter((a) => (a.strategyPreference ?? "fno") === "condor");
+}
+
+async function placeCondorLegOrder(
+  userId: string,
+  leg: CondorLeg,
+  product: string,
+): Promise<boolean> {
+  const isSold = leg.role === "sold_put" || leg.role === "sold_call";
+  // Sold legs: SELL (we receive premium). Hedge legs: BUY (we pay premium).
+  const transactionType = isSold ? "SELL" : "BUY";
+  try {
+    const result = await placeOrder(userId, {
+      exchange: "NFO",
+      tradingsymbol: leg.symbol,
+      transactionType,
+      quantity: leg.quantity,
+      orderType: "MARKET",
+      product: product as "MIS" | "CNC" | "NRML",
+      tag: `condor-${leg.role}`,
+    });
+    logger.info({ userId, leg: leg.role, symbol: leg.symbol, orderId: result.kiteOrderId }, "condor-real: leg order placed");
+    return true;
+  } catch (err) {
+    logger.error({ userId, leg: leg.role, symbol: leg.symbol, err: err instanceof Error ? err.message : err }, "condor-real: leg order failed");
+    return false;
+  }
+}
+
+async function fanOutCondorEntry(state: ActiveCondorState): Promise<void> {
+  const users = await getCondorUsers();
+  if (users.length === 0) {
+    logger.info("condor-real: no condor-strategy users with active broker accounts");
+    return;
+  }
+
+  logger.info({ userCount: users.length, condorId: state.id }, "condor-real: fanning out entry to condor users");
+
+  await Promise.all(users.map(async (account) => {
+    const product = (account.defaultProduct ?? "NRML") as string;
+
+    // Check margins and calculate per-user lots
+    let userLots = state.lots;
+    let userQuantity = state.quantity;
+    let userMaxLoss = state.maxLoss;
+    let userNetPremium = state.netPremium;
+    let userMaxProfit = state.maxProfit;
+    let availableCash = 0;
+
+    try {
+      const margins = await getMargins(account.userId);
+      if (!margins) {
+        logger.warn({ userId: account.userId }, "condor-real: could not fetch margins, skipping user");
+        pushTradeNotification("condor", "skip", `Could not place Iron Condor orders for your account — broker token expired or margins unavailable. Please re-login to Kite.`, { userId: account.userId });
+        return;
+      }
+      availableCash = margins.equity?.available?.cash ?? margins.equity?.available?.liveBalance ?? 0;
+
+      // Recalculate lots based on user's actual available cash (same formula as paper engine)
+      const userMarginBudget = availableCash * MARGIN_CAPITAL_PCT;
+      userLots = Math.max(1, Math.floor(userMarginBudget / state.maxLossPerLot));
+      userQuantity = userLots * LOT_SIZE;
+      userMaxLoss = state.maxLossPerLot * userLots;
+      userNetPremium = state.netPremiumPerUnit * userQuantity;
+      userMaxProfit = userNetPremium;
+
+      if (availableCash < userMaxLoss) {
+        logger.warn({ userId: account.userId, availableCash, maxLoss: userMaxLoss }, "condor-real: insufficient margin, skipping user");
+        pushTradeNotification("condor", "skip", `Iron Condor entry skipped for your account — insufficient margin. Available: ₹${availableCash.toFixed(0)}, Required: ₹${userMaxLoss.toFixed(0)}.`, { userId: account.userId });
+        return;
+      }
+    } catch {
+      logger.warn({ userId: account.userId }, "condor-real: margin check failed, skipping user");
+      return;
+    }
+
+    // Build per-user legs with adjusted quantity
+    const userLegs: CondorLeg[] = state.legs.map(l => ({
+      ...l,
+      quantity: userQuantity,
+    }));
+
+    // Place orders: hedges first (BUY), then sold legs (SELL) — same sequence as paper
+    const hedgeLegs = userLegs.filter((l) => l.role === "hedge_put" || l.role === "hedge_call");
+    const soldLegs = userLegs.filter((l) => l.role === "sold_put" || l.role === "sold_call");
+
+    const results: boolean[] = [];
+    for (const leg of hedgeLegs) {
+      results.push(await placeCondorLegOrder(account.userId, leg, product));
+    }
+    for (const leg of soldLegs) {
+      results.push(await placeCondorLegOrder(account.userId, leg, product));
+    }
+
+    const allSuccess = results.every((r) => r);
+    const userCondorId = randomUUID();
+
+    // Save a per-user real condor position row
+    await db.insert(condorPositionsTable).values({
+      id: userCondorId,
+      mode: "real",
+      status: allSuccess ? "open" : "cancelled",
+      userId: account.userId,
+      spotAtEntry: String(state.spotAtEntry),
+      expiryDate: state.expiryDate,
+      directionTilt: state.directionTilt,
+      legsJson: JSON.stringify(userLegs),
+      netPremium: String(userNetPremium),
+      maxLoss: String(userMaxLoss),
+      maxProfit: String(userMaxProfit),
+      lots: userLots,
+      quantity: userQuantity,
+      capitalAtEntry: String(availableCash),
+      marginBlocked: String(userMaxLoss),
+      notesJson: JSON.stringify({
+        paperCondorId: state.id,
+        orderResults: results,
+        product,
+        netPremiumPerUnit: state.netPremiumPerUnit,
+        maxLossPerLot: state.maxLossPerLot,
+      }),
+    });
+
+    if (allSuccess) {
+      logger.info({ userId: account.userId, condorId: userCondorId, lots: userLots }, "condor-real: all legs placed for user");
+      pushTradeNotification("condor", "entry", `Iron Condor entered for your account — ${userLots} lots, ${userLegs.length} legs placed on Kite. Net premium: ₹${userNetPremium.toFixed(2)}, Max loss: ₹${userMaxLoss.toFixed(0)}.`, { userId: account.userId, condorId: userCondorId });
+    } else {
+      logger.warn({ userId: account.userId, condorId: userCondorId, results }, "condor-real: some legs failed for user");
+      pushTradeNotification("condor", "warning", `Iron Condor partially placed for your account — some legs failed. Please check your Kite orders tab and manually close any filled legs.`, { userId: account.userId, condorId: userCondorId });
+    }
+  }));
+}
+
+async function placeCondorExitOrder(
+  userId: string,
+  leg: CondorLeg,
+  product: string,
+): Promise<boolean> {
+  const isSold = leg.role === "sold_put" || leg.role === "sold_call";
+  // To close: sold legs were SELL → now BUY back. Hedge legs were BUY → now SELL.
+  const transactionType = isSold ? "BUY" : "SELL";
+  try {
+    const result = await placeOrder(userId, {
+      exchange: "NFO",
+      tradingsymbol: leg.symbol,
+      transactionType,
+      quantity: leg.quantity,
+      orderType: "MARKET",
+      product: product as "MIS" | "CNC" | "NRML",
+      tag: `condor-exit-${leg.role}`,
+    });
+    logger.info({ userId, leg: leg.role, symbol: leg.symbol, orderId: result.kiteOrderId }, "condor-real: exit leg order placed");
+    return true;
+  } catch (err) {
+    logger.error({ userId, leg: leg.role, symbol: leg.symbol, err: err instanceof Error ? err.message : err }, "condor-real: exit leg order failed");
+    return false;
+  }
+}
+
+async function fanOutCondorExit(state: ActiveCondorState, reason: string, estimatedPnl: number): Promise<void> {
+  const openRealRows = await db
+    .select()
+    .from(condorPositionsTable)
+    .where(and(
+      eq(condorPositionsTable.mode, "real"),
+      eq(condorPositionsTable.status, "open"),
+    ));
+
+  if (openRealRows.length === 0) {
+    logger.info("condor-real: no open real condor positions to exit");
+    return;
+  }
+
+  logger.info({ count: openRealRows.length, reason }, "condor-real: fanning out exit to condor users");
+
+  for (const row of openRealRows) {
+    if (!row.userId) continue;
+    const legs = JSON.parse(row.legsJson) as CondorLeg[];
+    const notes = row.notesJson ? JSON.parse(row.notesJson) : {};
+    const product = (notes.product ?? "NRML") as string;
+
+    // Place exit orders for all legs (reverse of entry)
+    const results: boolean[] = [];
+    for (const leg of legs) {
+      if (leg.closed) continue;
+      results.push(await placeCondorExitOrder(row.userId, leg, product));
+    }
+
+    // Mark all legs as closed in the real row (mirror paper engine's closeFullCondor)
+    const closedLegs = legs.map(l => ({ ...l, closed: true, exitPremium: l.exitPremium ?? l.entryPremium, closedAt: Date.now() }));
+
+    await db.update(condorPositionsTable).set({
+      status: "closed",
+      legsJson: JSON.stringify(closedLegs),
+      realisedPnl: String(estimatedPnl.toFixed(2)),
+      exitReason: reason,
+      closedAt: new Date(),
+    }).where(eq(condorPositionsTable.id, row.id));
+
+    const allSuccess = results.every((r) => r);
+    if (allSuccess) {
+      pushTradeNotification("condor", "exit", `Iron Condor closed for your account. Reason: ${reason}. Check your Kite orders for fill details.`, { userId: row.userId, reason });
+    } else {
+      pushTradeNotification("condor", "warning", `Iron Condor exit partially completed for your account — some legs failed to close. Please manually close remaining positions in Kite.`, { userId: row.userId, reason });
+    }
+  }
+}
+
+// Fan out a single-leg exit (Rule #9: sold leg at 1.5x premium) to real broker positions.
+// Closes just that one leg across all open real condor rows, mirroring the paper engine's closeLeg().
+async function fanOutCondorSingleLegExit(legRole: LegRole, legSymbol: string, exitPremium: number): Promise<void> {
+  const openRealRows = await db
+    .select()
+    .from(condorPositionsTable)
+    .where(and(
+      eq(condorPositionsTable.mode, "real"),
+      eq(condorPositionsTable.status, "open"),
+    ));
+
+  if (openRealRows.length === 0) return;
+
+  logger.info({ count: openRealRows.length, legRole, legSymbol }, "condor-real: fanning out single-leg exit");
+
+  for (const row of openRealRows) {
+    if (!row.userId) continue;
+    const legs = JSON.parse(row.legsJson) as CondorLeg[];
+    const notes = row.notesJson ? JSON.parse(row.notesJson) : {};
+    const product = (notes.product ?? "NRML") as string;
+
+    const leg = legs.find(l => l.role === legRole && l.symbol === legSymbol && !l.closed);
+    if (!leg) continue;
+
+    const success = await placeCondorExitOrder(row.userId, leg, product);
+    if (success) {
+      leg.closed = true;
+      leg.exitPremium = exitPremium;
+      leg.closedAt = Date.now();
+
+      await db.update(condorPositionsTable).set({
+        legsJson: JSON.stringify(legs),
+      }).where(eq(condorPositionsTable.id, row.id));
+
+      logger.info({ userId: row.userId, legRole, condorId: row.id }, "condor-real: single-leg exit placed");
+    } else {
+      pushTradeNotification("condor", "warning", `Failed to close ${legRole.replace(/_/g, " ")} leg (${legSymbol}) on your account. Please manually close it in Kite.`, { userId: row.userId, legRole });
+    }
+  }
 }
 
 // ── Monitor ────────────────────────────────────────────────────────────────────
@@ -492,6 +860,10 @@ async function monitorCondor(): Promise<void> {
     if (current !== undefined && current >= leg.entryPremium * SOLD_LEG_EXIT_MULT) {
       await closeLeg(leg, current);
       logger.info({ id: activeState.id, leg: leg.role, entry: leg.entryPremium, exit: current }, "condor-paper: exited breached sold leg");
+      // Fan out single-leg exit to real broker positions
+      try { await fanOutCondorSingleLegExit(leg.role, leg.symbol, current); } catch (err) {
+        logger.error({ err, leg: leg.role }, "condor-real: single-leg exit fan-out failed");
+      }
     }
   }
 
@@ -636,6 +1008,75 @@ async function broadcastState(): Promise<void> {
   broadcastCondor(state);
 }
 
+// Broadcast per-user real condor positions with live premiums to each user via WebSocket.
+// Called from the monitor tick so users see real-time unrealized P&L on the trading page.
+let lastUserBroadcastAt = 0;
+const USER_BROADCAST_THROTTLE_MS = 3_000;
+
+async function broadcastUserCondorStates(): Promise<void> {
+  const now = Date.now();
+  if (now - lastUserBroadcastAt < USER_BROADCAST_THROTTLE_MS) return;
+  lastUserBroadcastAt = now;
+
+  try {
+    const openRows = await db
+      .select()
+      .from(condorPositionsTable)
+      .where(and(
+        eq(condorPositionsTable.mode, "real"),
+        eq(condorPositionsTable.status, "open"),
+      ))
+      .orderBy(desc(condorPositionsTable.executedAt));
+
+    if (openRows.length === 0) return;
+
+    // Group by userId
+    const byUser = new Map<string, typeof openRows>();
+    for (const r of openRows) {
+      const uid = r.userId ?? "";
+      if (!byUser.has(uid)) byUser.set(uid, []);
+      byUser.get(uid)!.push(r);
+    }
+
+    // For each user, enrich positions with live premiums and broadcast
+    for (const [userId, rows] of byUser) {
+      if (!userId) continue;
+
+      const enriched = await Promise.all(rows.map(async (r) => {
+        const legs = JSON.parse(r.legsJson) as CondorLeg[];
+        const liveQuotes = new Map<string, number>();
+        for (const leg of legs) {
+          if (leg.closed) continue;
+          const premium = await getOptionPremium(leg.symbol);
+          if (premium !== null) liveQuotes.set(leg.symbol, premium);
+        }
+        const { unrealized, realized } = legsPnl(legs, liveQuotes);
+
+        return {
+          ...r,
+          spotAtEntry: Number(r.spotAtEntry),
+          netPremium: Number(r.netPremium),
+          maxLoss: Number(r.maxLoss),
+          maxProfit: Number(r.maxProfit),
+          capitalAtEntry: Number(r.capitalAtEntry),
+          marginBlocked: r.marginBlocked ? Number(r.marginBlocked) : null,
+          realisedPnl: r.realisedPnl ? Number(r.realisedPnl) : null,
+          legs: legs.map((l) => ({
+            ...l,
+            currentPremium: liveQuotes.get(l.symbol) ?? (l.closed ? l.exitPremium : null),
+          })),
+          unrealizedPnl: Number(unrealized.toFixed(2)),
+          realizedPnl: Number(realized.toFixed(2)),
+        };
+      }));
+
+      broadcastCondorUser(userId, { positions: enriched });
+    }
+  } catch (err) {
+    logger.error({ err }, "condor-real: broadcast user states failed");
+  }
+}
+
 export async function getCondorState(): Promise<CondorPublicState> {
   return buildPublicState();
 }
@@ -646,11 +1087,24 @@ let lastEvalAt = 0;
 
 async function evaluateCondor(): Promise<void> {
   if (!isTradingOpen()) return;
+
+  // Daily reset of flags
+  const today = istDateKey();
+  if (lastResetDay !== today) {
+    lastResetDay = today;
+    crisisExitedToday = false;
+    condorClosedToday = false;
+    reEntryDoneToday = false;
+  }
+
   if (activeState) {
     await monitorCondor();
-  } else if (isEntryWindow() || crisisExitedToday) {
+  } else if (isEntryWindow() || crisisExitedToday || isReEntryWindow()) {
     await tryEnterCondor();
   }
+
+  // Broadcast per-user real condor positions with live premiums (throttled internally)
+  void broadcastUserCondorStates();
 }
 
 export function startCondorPaperEngine(): void {

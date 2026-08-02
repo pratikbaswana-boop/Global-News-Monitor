@@ -12,10 +12,17 @@ export interface FetchedArticle {
 }
 
 // Minimal RSS/Atom parser that works without external dependencies
-function parseRssDate(dateStr: string | undefined): Date {
-  if (!dateStr) return new Date();
+function parseRssDate(dateStr: string | undefined, feedId?: string): Date {
+  if (!dateStr) {
+    logger.warn({ feedId }, "parseRssDate: no date string — falling back to current time");
+    return new Date();
+  }
   const d = new Date(dateStr);
-  return isNaN(d.getTime()) ? new Date() : d;
+  if (isNaN(d.getTime())) {
+    logger.warn({ feedId, dateStr }, "parseRssDate: unparseable date — falling back to current time");
+    return new Date();
+  }
+  return d;
 }
 
 function extractText(xml: string, tag: string): string {
@@ -83,7 +90,7 @@ export async function fetchRssFeed(feed: FeedRegistry): Promise<FetchedArticle[]
         url: link,
         title: title.slice(0, 500),
         body: description.slice(0, 2000),
-        publishedAt: parseRssDate(pubDate),
+        publishedAt: parseRssDate(pubDate, feed.id),
         credibilityTier: feed.credibilityTier,
         isStateMedia: feed.isStateMedia,
       });

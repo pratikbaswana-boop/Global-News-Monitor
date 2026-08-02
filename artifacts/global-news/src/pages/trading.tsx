@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { useMarketDataWs, useExecutionsWs, useOrdersWs } from "@/hooks/use-trading-ws";
+import { useMarketDataWs, useExecutionsWs, useOrdersWs, useTradingWs } from "@/hooks/use-trading-ws";
 import { AppLayout } from "@/components/layout";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -36,6 +36,45 @@ interface BrokerStatus {
   autoTradeEnabled: boolean;
   brokerName: string;
   expiresAt: string | null;
+  strategyPreference: string;
+}
+
+interface CondorLeg {
+  leg: number;
+  role: string;
+  strike: number;
+  symbol: string;
+  entryPremium: number;
+  quantity: number;
+  closed: boolean;
+  exitPremium: number | null;
+  closedAt: number | null;
+  currentPremium: number | null;
+}
+
+interface CondorPosition {
+  id: string;
+  mode: string;
+  status: string;
+  userId: string | null;
+  spotAtEntry: number;
+  expiryDate: string;
+  directionTilt: string;
+  legsJson: string;
+  legs: CondorLeg[];
+  netPremium: number;
+  maxLoss: number;
+  maxProfit: number;
+  lots: number;
+  quantity: number;
+  capitalAtEntry: number;
+  marginBlocked: number | null;
+  realisedPnl: number | null;
+  unrealizedPnl?: number | null;
+  realizedPnl?: number | null;
+  exitReason: string | null;
+  executedAt: string;
+  closedAt: string | null;
 }
 
 interface TradePreference {
@@ -240,6 +279,38 @@ function useTradePreferences(userId: string | undefined) {
   return { data, loading, refetch: fetchPrefs };
 }
 
+function useCondorPositions(userId: string | undefined) {
+  const [data, setData] = useState<{ positions: CondorPosition[] } | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  // WebSocket for live updates (per-user, includes unrealized P&L)
+  useTradingWs<{ positions: CondorPosition[] }>("condor-user", useCallback((d: { positions: CondorPosition[] }) => {
+    setData(d);
+    setLoading(false);
+  }, []), userId);
+
+  // REST for initial load
+  const fetchCondor = useCallback(async () => {
+    if (!userId) return;
+    try {
+      const res = await fetch(`${API_BASE}/condor/user-positions?userId=${encodeURIComponent(userId)}`);
+      if (res.ok) {
+        setData(await res.json());
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoading(false);
+    }
+  }, [userId]);
+
+  useEffect(() => {
+    fetchCondor();
+  }, [fetchCondor]);
+
+  return { data, loading, refetch: fetchCondor };
+}
+
 export default function TradingPage() {
   const { user } = useAuth();
   const userId = user?.uid;
@@ -249,6 +320,7 @@ export default function TradingPage() {
   const { data: marketData, loading: marketLoading } = useMarketData();
   const { data: execData, loading: execLoading } = useExecutions(userId);
   const { data: ordersData, loading: ordersLoading } = useOrders(userId);
+  const { data: condorData, loading: condorLoading } = useCondorPositions(userId);
 
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
@@ -256,6 +328,7 @@ export default function TradingPage() {
   const [disconnecting, setDisconnecting] = useState(false);
   const [updatingPrefs, setUpdatingPrefs] = useState<Record<string, boolean>>({});
   const [configuringAsset, setConfiguringAsset] = useState<string | null>(null);
+  const [switchingStrategy, setSwitchingStrategy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [exitingId, setExitingId] = useState<string | null>(null);
   const [exitingAll, setExitingAll] = useState(false);
@@ -449,6 +522,23 @@ export default function TradingPage() {
     }
   }
 
+  async function switchStrategy(strategy: string) {
+    if (!userId) return;
+    setSwitchingStrategy(true);
+    try {
+      await fetch(`${API_BASE}/broker/settings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId, strategyPreference: strategy }),
+      });
+      await refetchStatus();
+    } catch {
+      // ignore
+    } finally {
+      setSwitchingStrategy(false);
+    }
+  }
+
   async function handleExitTrade(execId: string) {
     if (!userId) return;
     setExitingId(execId);
@@ -493,6 +583,8 @@ export default function TradingPage() {
   const expiresAt = brokerStatus?.expiresAt
     ? new Date(brokerStatus.expiresAt).toLocaleString()
     : null;
+  const strategyPreference = brokerStatus?.strategyPreference ?? "fno";
+  const isCondorStrategy = strategyPreference === "condor";
 
   return (
     <AppLayout>
@@ -567,6 +659,37 @@ export default function TradingPage() {
                         />
                         <Label className="text-sm text-muted-foreground">Auto-Trade</Label>
                       </div>
+                      {brokerStatus?.autoTradeEnabled && (
+                        <div className="space-y-2 pt-2 border-t border-border/10">
+                          <Label className="text-xs text-muted-foreground">Strategy</Label>
+                          <div className="grid grid-cols-2 gap-2">
+                            <button
+                              onClick={() => switchStrategy("fno")}
+                              disabled={switchingStrategy}
+                              className={`rounded-lg border p-3 text-left transition-colors ${
+                                (brokerStatus?.strategyPreference ?? "fno") === "fno"
+                                  ? "bg-primary/10 border-primary/40 text-primary"
+                                  : "bg-[#0c0e14] border-border/20 text-muted-foreground hover:border-border/40"
+                              }`}
+                            >
+                              <p className="text-xs font-bold">F&O</p>
+                              <p className="text-[10px] text-muted-foreground/70 mt-0.5">Option buying</p>
+                            </button>
+                            <button
+                              onClick={() => switchStrategy("condor")}
+                              disabled={switchingStrategy}
+                              className={`rounded-lg border p-3 text-left transition-colors ${
+                                brokerStatus?.strategyPreference === "condor"
+                                  ? "bg-primary/10 border-primary/40 text-primary"
+                                  : "bg-[#0c0e14] border-border/20 text-muted-foreground hover:border-border/40"
+                              }`}
+                            >
+                              <p className="text-xs font-bold">Iron Condor</p>
+                              <p className="text-[10px] text-muted-foreground/70 mt-0.5">Option selling</p>
+                            </button>
+                          </div>
+                        </div>
+                      )}
                       <Button
                         variant="destructive"
                         size="sm"
@@ -654,8 +777,46 @@ export default function TradingPage() {
               </Card>
             </div>
 
-            {/* Right: Asset Preferences */}
+            {/* Right: Asset Preferences / Condor Info */}
             <div className="lg:col-span-2 space-y-5">
+              {isCondorStrategy ? (
+                <Card className="bg-[#10131b] border-border/20 shadow-none rounded-lg">
+                  <CardHeader className="pb-3 border-b border-border/20">
+                    <CardTitle className="text-[11px] font-bold uppercase tracking-[0.12em] flex items-center gap-2 text-muted-foreground">
+                      <Shield className="h-4 w-4 text-primary" />
+                      Iron Condor Strategy
+                    </CardTitle>
+                    <CardDescription className="text-xs text-muted-foreground/60">
+                      Directional Iron Condor with Hedge — option selling for theta income
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="p-4 space-y-3 text-xs text-muted-foreground">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="rounded-lg bg-[#0c0e14] border border-border/10 p-3">
+                        <p className="text-[10px] uppercase tracking-wider">Strategy Type</p>
+                        <p className="text-sm font-mono text-primary">Option Selling</p>
+                      </div>
+                      <div className="rounded-lg bg-[#0c0e14] border border-border/10 p-3">
+                        <p className="text-[10px] uppercase tracking-wider">Entry Window</p>
+                        <p className="text-sm font-mono text-primary">10:15 - 11:00 IST</p>
+                      </div>
+                      <div className="rounded-lg bg-[#0c0e14] border border-border/10 p-3">
+                        <p className="text-[10px] uppercase tracking-wider">Expiry</p>
+                        <p className="text-sm font-mono text-primary">Weekly Thursday</p>
+                      </div>
+                      <div className="rounded-lg bg-[#0c0e14] border border-border/10 p-3">
+                        <p className="text-[10px] uppercase tracking-wider">Max Risk</p>
+                        <p className="text-sm font-mono text-primary">Defined (Hedged)</p>
+                      </div>
+                    </div>
+                    <div className="mt-3 p-3 rounded-md bg-muted/20 border border-border/10">
+                      <p className="text-[10px] leading-relaxed">
+                        <strong className="text-primary">How it works:</strong> The engine sells far-OTM Put and Call options (collecting premium) while buying farther-OTM hedges (capping max loss). It tilts strikes based on AI direction signals and exits at 1.5x premium, 65% profit booking, or on crisis news. Trades are placed automatically on your Kite account.
+                      </p>
+                    </div>
+                  </CardContent>
+                </Card>
+              ) : (
               <Card className="bg-[#10131b] border-border/20 shadow-none rounded-lg">
                 <CardHeader className="pb-3 border-b border-border/20">
                   <CardTitle className="text-[11px] font-bold uppercase tracking-[0.12em] flex items-center gap-2 text-muted-foreground">
@@ -824,9 +985,10 @@ export default function TradingPage() {
                   )}
                 </CardContent>
               </Card>
+              )}
 
               {/* Risk Settings */}
-              {isConnected && prefsData && (
+              {isConnected && !isCondorStrategy && prefsData && (
                 <Card className="bg-[#10131b] border-border/20 shadow-none rounded-lg">
                   <CardHeader className="pb-3 border-b border-border/20">
                     <CardTitle className="text-[11px] font-bold uppercase tracking-[0.12em] flex items-center gap-2 text-muted-foreground">
@@ -920,8 +1082,117 @@ export default function TradingPage() {
               </CardContent>
             </Card>
 
-            {/* Active Trades + History Tabs */}
-            {isConnected && (
+            {/* Condor Positions */}
+            {isConnected && isCondorStrategy && (
+              <Card className="bg-[#10131b] border-border/20 shadow-none rounded-lg">
+                <CardHeader className="pb-3 border-b border-border/20">
+                  <CardTitle className="text-[11px] font-bold uppercase tracking-[0.12em] flex items-center gap-2 text-muted-foreground">
+                    <Shield className="h-4 w-4 text-primary" />
+                    Iron Condor Positions
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="p-4">
+                  {condorLoading ? (
+                    <div className="space-y-2">
+                      {[...Array(3)].map((_, i) => <Skeleton key={i} className="h-12 bg-muted/30 rounded-lg" />)}
+                    </div>
+                  ) : (() => {
+                    const openCondors = condorData?.positions.filter((p) => p.status === "open") ?? [];
+                    const closedCondors = condorData?.positions.filter((p) => p.status === "closed") ?? [];
+                    if (openCondors.length === 0 && closedCondors.length === 0) {
+                      return (
+                        <div className="flex flex-col items-center justify-center py-8 text-center text-muted-foreground">
+                          <Shield className="h-8 w-8 mb-2 text-muted-foreground/30" />
+                          <p className="text-sm">No Iron Condor positions yet</p>
+                          <p className="text-xs text-muted-foreground/60 mt-1">The engine enters between 10:15 - 11:00 IST, with afternoon re-entry after a close (1:00 - 2:30 PM)</p>
+                        </div>
+                      );
+                    }
+                    return (
+                      <div className="space-y-3">
+                        {openCondors.map((pos) => {
+                          const uPnl = pos.unrealizedPnl ?? null;
+                          const rPnl = pos.realizedPnl ?? pos.realisedPnl ?? null;
+                          const totalPnl = (uPnl ?? 0) + (rPnl ?? 0);
+                          return (
+                          <div key={pos.id} className="rounded-lg border border-primary/20 bg-primary/5 p-4">
+                            <div className="flex items-center justify-between mb-2">
+                              <p className="text-sm font-mono font-medium text-primary">Active · {pos.lots} lots</p>
+                              <div className="flex items-center gap-2">
+                                {uPnl !== null && (
+                                  <span className={`text-xs font-mono font-bold ${uPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                    {uPnl >= 0 ? "+" : ""}₹{formatNumber(uPnl, 0)}
+                                  </span>
+                                )}
+                                <Badge variant="outline" className="text-[9px] bg-primary/10 text-primary border-primary/30">{pos.directionTilt}</Badge>
+                              </div>
+                            </div>
+                            <div className="grid grid-cols-4 gap-2 text-[10px]">
+                              <div><span className="text-muted-foreground">Spot: </span><span className="font-mono">{formatNumber(pos.spotAtEntry, 0)}</span></div>
+                              <div><span className="text-muted-foreground">Premium: </span><span className="font-mono text-emerald-400">₹{formatNumber(pos.netPremium)}</span></div>
+                              <div><span className="text-muted-foreground">Max P: </span><span className="font-mono text-emerald-400">₹{formatNumber(pos.maxProfit, 0)}</span></div>
+                              <div><span className="text-muted-foreground">Max L: </span><span className="font-mono text-red-400">₹{formatNumber(pos.maxLoss, 0)}</span></div>
+                            </div>
+                            <div className="mt-2 space-y-1">
+                              {pos.legs.map((leg) => {
+                                const legPnl = leg.currentPremium !== null
+                                  ? (leg.role.startsWith("sold")
+                                    ? (leg.entryPremium - leg.currentPremium) * leg.quantity
+                                    : (leg.currentPremium - leg.entryPremium) * leg.quantity)
+                                  : null;
+                                return (
+                                <div key={leg.leg} className="flex items-center justify-between text-[10px] py-1 border-t border-border/5">
+                                  <div className="flex items-center gap-2">
+                                    <Badge variant="outline" className={`text-[8px] ${leg.role.startsWith("sold") ? "text-red-400 border-red-500/30" : "text-emerald-400 border-emerald-500/30"}`}>{leg.role.replace(/_/g, " ")}</Badge>
+                                    <span className="font-mono">{leg.symbol}</span>
+                                  </div>
+                                  <div className="flex items-center gap-3">
+                                    <span className="font-mono text-muted-foreground">₹{formatNumber(leg.entryPremium)} {leg.currentPremium !== null && <span className="text-muted-foreground/50">→ ₹{formatNumber(leg.currentPremium)}</span>}</span>
+                                    {legPnl !== null && (
+                                      <span className={`font-mono ${legPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>{legPnl >= 0 ? "+" : ""}₹{formatNumber(legPnl, 0)}</span>
+                                    )}
+                                  </div>
+                                </div>
+                              );})}
+                            </div>
+                          </div>
+                        );})}
+                        {closedCondors.length > 0 && (
+                          <div className="overflow-x-auto mt-3">
+                            <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-2">Closed Positions</p>
+                            <table className="w-full text-xs">
+                              <thead>
+                                <tr className="text-muted-foreground border-b border-border/10">
+                                  <th className="text-left py-2 px-2">Expiry</th>
+                                  <th className="text-right py-2 px-2">Lots</th>
+                                  <th className="text-right py-2 px-2">Premium</th>
+                                  <th className="text-center py-2 px-2">Reason</th>
+                                  <th className="text-right py-2 px-2">Closed</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {closedCondors.map((pos) => (
+                                  <tr key={pos.id} className="border-b border-border/5 hover:bg-muted/5">
+                                    <td className="py-2 px-2 font-mono">{pos.expiryDate}</td>
+                                    <td className="py-2 px-2 text-right font-mono">{pos.lots}</td>
+                                    <td className="py-2 px-2 text-right font-mono text-emerald-400">₹{formatNumber(pos.netPremium)}</td>
+                                    <td className="py-2 px-2 text-center"><Badge variant="outline" className="text-[9px]">{pos.exitReason ?? "—"}</Badge></td>
+                                    <td className="py-2 px-2 text-right text-muted-foreground text-[10px]">{pos.closedAt ? new Date(pos.closedAt).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "—"}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Active Trades + History Tabs — F&O only */}
+            {isConnected && !isCondorStrategy && (
               <Tabs defaultValue="active" className="w-full">
                 <TabsList className="bg-[#10131b] border border-border/20">
                   <TabsTrigger value="active" className="data-[state=active]:bg-primary/10 data-[state=active]:text-primary">

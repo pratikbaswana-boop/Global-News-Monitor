@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { logger } from "../lib/logger.js";
 import { getPaperTradingState } from "../services/kite/paper-trade-engine.js";
+import { getTradeNotifications, clearTradeNotifications } from "../lib/trade-notifications.js";
 
 const router = Router();
 
@@ -36,6 +37,18 @@ router.get("/paper-trading/state", async (_req, res) => {
     logger.error({ err }, "paper-trading: state fetch failed");
     res.status(500).json({ error: err instanceof Error ? err.message : "Failed to fetch paper trading state" });
   }
+});
+
+// GET /paper-trading/notifications — Get recent trade skip/entry/exit notifications
+router.get("/paper-trading/notifications", (req, res) => {
+  const limit = Math.min(parseInt(req.query["limit"] as string) || 50, 100);
+  res.json({ notifications: getTradeNotifications(limit) });
+});
+
+// DELETE /paper-trading/notifications — Clear all notifications
+router.delete("/paper-trading/notifications", (_req, res) => {
+  clearTradeNotifications();
+  res.json({ ok: true });
 });
 
 export default router;

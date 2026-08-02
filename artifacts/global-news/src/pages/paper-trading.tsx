@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { AppLayout } from "@/components/layout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -15,6 +15,11 @@ import {
   ArrowDownRight,
   Trophy,
   Percent,
+  Bell,
+  XCircle,
+  CheckCircle2,
+  Info,
+  X,
 } from "lucide-react";
 
 const API_BASE = "/api";
@@ -59,6 +64,15 @@ interface PaperTradingState {
   winningTrades: number;
 }
 
+interface TradeNotification {
+  id: string;
+  timestamp: number;
+  engine: string;
+  type: "skip" | "entry" | "exit" | "info";
+  message: string;
+  details?: Record<string, unknown>;
+}
+
 function formatNumber(n: number | null | undefined, decimals = 2): string {
   if (n === null || n === undefined) return "—";
   return n.toLocaleString("en-IN", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
@@ -77,18 +91,41 @@ export default function PaperTradingPage() {
   const { user } = useAuth();
 
   const [wsState, setWsState] = useState<PaperTradingState | null>(null);
+  const [notifications, setNotifications] = useState<TradeNotification[]>([]);
+  const notificationsRef = useRef<TradeNotification[]>([]);
 
-  useTradingWs<PaperTradingState>("paper-trading", (d) => {
-    setWsState((prev) => prev ? { ...prev, ...d } : d);
+  useTradingWs<PaperTradingState | { type: string; notification: TradeNotification }>("paper-trading", (d) => {
+    if ((d as any).type === "trade-notification" && (d as any).notification) {
+      const notif = (d as any).notification as TradeNotification;
+      setNotifications((prev) => {
+        const next = [notif, ...prev].slice(0, 50);
+        notificationsRef.current = next;
+        return next;
+      });
+    } else {
+      setWsState((prev) => prev ? { ...prev, ...(d as PaperTradingState) } : (d as PaperTradingState));
+    }
   });
 
   useEffect(() => {
-    fetch(`${API_BASE}/paper-trading/state`, {
+    fetch(API_BASE + "/paper-trading/state", {
       headers: { "x-user-email": user?.email ?? "" },
     })
       .then((res) => res.ok ? res.json() : null)
       .then((d) => { if (d) { setRestState(d); setLoading(false); } })
       .catch(() => setLoading(false));
+
+    fetch(API_BASE + "/paper-trading/notifications?limit=50", {
+      headers: { "x-user-email": user?.email ?? "" },
+    })
+      .then((res) => res.ok ? res.json() : null)
+      .then((d) => {
+        if (d?.notifications) {
+          setNotifications(d.notifications);
+          notificationsRef.current = d.notifications;
+        }
+      })
+      .catch(() => {});
   }, [user?.email]);
 
   const state = wsState ?? restState;
@@ -304,6 +341,69 @@ export default function PaperTradingPage() {
                             <p className="text-[9px] text-muted-foreground">
                               {new Date(trade.closedAt ?? trade.executedAt).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
                             </p>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Trade Notifications */}
+          <Card className="bg-[#10131b] border-border/20">
+            <CardHeader className="pb-3">
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-sm font-medium flex items-center gap-2">
+                  <Bell className="h-4 w-4" /> Trade Activity Log
+                </CardTitle>
+                {notifications.length > 0 && (
+                  <button
+                    onClick={() => {
+                      setNotifications([]);
+                      notificationsRef.current = [];
+                      fetch(API_BASE + "/paper-trading/notifications", {
+                        method: "DELETE",
+                        headers: { "x-user-email": user?.email ?? "" },
+                      }).catch(() => {});
+                    }}
+                    className="text-[10px] text-muted-foreground hover:text-foreground flex items-center gap-1"
+                  >
+                    <X className="h-3 w-3" /> Clear
+                  </button>
+                )}
+              </div>
+            </CardHeader>
+            <CardContent>
+              {notifications.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-6 text-center text-muted-foreground">
+                  <Bell className="h-6 w-6 mb-2 text-muted-foreground/30" />
+                  <p className="text-xs">No trade activity yet</p>
+                  <p className="text-[10px] mt-1">Skip reasons and trade entries will appear here in real-time</p>
+                </div>
+              ) : (
+                <div className="space-y-1 max-h-80 overflow-y-auto">
+                  {notifications.map((notif) => {
+                    const icon = notif.type === "skip" ? <XCircle className="h-3.5 w-3.5 text-amber-400" />
+                      : notif.type === "entry" ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
+                      : notif.type === "exit" ? <TrendingDown className="h-3.5 w-3.5 text-blue-400" />
+                      : <Info className="h-3.5 w-3.5 text-muted-foreground" />;
+                    const borderColor = notif.type === "skip" ? "border-amber-500/10" :
+                      notif.type === "entry" ? "border-emerald-500/10" :
+                      notif.type === "exit" ? "border-blue-500/10" : "border-border/10";
+                    return (
+                      <div key={notif.id} className={"rounded-lg border " + borderColor + " bg-[#0c0e14] p-2.5 flex items-start gap-2"}>
+                        <div className="mt-0.5 shrink-0">{icon}</div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs leading-relaxed">{notif.message}</p>
+                          <div className="flex items-center gap-2 mt-1">
+                            <span className="text-[9px] text-muted-foreground">
+                              {new Date(notif.timestamp).toLocaleString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                            </span>
+                            <Badge variant="outline" className="text-[8px] px-1 py-0 h-3.5">
+                              {notif.engine}
+                            </Badge>
                           </div>
                         </div>
                       </div>

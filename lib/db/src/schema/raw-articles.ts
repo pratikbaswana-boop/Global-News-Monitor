@@ -17,6 +17,8 @@ export const rawArticlesTable = pgTable("raw_articles", {
   dedupStatus: text("dedup_status").notNull().default("pending"), // pending | independent | duplicate | corroboration
   corroborationCount: integer("corroboration_count").notNull().default(0),
   requiresCorroboration: boolean("requires_corroboration").notNull().default(false),
+  isBreaking: boolean("is_breaking").notNull().default(false),
+  narrativeSequenceId: text("narrative_sequence_id"),
   ingestedAt: timestamp("ingested_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

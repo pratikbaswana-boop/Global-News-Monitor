@@ -129,6 +129,7 @@ export async function getBrokerAccountStatus(appUserId: string): Promise<{
   autoTradeEnabled: boolean;
   brokerName: string;
   expiresAt: string | null;
+  strategyPreference: string;
 }> {
   const rows = await db
     .select({
@@ -136,13 +137,14 @@ export async function getBrokerAccountStatus(appUserId: string): Promise<{
       autoTradeEnabled: brokerAccountsTable.autoTradeEnabled,
       brokerName: brokerAccountsTable.brokerName,
       expiresAt: brokerAccountsTable.expiresAt,
+      strategyPreference: brokerAccountsTable.strategyPreference,
     })
     .from(brokerAccountsTable)
     .where(eq(brokerAccountsTable.userId, appUserId))
     .limit(1);
 
   if (!rows.length) {
-    return { connected: false, autoTradeEnabled: false, brokerName: "", expiresAt: null };
+    return { connected: false, autoTradeEnabled: false, brokerName: "", expiresAt: null, strategyPreference: "fno" };
   }
 
   const r = rows[0];
@@ -153,6 +155,7 @@ export async function getBrokerAccountStatus(appUserId: string): Promise<{
     autoTradeEnabled: r.autoTradeEnabled,
     brokerName: r.brokerName,
     expiresAt: r.expiresAt?.toISOString() ?? null,
+    strategyPreference: r.strategyPreference ?? "fno",
   };
 }
 
@@ -163,6 +166,7 @@ export async function updateAutoTradeSettings(
     maxRiskPerTradePct?: number;
     defaultProduct?: string;
     defaultOrderType?: string;
+    strategyPreference?: string;
   }
 ): Promise<void> {
   const update: Record<string, unknown> = { updatedAt: new Date() };
@@ -170,6 +174,7 @@ export async function updateAutoTradeSettings(
   if (settings.maxRiskPerTradePct !== undefined) update.maxRiskPerTradePct = settings.maxRiskPerTradePct;
   if (settings.defaultProduct !== undefined) update.defaultProduct = settings.defaultProduct;
   if (settings.defaultOrderType !== undefined) update.defaultOrderType = settings.defaultOrderType;
+  if (settings.strategyPreference !== undefined) update.strategyPreference = settings.strategyPreference;
 
   await db
     .update(brokerAccountsTable)

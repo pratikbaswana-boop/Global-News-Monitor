@@ -77,6 +77,10 @@ let resolving = false;
 let tickMap = new Map<number, TickData>();
 let chain: ResolvedChain | null = null;
 let subscribedOptionTokens: number[] = [];
+let lastTickAt = 0;
+let watchdogTimer: ReturnType<typeof setInterval> | null = null;
+const WATCHDOG_INTERVAL_MS = 30_000;  // check every 30s
+const WATCHDOG_STALL_MS = 60_000;     // force reconnect if no ticks for 60s during trading hours
 // Reverse lookup: token → tradingsymbol for tick archive
 const tokenToSymbolArchive = new Map<number, string>();
 let spotPrice = 0;
@@ -293,6 +297,7 @@ function parseTick(raw: unknown): { token: number; ltp: number; oi: number; volu
 function onTicks(ticks: unknown[]): void {
   let spotUpdated = false;
   let optionUpdated = false;
+  lastTickAt = Date.now();
 
   for (const raw of ticks) {
     const p = parseTick(raw);
@@ -532,6 +537,43 @@ export async function startMarketTicker(): Promise<boolean> {
 
   ticker.connect();
   started = true;
+  lastTickAt = Date.now();
+
+  // Start watchdog — detects silent TCP stalls where the WS connection is alive
+  // but no ticks flow. KiteTicker's built-in reconnect only fires on formal
+  // close/disconnect events, not on silent stalls.
+  if (watchdogTimer) clearInterval(watchdogTimer);
+  watchdogTimer = setInterval(() => {
+    if (!started || !ticker) return;
+    const now = Date.now();
+    // Only act during IST trading hours (09:15–15:30, Mon–Fri)
+    const istMin = (now / 1000 / 60 + 330) % (24 * 60);
+    const istDay = new Date(now + 330 * 60 * 1000).getUTCDay();
+    if (istDay === 0 || istDay === 6) return;
+    if (istMin < 555 || istMin >= 930) return;
+
+    if (lastTickAt > 0 && now - lastTickAt > WATCHDOG_STALL_MS) {
+      logger.warn(
+        { stallMs: now - lastTickAt, connected: ticker.connected() },
+        "market-ticker: tick stall detected — forcing reconnect",
+      );
+      try {
+        ticker.disconnect();
+      } catch {
+        // ignore — disconnect may fail if already broken
+      }
+      // Reconnect after a short delay to allow the disconnect event to settle
+      setTimeout(() => {
+        if (!started || !ticker) return;
+        try {
+          ticker.connect();
+          lastTickAt = Date.now();
+        } catch (err) {
+          logger.error({ err: err instanceof Error ? err.message : err }, "market-ticker: watchdog reconnect failed");
+        }
+      }, 2000);
+    }
+  }, WATCHDOG_INTERVAL_MS);
 
   // Build reverse lookup for spot equity tick parsing.
   tokenToEquitySymbol.clear();
@@ -557,6 +599,10 @@ export async function startMarketTicker(): Promise<boolean> {
 }
 
 export function stopMarketTicker(): void {
+  if (watchdogTimer) {
+    clearInterval(watchdogTimer);
+    watchdogTimer = null;
+  }
   if (ticker) {
     try {
       ticker.disconnect();
@@ -569,6 +615,7 @@ export function stopMarketTicker(): void {
   tickMap = new Map();
   chain = null;
   subscribedOptionTokens = [];
+  lastTickAt = 0;
   spotPrice = 0;
   spotPrevClose = 0;
   spotSamples.length = 0;

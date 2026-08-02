@@ -1,0 +1,50 @@
+TOON_FILE: DESIGN.toon | VERSION: 1
+
+## Phase 1: Fix Existing Bugs (Quick Wins)
+
+### 1.1 Log parseRssDate fallback events
+FILE: artifacts/api-server/src/services/ingestion/rss-fetcher.ts
+CHANGES:
+  - Add `feedId?: string` parameter to `parseRssDate()`
+  - Add `logger.warn()` when dateStr is missing (null/undefined)
+  - Add `logger.warn()` when date is unparseable (isNaN)
+  - Update call site in `fetchRssFeed()` to pass `feed.id`
+LINES_AFFECTED: 15-19 (function signature + body), 86 (call site)
+PATTERN: Follow existing logger.warn pattern from scheduler.ts
+RISK: None — additive logging only
+
+### 1.2 Increase article cap + freshness bonus
+FILE: artifacts/api-server/src/services/market/stock-news.ts
+CHANGES:
+  - Line 229: `.limit(600)` → `.limit(2000)`
+  - Line 195: `MAX_ARTICLES_PER_ASSET = 6` → `MAX_ARTICLES_PER_ASSET = 10`
+  - Add `FRESH_BONUS_WINDOW_MIN = 30` and `FRESH_BONUS_MULTIPLIER = 1.5` constants
+  - Add `freshnessBonus(publishedAt, now)` function
+  - Update sort on line 263: prepend `b.score * freshnessBonus(b.publishedAt) - a.score * freshnessBonus(a.publishedAt)` as primary sort key
+LINES_AFFECTED: 195, 229, 263, +new constants/function
+PATTERN: Follow existing scoring/sort pattern in stock-news.ts
+RISK: Low — more articles in memory (2000 vs 600), but scoring is in-memory regex, fast
+
+### 1.3 Reduce GDELT fetch interval
+FILE: artifacts/api-server/src/services/ingestion/scheduler.ts
+CHANGES:
+  - Line 242: `15 * 60 * 1000` → `5 * 60 * 1000`
+LINES_AFFECTED: 242
+PATTERN: Single constant change
+RISK: None — GDELT batch is lightweight CSV, 5 min well within limits
+
+## Files Touched
+1. artifacts/api-server/src/services/ingestion/rss-fetcher.ts (1.1)
+2. artifacts/api-server/src/services/market/stock-news.ts (1.2)
+3. artifacts/api-server/src/services/ingestion/scheduler.ts (1.3)
+
+## No New Files
+All changes are to existing files. No new modules, no new dependencies.
+
+## No DB Migrations
+Phase 1 has no schema changes. No migrations needed.
+
+## Verification
+- 1.1: Check logs for "parseRssDate" warnings after feed cycle runs
+- 1.2: Check AI prompt output includes up to 10 articles, fresh articles ranked higher
+- 1.3: Check logs for "gdelt batch processed" appearing every ~5 min instead of ~15 min

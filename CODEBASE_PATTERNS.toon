@@ -1,0 +1,43 @@
+TOON_FILE: CODEBASE_PATTERNS.toon | VERSION: 1
+
+## Logger
+- Uses `../../lib/logger.js` → `import { logger } from "../../lib/logger.js"`
+- Pattern: `logger.warn({ key: value }, "message")` or `logger.info({ key: value }, "message")`
+- Structured logging with Pino-style JSON objects
+
+## RSS Fetcher (rss-fetcher.ts)
+- `parseRssDate(dateStr: string | undefined): Date` — line 15, no feedId param currently
+- Falls back to `new Date()` silently on missing/unparseable dates
+- `FetchedArticle` interface exported (feedId, url, title, body, publishedAt, credibilityTier, isStateMedia)
+- `fetchRssFeed(feed: FeedRegistry)` — main fetch function, 15s timeout, 30 items max
+- `computeBackoffMs(consecutiveFailures)` — exponential backoff for quarantine
+
+## Stock News (stock-news.ts)
+- `getRelevantNewsByAsset(assets, now)` — line 215, main query function
+- DB query: `.limit(600)` on line 229 — the cap to increase
+- `MAX_ARTICLES_PER_ASSET = 6` on line 195 — constant to increase
+- Scoring sort: `b.score - a.score || a.credibilityTier - b.credibilityTier || b.publishedAt - a.publishedAt` (line 263)
+- `formatSummary(assetLabel, windowStart, items)` — line 197, builds prompt text
+- `ScoredArticle` interface — line 175
+- `scoreArticle(assetId, text)` — line 185, returns {score, drivers}
+- `ASSET_MATCHERS: Record<string, RegExp>` — line 169, compiled regex per asset
+- `ASSET_NEWS_DRIVERS: Record<string, string[]>` — line 38, driver keywords per asset
+- `getNewsWindowStart(now)` — line 148, calculates lookback window
+
+## Ingestion Scheduler (scheduler.ts)
+- `startIngestionScheduler()` — line 212, main entry point
+- GDELT: line 241-242 — `setInterval(() => processGdeltBatch().catch(() => null), 15 * 60 * 1000)`
+- `processArticle()` — line 28, processes single article through dedup + DB insert + event extraction
+- `processFeed(feed)` — line 83, fetches and processes one RSS feed
+- Per-feed timers built from `feed.fetchIntervalSeconds` (line 227)
+- Stagger: `Math.random() * Math.min(intervalMs, 60_000)` (line 230)
+
+## DB Access
+- Drizzle ORM: `import { db, rawArticlesTable } from "@workspace/db"`
+- Query pattern: `db.select().from(table).where(condition).orderBy(desc).limit(n)`
+- Schema in `lib/db/src/schema/`
+
+## Error Handling
+- Per-article: try/catch with logger.warn, continues to next article
+- Per-feed: try/catch with failure count → quarantine after 3 failures
+- DB query failures: catch, return empty, log warning

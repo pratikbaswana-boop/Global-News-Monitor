@@ -112,7 +112,7 @@ router.get("/broker/status", async (req, res) => {
 // POST /broker/settings — Update auto-trade settings
 router.post("/broker/settings", async (req, res) => {
   try {
-    const { userId, autoTradeEnabled, maxRiskPerTradePct, defaultProduct, defaultOrderType } = req.body;
+    const { userId, autoTradeEnabled, maxRiskPerTradePct, defaultProduct, defaultOrderType, strategyPreference } = req.body;
     if (!userId) {
       res.status(400).json({ error: "userId is required" });
       return;
@@ -123,6 +123,7 @@ router.post("/broker/settings", async (req, res) => {
       maxRiskPerTradePct,
       defaultProduct,
       defaultOrderType,
+      strategyPreference,
     });
 
     res.json({ success: true });

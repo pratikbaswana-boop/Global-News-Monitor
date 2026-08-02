@@ -3,11 +3,12 @@ import { eq, desc, and, gt } from "drizzle-orm";
 import { logger } from "../../lib/logger.js";
 import { placeOrder, cancelOrder, type PlaceOrderParams } from "./orders.js";
 import { getMargins, syncPortfolio } from "./portfolio.js";
-import { getGlobalKiteClient, getNearestExpiry } from "./kite-option-chain.js";
+import { getGlobalKiteClient, getNearestExpiry, lookupOptionSymbol } from "./kite-option-chain.js";
 import { computeIntradaySignal, type IntradaySignal } from "../market/tier3-signal.js";
 import { getHotContext } from "../market/hot-context.js";
 import { getLatestChainMetrics, getLtpBySymbol, getNiftySpotMovePct, getNiftySpotPersistence, getNiftySpotIntradayRange } from "./market-ticker.js";
 import { enqueueAudit } from "../../lib/audit-queue.js";
+import { pushTradeNotification } from "../../lib/trade-notifications.js";
 import {
   canEnter,
   markPendingEntry,
@@ -98,22 +99,6 @@ function getNearestWeeklyExpiry(): Date {
   return expiry;
 }
 
-function formatExpiryForSymbol(expiry: Date): string {
-  // Kite format: YY + M (no zero-pad) + DD (e.g. 26707 for 2026-07-07)
-  const yy = String(expiry.getFullYear()).slice(-2);
-  const mm = String(expiry.getMonth() + 1); // no zero-pad for month
-  const dd = String(expiry.getDate()).padStart(2, "0");
-  return `${yy}${mm}${dd}`;
-}
-
-function buildOptionSymbol(
-  underlying: string,
-  expiry: Date,
-  strike: number,
-  type: "CE" | "PE"
-): string {
-  return `${underlying}${formatExpiryForSymbol(expiry)}${strike}${type}`;
-}
 
 interface OptionCandidate {
   symbol: string;
@@ -142,17 +127,17 @@ export function buildStrikeCandidates(
 
   if (signal === "BUY_CALL") {
     // ITM calls (lower strike) + OTM calls (higher strike)
-    candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike - 100, type), strike: suggestedStrike - 100, deltaEstimate: 0.80 }); // 2 ITM
-    candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike - 50,  type), strike: suggestedStrike - 50,  deltaEstimate: 0.65 }); // 1 ITM
+    candidates.push({ symbol: lookupOptionSymbol(suggestedStrike - 100, type, expiry), strike: suggestedStrike - 100, deltaEstimate: 0.80 }); // 2 ITM
+    candidates.push({ symbol: lookupOptionSymbol(suggestedStrike - 50, type, expiry), strike: suggestedStrike - 50,  deltaEstimate: 0.65 }); // 1 ITM
     for (let i = 0; i < offsets.length; i++) {
-      candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike + offsets[i]!, type), strike: suggestedStrike + offsets[i]!, deltaEstimate: deltas[i]! });
+      candidates.push({ symbol: lookupOptionSymbol(suggestedStrike + offsets[i]!, type, expiry), strike: suggestedStrike + offsets[i]!, deltaEstimate: deltas[i]! });
     }
   } else {
     // ITM puts (higher strike) + OTM puts (lower strike)
-    candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike + 100, type), strike: suggestedStrike + 100, deltaEstimate: 0.80 }); // 2 ITM
-    candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike + 50,  type), strike: suggestedStrike + 50,  deltaEstimate: 0.65 }); // 1 ITM
+    candidates.push({ symbol: lookupOptionSymbol(suggestedStrike + 100, type, expiry), strike: suggestedStrike + 100, deltaEstimate: 0.80 }); // 2 ITM
+    candidates.push({ symbol: lookupOptionSymbol(suggestedStrike + 50, type, expiry), strike: suggestedStrike + 50,  deltaEstimate: 0.65 }); // 1 ITM
     for (let i = 0; i < offsets.length; i++) {
-      candidates.push({ symbol: buildOptionSymbol("NIFTY", expiry, suggestedStrike - offsets[i]!, type), strike: suggestedStrike - offsets[i]!, deltaEstimate: deltas[i]! });
+      candidates.push({ symbol: lookupOptionSymbol(suggestedStrike - offsets[i]!, type, expiry), strike: suggestedStrike - offsets[i]!, deltaEstimate: deltas[i]! });
     }
   }
   return candidates;
@@ -261,6 +246,7 @@ interface BaseSignalInput {
   shortCoveringSignal: "none" | "covering" | "unwinding";
   sgxNiftyChangePct: number | null;
   realPrice: number | null;
+  spotMovePct: number | null;
 }
 
 // ── Hysteresis state for base signal (prevents threshold flapping) ─────────────
@@ -304,6 +290,7 @@ function baseInputFromSnapshot(snapshot: typeof marketSnapshotsTable.$inferSelec
     shortCoveringSignal: (ctx?.shortCoveringSignal ?? snapshot.shortCoveringSignal ?? "none") as "none" | "covering" | "unwinding",
     sgxNiftyChangePct: ctx?.sgxNiftyChangePct ?? snapshot.sgxNiftyChangePct,
     realPrice: snapshot.realPriceAtSnapshot ? parseFloat(snapshot.realPriceAtSnapshot) : null,
+    spotMovePct: null,
   };
 }
 
@@ -327,6 +314,9 @@ function deriveBaseFromInputs(
   const sgxNiftyChangePct = input.sgxNiftyChangePct;
   const putCallRatio = input.putCallRatio;
   const realPrice = input.realPrice;
+  const spotMovePct = input.spotMovePct;
+
+  const SPOT_MOMENTUM_THRESHOLD = 0.1; // ±0.1% move from prev close = directional bias
 
   const hasMaxPain = maxPainDistancePct !== null;
   const hasPcr = putCallRatio !== null;
@@ -373,19 +363,45 @@ function deriveBaseFromInputs(
     }
   }
 
+  // ── Spot momentum tiebreaker ──────────────────────────────────────────────
+  // When PCR/max pain hysteresis conflicts with AI direction, use spot momentum
+  // as the tiebreaker. This prevents wrong-direction trades on trending days where
+  // PCR is temporarily extreme but the market is clearly moving the other way.
+  //
+  // Logic:
+  //   - Spot rising (>+0.1%) and AI says UP → follow AI (BUY_CALL), even if PCR says BUY_PUT
+  //   - Spot falling (<-0.1%) and AI says DOWN → follow AI (BUY_PUT), even if PCR says BUY_CALL
+  //   - Spot flat or AI neutral → let PCR/max pain win (structural signal)
+  const spotRising = spotMovePct !== null && spotMovePct > SPOT_MOMENTUM_THRESHOLD;
+  const spotFalling = spotMovePct !== null && spotMovePct < -SPOT_MOMENTUM_THRESHOLD;
+  const aiSaysUp = aiDirection === "up";
+  const aiSaysDown = aiDirection === "down";
+
   // Reversal: Max Pain stretch (with hysteresis — stays active until release band)
   if (hysteresis.maxPainSignal === "BUY_PUT") {
+    if (spotRising && aiSaysUp) {
+      return { signal: "BUY_CALL", reason: `Max pain stretch +${maxPainDistancePct!.toFixed(1)}% (hysteresis) but spot rising +${spotMovePct!.toFixed(2)}% + AI up → tiebreaker CALL`, suggestedStrike };
+    }
     return { signal: "BUY_PUT", reason: `Max pain stretch +${maxPainDistancePct!.toFixed(1)}% (hysteresis)`, suggestedStrike };
   }
   if (hysteresis.maxPainSignal === "BUY_CALL") {
+    if (spotFalling && aiSaysDown) {
+      return { signal: "BUY_PUT", reason: `Max pain stretch ${maxPainDistancePct!.toFixed(1)}% (hysteresis) but spot falling ${spotMovePct!.toFixed(2)}% + AI down → tiebreaker PUT`, suggestedStrike };
+    }
     return { signal: "BUY_CALL", reason: `Max pain stretch ${maxPainDistancePct!.toFixed(1)}% (hysteresis)`, suggestedStrike };
   }
 
   // Reversal: PCR extremes (with hysteresis)
   if (hysteresis.pcrSignal === "BUY_PUT") {
+    if (spotRising && aiSaysUp) {
+      return { signal: "BUY_CALL", reason: `PCR ${putCallRatio!.toFixed(2)} too bullish (hysteresis) but spot rising +${spotMovePct!.toFixed(2)}% + AI up → tiebreaker CALL`, suggestedStrike };
+    }
     return { signal: "BUY_PUT", reason: `PCR ${putCallRatio!.toFixed(2)} too bullish (hysteresis)`, suggestedStrike };
   }
   if (hysteresis.pcrSignal === "BUY_CALL") {
+    if (spotFalling && aiSaysDown) {
+      return { signal: "BUY_PUT", reason: `PCR ${putCallRatio!.toFixed(2)} too bearish (hysteresis) but spot falling ${spotMovePct!.toFixed(2)}% + AI down → tiebreaker PUT`, suggestedStrike };
+    }
     return { signal: "BUY_CALL", reason: `PCR ${putCallRatio!.toFixed(2)} too bearish (hysteresis)`, suggestedStrike };
   }
 
@@ -495,25 +511,9 @@ function applyRangeGate(
   priceImpactEstimate: string | null | undefined,
   movePct: number | null
 ): { signal: "BUY_CALL" | "BUY_PUT" | "NO_TRADE"; suggestedStrike: number | null; reason: string } {
-  if (base.signal === "NO_TRADE") return base;
-
-  const band = parseImpactRange(priceImpactEstimate);
-  if (!band || movePct === null) {
-    return { ...base, reason: `${base.reason} (range gate: ${!band ? "no band" : "no live move"}, pass-through)` };
-  }
-
-  const m = movePct;
-  const detail = `move ${m >= 0 ? "+" : ""}${m.toFixed(2)}% vs [${band.lo.toFixed(1)}, ${band.hi.toFixed(1)}]`;
-
-  // CALL needs headroom below the upper edge; PUT needs room above the lower edge.
-  if (base.signal === "BUY_CALL" && !(m < band.hi)) {
-    return { signal: "NO_TRADE", suggestedStrike: null, reason: `Range gate blocked CALL — ${detail} (no headroom)` };
-  }
-  if (base.signal === "BUY_PUT" && !(m > band.lo)) {
-    return { signal: "NO_TRADE", suggestedStrike: null, reason: `Range gate blocked PUT — ${detail} (below floor)` };
-  }
-
-  return { ...base, reason: `${base.reason} ✓ range gate (${detail})` };
+  // TEMPORARILY DISABLED: Range gate was blocking correct directional trades
+  // because AI underestimated move magnitude. Pass through all signals.
+  return { ...base, reason: `${base.reason} (range gate: DISABLED)` };
 }
 
 // ── Chop gate (NIFTY only) — the whipsaw guard ─────────────────────────────────
@@ -622,6 +622,7 @@ export function computeLiveOptionSide(
     shortCoveringSignal: ctx?.shortCoveringSignal ?? "none",
     sgxNiftyChangePct: ctx?.sgxNiftyChangePct ?? null,
     realPrice: spot,
+    spotMovePct: getNiftySpotMovePct(),
   });
   // Compute the intraday verdict FRESH (not the cached value) so the edge is detected
   // against the latest buffer state — this is what turns the faster feed into faster
@@ -659,17 +660,20 @@ export async function processSignalForAutoTrade(snapshotId: string): Promise<voi
     return;
   }
 
-  // Find all users with auto-trade enabled and active broker accounts
-  const activeAccounts = await db
+  // Find all users with auto-trade enabled and active broker accounts (F&O only)
+  const allActiveAccounts = await db
     .select()
     .from(brokerAccountsTable)
     .where(and(
       eq(brokerAccountsTable.isActive, true),
       eq(brokerAccountsTable.autoTradeEnabled, true)
     ));
+  const activeAccounts = allActiveAccounts.filter(
+    (a) => (a.strategyPreference ?? "fno") === "fno"
+  );
 
   if (!activeAccounts.length) {
-    logger.info("signal-executor: no active auto-trade accounts");
+    logger.info("signal-executor: no active F&O auto-trade accounts");
     return;
   }
 
@@ -1490,15 +1494,22 @@ async function dispatchToEligibleUsers(
     .limit(1);
   if (snapRows.length === 0) {
     logger.info({ assetId }, "signal-executor: edge fired but no recent snapshot to anchor execution");
+    pushTradeNotification("signal-executor", "skip", `A trade signal was generated for ${assetId} but no recent market analysis snapshot was found (within the last 30 minutes). The engine needs a fresh AI analysis to execute trades.`, { assetId });
     return;
   }
   const snapshot = snapRows[0]!;
 
-  const activeAccounts = await db
+  const allActiveAccounts = await db
     .select()
     .from(brokerAccountsTable)
     .where(and(eq(brokerAccountsTable.isActive, true), eq(brokerAccountsTable.autoTradeEnabled, true)));
-  if (activeAccounts.length === 0) return;
+  const activeAccounts = allActiveAccounts.filter(
+    (a) => (a.strategyPreference ?? "fno") === "fno"
+  );
+  if (activeAccounts.length === 0) {
+    pushTradeNotification("signal-executor", "skip", `A trade signal was generated for ${assetId} but no users have F&O auto-trading enabled. At least one user must have an active broker account with auto-trade turned on and strategy set to F&O.`, { assetId });
+    return;
+  }
 
   // #3: fan out users in PARALLEL — their broker calls (getMargins/placeOrder) are gated
   // FIFO by the shared Kite rate limiter, so calls interleave fairly and stay under the

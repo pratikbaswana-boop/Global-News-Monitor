@@ -9,8 +9,8 @@
 // Pipeline: one DB query for the window → in-memory driver-match scoring per asset →
 // compact summary string injected into runMarketAgent's prompt (see market-agent.ts).
 
-import { db, rawArticlesTable } from "@workspace/db";
-import { gt, desc } from "drizzle-orm";
+import { db, rawArticlesTable, articleAssetTagsTable } from "@workspace/db";
+import { gt, desc, eq, and } from "drizzle-orm";
 import { logger } from "../../lib/logger.js";
 
 // ── Drivers per asset ─────────────────────────────────────────────────────────
@@ -166,7 +166,7 @@ function escapeRegex(s: string): string {
 }
 
 // Compile one word-boundary regex per asset (alternation of its drivers).
-const ASSET_MATCHERS: Record<string, RegExp> = {};
+export const ASSET_MATCHERS: Record<string, RegExp> = {};
 for (const [assetId, kws] of Object.entries(ASSET_NEWS_DRIVERS)) {
   const alts = kws.map(escapeRegex).join("|");
   ASSET_MATCHERS[assetId] = new RegExp(`\\b(?:${alts})\\b`, "gi");
@@ -182,7 +182,7 @@ interface ScoredArticle {
 }
 
 /** Count distinct driver hits for one asset in an article's text. */
-function scoreArticle(assetId: string, text: string): { score: number; drivers: string[] } {
+export function scoreArticle(assetId: string, text: string): { score: number; drivers: string[] } {
   const re = ASSET_MATCHERS[assetId];
   if (!re) return { score: 0, drivers: [] };
   re.lastIndex = 0;
@@ -192,25 +192,49 @@ function scoreArticle(assetId: string, text: string): { score: number; drivers: 
   return { score: hits.size, drivers: [...hits] };
 }
 
-const MAX_ARTICLES_PER_ASSET = 6;
+const MAX_ARTICLES_PER_ASSET = 10;
 
-function formatSummary(assetLabel: string, windowStart: Date, items: ScoredArticle[]): string {
-  if (items.length === 0) {
-    return `RELEVANT NEWS for ${assetLabel} (since ${windowStart.toISOString().slice(0, 16)}Z): none found on its drivers.`;
+const FRESH_BONUS_WINDOW_MIN = 30;
+const FRESH_BONUS_MULTIPLIER = 1.5;
+
+function freshnessBonus(publishedAt: Date, now: Date = new Date()): number {
+  const ageMin = (now.getTime() - publishedAt.getTime()) / 60000;
+  return ageMin < FRESH_BONUS_WINDOW_MIN ? FRESH_BONUS_MULTIPLIER : 1.0;
+}
+
+function formatNarrativeSummary(
+  assetLabel: string,
+  windowStart: Date,
+  stories: Array<{ nsid: string; articles: Array<{ title: string; publishedAt: Date; drivers: string[] }>; totalScore: number }>,
+): string {
+  if (stories.length === 0) {
+    return `DRIVER NEWS for ${assetLabel} (since ${windowStart.toISOString().slice(0, 16)}Z): none found on its drivers.`;
   }
-  const lines = items.map((a) => {
-    const when = a.publishedAt.toISOString().slice(0, 16).replace("T", " ");
-    return `- [${when}] ${a.title.trim()} (drivers: ${a.drivers.slice(0, 3).join(", ")})`;
-  });
-  return [
-    `RELEVANT NEWS for ${assetLabel} — last-trading-day window, filtered to its market drivers:`,
-    ...lines,
-  ].join("\n");
+  const lines: string[] = [
+    `DRIVER NEWS for ${assetLabel} (last-trading-day window, narrative-threaded):`,
+  ];
+  for (let i = 0; i < stories.length; i++) {
+    const s = stories[i]!;
+    const articleCount = s.articles.length;
+    const developing = articleCount > 1 ? "developing" : "single";
+    lines.push("");
+    lines.push(`STORY ${i + 1}: (${articleCount} article${articleCount > 1 ? "s" : ""}, ${developing})`);
+    for (const a of s.articles) {
+      const when = a.publishedAt.toISOString().slice(0, 16).replace("T", " ");
+      lines.push(`  [${when}] ${a.title.trim()} (drivers: ${a.drivers.slice(0, 3).join(", ")})`);
+    }
+    if (articleCount > 1) {
+      const firstTitle = s.articles[0]!.title.trim();
+      const lastTitle = s.articles[articleCount - 1]!.title.trim();
+      lines.push(`  → Story arc: ${firstTitle.slice(0, 60)} → ${lastTitle.slice(0, 60)}`);
+    }
+  }
+  return lines.join("\n");
 }
 
 /**
- * One DB query for the window, then per-asset driver scoring in memory.
- * Returns a map assetId → compact summary string for prompt injection.
+ * Per-asset query using pre-tagged data from article_asset_tags + narrative grouping.
+ * Returns a map assetId → narrative-threaded summary string for prompt injection.
  */
 export async function getRelevantNewsByAsset(
   assets: Array<{ id: string; name: string }>,
@@ -219,55 +243,69 @@ export async function getRelevantNewsByAsset(
   const windowStart = getNewsWindowStart(now);
   const out = new Map<string, string>();
 
-  let rows: Array<typeof rawArticlesTable.$inferSelect>;
-  try {
-    rows = await db
-      .select()
-      .from(rawArticlesTable)
-      .where(gt(rawArticlesTable.publishedAt, windowStart))
-      .orderBy(desc(rawArticlesTable.publishedAt))
-      .limit(600);
-  } catch (err) {
-    logger.warn({ err: err instanceof Error ? err.message : err }, "stock-news: article fetch failed");
-    for (const a of assets) out.set(a.id, "");
-    return out;
-  }
-
-  // Pre-lowercase scan text once per article (title + capped body).
-  const scanText = rows.map((r) => `${r.title}\n${(r.body ?? "").slice(0, BODY_SCAN_LIMIT)}`.toLowerCase());
-
   for (const asset of assets) {
     if (!ASSET_MATCHERS[asset.id]) {
       out.set(asset.id, "");
       continue;
     }
+
+    let rows: Array<{
+      article: typeof rawArticlesTable.$inferSelect;
+      tag: typeof articleAssetTagsTable.$inferSelect;
+    }>;
+    try {
+      rows = await db
+        .select({
+          article: rawArticlesTable,
+          tag: articleAssetTagsTable,
+        })
+        .from(rawArticlesTable)
+        .innerJoin(
+          articleAssetTagsTable,
+          eq(rawArticlesTable.id, articleAssetTagsTable.articleId),
+        )
+        .where(and(
+          gt(rawArticlesTable.publishedAt, windowStart),
+          eq(articleAssetTagsTable.assetId, asset.id),
+        ))
+        .orderBy(desc(articleAssetTagsTable.driverScore), desc(rawArticlesTable.publishedAt))
+        .limit(30);
+    } catch (err) {
+      logger.warn({ err: err instanceof Error ? err.message : err, assetId: asset.id }, "stock-news: tagged article fetch failed");
+      out.set(asset.id, "");
+      continue;
+    }
+
+    // Group articles by narrative_sequence_id
+    const stories = new Map<string, Array<{ title: string; publishedAt: Date; drivers: string[]; score: number }>>();
     const seen = new Set<string>();
-    const scored: ScoredArticle[] = [];
-    for (let i = 0; i < rows.length; i++) {
-      const { score, drivers } = scoreArticle(asset.id, scanText[i]!);
-      if (score === 0) continue;
-      const r = rows[i]!;
-      const key = r.title.trim().toLowerCase();
+    for (const row of rows) {
+      const key = row.article.title.trim().toLowerCase();
       if (seen.has(key)) continue;
       seen.add(key);
-      scored.push({
-        title: r.title,
-        feedId: r.feedId,
-        publishedAt: r.publishedAt,
-        credibilityTier: r.credibilityTier,
-        score,
-        drivers,
+      const nsid = row.article.narrativeSequenceId ?? row.article.id;
+      if (!stories.has(nsid)) stories.set(nsid, []);
+      stories.get(nsid)!.push({
+        title: row.article.title,
+        publishedAt: row.article.publishedAt,
+        drivers: row.tag.matchedDrivers,
+        score: row.tag.driverScore,
       });
     }
-    // Rank: most drivers matched, then most credible (tier 1 best), then most recent.
-    scored.sort((a, b) =>
-      b.score - a.score ||
-      a.credibilityTier - b.credibilityTier ||
-      b.publishedAt.getTime() - a.publishedAt.getTime()
-    );
-    const top = scored.slice(0, MAX_ARTICLES_PER_ASSET);
-    out.set(asset.id, formatSummary(asset.name, windowStart, top));
-    logger.debug({ assetId: asset.id, matched: scored.length, kept: top.length }, "stock-news: relevance selected");
+
+    // Sort stories by aggregate driver score, take top 3 with up to 4 articles each
+    const rankedStories = [...stories.entries()]
+      .map(([nsid, articles]) => ({
+        nsid,
+        articles: articles.sort((a, b) => a.publishedAt.getTime() - b.publishedAt.getTime()),
+        totalScore: articles.reduce((s, a) => s + a.score, 0),
+      }))
+      .sort((a, b) => b.totalScore - a.totalScore)
+      .slice(0, 3)
+      .map(s => ({ ...s, articles: s.articles.slice(0, 4) }));
+
+    out.set(asset.id, formatNarrativeSummary(asset.name, windowStart, rankedStories));
+    logger.debug({ assetId: asset.id, matched: rows.length, stories: rankedStories.length }, "stock-news: narrative-threaded selection");
   }
 
   return out;

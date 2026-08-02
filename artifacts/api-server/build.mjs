@@ -19,6 +19,7 @@ async function buildAll() {
       path.resolve(artifactDir, "src/index.ts"),
       path.resolve(artifactDir, "src/worker.ts"),
       path.resolve(artifactDir, "src/scripts/condor-backtest.ts"),
+      path.resolve(artifactDir, "src/scripts/backfill-tags.ts"),
     ],
     platform: "node",
     bundle: true,

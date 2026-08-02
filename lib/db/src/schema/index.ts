@@ -23,6 +23,7 @@ export * from "./push-subscriptions";
 // Phase 1 — Signal Harvesting & Intelligent Ingestion
 export * from "./feed-registry";
 export * from "./raw-articles";
+export * from "./article-asset-tags";
 export * from "./extracted-events";
 // Phase 2 — Dynamic Knowledge Graph
 export * from "./stories";

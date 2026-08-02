@@ -22,6 +22,7 @@ import { getRelevantNewsByAsset } from "./stock-news.js";
 import { getLatestChainMetrics, getSpotEquityLtp } from "../kite/market-ticker.js";
 import { publishAssetContext, resetHotContext } from "./hot-context.js";
 import { enqueueAudit } from "../../lib/audit-queue.js";
+import { breakingNewsEmitter } from "../ingestion/breaking-news-detector.js";
 
 const ASSET_ID = "nse_market";
 const FIRST_RUN_DELAY_MS = 2 * 60 * 1000; // 2 min after startup
@@ -194,7 +195,10 @@ async function detectAndStoreRegime(): Promise<boolean> {
   }
 }
 
-async function runEnsembleForAllAssets(window: Window): Promise<void> {
+async function runEnsembleForAllAssets(
+  window: Window,
+  breakingNewsContext?: { title: string; previousSignal?: string },
+): Promise<void> {
   // Load LATEST stored regime (within last 24h). Without ORDER BY, Postgres
   // returned rows in physical/arbitrary order — the scheduler was picking up
   // an old CRISIS row from initial setup, passing CRISIS into every ensemble
@@ -298,6 +302,29 @@ async function runEnsembleForAllAssets(window: Window): Promise<void> {
         logger.warn({ asset: asset.id, err: err instanceof Error ? err.message : err }, "market-scheduler: price fetch failed, using fallback");
       }
 
+      // Fetch previous signal for this asset (narrative continuity)
+      let previousSignal: { predictedDirection: string; predictedConfidence: string; dominantNarrative: string; triggerNewsSummary: string; snapshotAt: Date } | null = null;
+      try {
+        const prevRows = await db
+          .select()
+          .from(marketSnapshotsTable)
+          .where(eq(marketSnapshotsTable.assetId, asset.id))
+          .orderBy(desc(marketSnapshotsTable.snapshotAt))
+          .limit(1);
+        if (prevRows.length > 0) {
+          const p = prevRows[0]!;
+          previousSignal = {
+            predictedDirection: p.predictedDirection,
+            predictedConfidence: p.predictedConfidence,
+            dominantNarrative: p.dominantNarrative,
+            triggerNewsSummary: p.triggerNewsSummary,
+            snapshotAt: p.snapshotAt,
+          };
+        }
+      } catch (err) {
+        logger.warn({ asset: asset.id, err: err instanceof Error ? err.message : err }, "market-scheduler: previous signal fetch failed");
+      }
+
       const signal = await runMarketAgent(
         asset.id,
         asset.name,
@@ -306,7 +333,7 @@ async function runEnsembleForAllAssets(window: Window): Promise<void> {
         candleSummary,
         marketStats,
         null,
-        { force: true, ohlcvCandles, relevantNews: newsByAsset.get(asset.id) ?? "" },
+        { force: true, ohlcvCandles, relevantNews: newsByAsset.get(asset.id) ?? "", breakingNewsContext, previousSignal },
       );
       ok++;
 
@@ -663,6 +690,19 @@ export function startMarketScheduler(): void {
     }
     scheduleNext();
   }, FIRST_RUN_DELAY_MS);
+
+  // Breaking news → immediate ensemble re-run (bypasses 5-min cadence)
+  breakingNewsEmitter.on("triggerEnsemble", (article: { id: string; title: string; url: string }) => {
+    const w = currentWindow();
+    if (w === "closed") {
+      logger.debug({ title: article.title.slice(0, 80) }, "market-scheduler: breaking news trigger ignored — market closed");
+      return;
+    }
+    logger.info({ trigger: article.title.slice(0, 100), articleId: article.id }, "market-scheduler: breaking news triggered ensemble re-run");
+    runEnsembleForAllAssets(w, { title: article.title }).catch((err) => {
+      logger.warn({ err: err instanceof Error ? err.message : err }, "market-scheduler: breaking news ensemble re-run failed");
+    });
+  });
 
   // Start 30-second tier3 + price refresh cycle (Option A: live signal updates)
   startTier3RefreshTimer();

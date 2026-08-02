@@ -222,11 +222,12 @@ async function getNiftyOptionInstruments(kite: KiteConnect): Promise<NfoInstrume
  * Falls back to computed nearest Thursday if instruments haven't been cached yet.
  * Exported so the signal executor can build correct option symbols.
  */
-export async function getNearestExpiry(): Promise<Date> {
+export async function getNearestExpiry(excludeToday = false): Promise<Date> {
   if (instrumentsCache && instrumentsCache.length > 0) {
     const availableExpiries = [...new Set(instrumentsCache.map((i) => i.expiry))].sort();
     const todayStr = formatExpiryDate(new Date());
-    const nearest = availableExpiries.find((e) => e >= todayStr) ?? availableExpiries[availableExpiries.length - 1]!;
+    const filterFn = excludeToday ? (e: string) => e > todayStr : (e: string) => e >= todayStr;
+    const nearest = availableExpiries.find(filterFn) ?? availableExpiries[availableExpiries.length - 1]!;
     // Parse YYYY-MM-DD into a Date at midnight UTC
     const [y, m, d] = nearest.split("-").map(Number);
     return new Date(Date.UTC(y!, m! - 1, d!));
@@ -236,20 +237,28 @@ export async function getNearestExpiry(): Promise<Date> {
 }
 
 /**
- * Get the nearest weekly expiry date (Thursday).
+ * Get the nearest weekly Thursday expiry. If today is Thursday (expiry day),
+ * always roll to next Thursday — the condor never enters on expiry day.
  */
-function getNearestWeeklyExpiry(): Date {
+export function getNearestWeeklyExpiry(): Date {
   const today = new Date();
   const day = today.getDay();
   let daysUntilThursday = (4 - day + 7) % 7;
+  if (daysUntilThursday === 0) daysUntilThursday = 7; // today is Thursday → roll to next week
   const expiry = new Date(today);
   expiry.setDate(today.getDate() + daysUntilThursday);
-  const istHour = today.getUTCHours() + 5;
-  const istMin = today.getUTCMinutes() + 30;
-  if (day === 4 && (istHour > 15 || (istHour === 15 && istMin >= 30))) {
-    expiry.setDate(today.getDate() + 7);
-  }
   return expiry;
+}
+
+/**
+ * Get the next weekly expiry after the nearest one (for re-entries when
+ * nearest expiry is too close to gamma cutoff).
+ */
+export function getNextWeeklyExpiry(): Date {
+  const nearest = getNearestWeeklyExpiry();
+  const next = new Date(nearest);
+  next.setDate(nearest.getDate() + 7);
+  return next;
 }
 
 /**
@@ -391,6 +400,28 @@ export async function resolveNiftyChain(kite: KiteConnect, spotPrice: number): P
   if (relevantInstruments.length === 0) return null;
 
   return { expiryStr, atmStrike, relevantInstruments };
+}
+
+/**
+ * Look up the actual Kite tradingsymbol for a NIFTY option given strike, type, and expiry.
+ * Kite's symbol format changes between weekly (YYMDD) and monthly (YYMMM) expiries,
+ * so building it manually is unreliable. This searches the cached instruments list
+ * (which has the real symbols from Kite's API) and returns the exact tradingsymbol.
+ * Falls back to a computed YYMDD format if the cache is cold or no match is found.
+ */
+export function lookupOptionSymbol(strike: number, type: "CE" | "PE", expiry: Date): string {
+  if (instrumentsCache && instrumentsCache.length > 0) {
+    const expiryStr = formatExpiryDate(expiry);
+    const hit = instrumentsCache.find(
+      (i) => i.strike === strike && i.instrument_type === type && i.expiry === expiryStr
+    );
+    if (hit) return hit.tradingsymbol;
+  }
+  // Fallback: old numeric format (works for weekly expiries)
+  const yy = String(expiry.getFullYear()).slice(-2);
+  const mm = String(expiry.getMonth() + 1);
+  const dd = String(expiry.getDate()).padStart(2, "0");
+  return `NIFTY${yy}${mm}${dd}${strike}${type}`;
 }
 
 /**

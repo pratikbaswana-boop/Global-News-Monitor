@@ -10,6 +10,7 @@
 // NIFTY-tick cadence via their hot-context AI direction; they too fire only on a change.
 
 import { logger } from "../../lib/logger.js";
+import { pushTradeNotification } from "../../lib/trade-notifications.js";
 import { marketTicker } from "./market-ticker.js";
 import { getHotContext } from "../market/hot-context.js";
 import {
@@ -26,10 +27,12 @@ const SPOT_ASSET_IDS = ["reliance", "tcs", "hdfc-bank"];
 
 const EVAL_THROTTLE_MS = 1_000; // evaluate at most once per second
 const RECONCILE_INTERVAL_MS = 10_000; // sync the state machine with the DB every 10s
+const REENTRY_CHECK_MS = 5_000; // re-check same direction for FLAT users past cooldown
 
 let started = false;
 let lastEvalAt = 0;
 let lastReconcileAt = 0;
+let lastDispatchAt = 0;
 let lastOptionSide: "BUY_CALL" | "BUY_PUT" | "NO_TRADE" = "NO_TRADE";
 const lastSpotDirection = new Map<string, "up" | "down" | "neutral">();
 
@@ -39,7 +42,7 @@ function isTradingOpen(): boolean {
   const istMin = (now.getUTCHours() * 60 + now.getUTCMinutes() + 330) % (24 * 60);
   const istDay = new Date(now.getTime() + 330 * 60 * 1000).getUTCDay();
   if (istDay === 0 || istDay === 6) return false;
-  return istMin >= 555 && istMin < 930;
+  return istMin >= 570 && istMin < 930;
 }
 
 async function evaluate(): Promise<void> {
@@ -64,17 +67,28 @@ async function evaluate(): Promise<void> {
     }
   }
 
-  // ── NIFTY option side (edge-triggered) ──────────────────────────────────────
-  const optionSide = computeLiveOptionSide(OPTION_ASSET_ID).signal;
-  if (optionSide !== lastOptionSide) {
-    logger.info({ assetId: OPTION_ASSET_ID, from: lastOptionSide, to: optionSide }, "tick-evaluator: option side transition");
+  // ── NIFTY option side (edge-triggered + same-direction re-entry) ───────────
+  // Fire on signal TRANSITION (edge) and also re-check same direction every
+  // REENTRY_CHECK_MS so failed entries retry without waiting for a direction flip.
+  const optionSignal = computeLiveOptionSide(OPTION_ASSET_ID);
+  const optionSide = optionSignal.signal;
+  const isTransition = optionSide !== lastOptionSide;
+  const canRecheck = now - lastDispatchAt >= REENTRY_CHECK_MS;
+
+  if (isTransition) {
+    logger.info({ assetId: OPTION_ASSET_ID, from: lastOptionSide, to: optionSide, reason: optionSignal.reason }, "tick-evaluator: option side transition");
+    if (optionSide === "NO_TRADE" && lastOptionSide !== "NO_TRADE") {
+      pushTradeNotification("tick-evaluator", "info", `Signal changed from ${lastOptionSide} to NO_TRADE. Reason: ${optionSignal.reason}`, { from: lastOptionSide, to: optionSide, reason: optionSignal.reason });
+    }
     lastOptionSide = optionSide;
-    if (optionSide === "BUY_CALL" || optionSide === "BUY_PUT") {
-      try {
-        await dispatchEntryForSide(OPTION_ASSET_ID, optionSide);
-      } catch (err) {
-        logger.error({ err }, "tick-evaluator: option dispatch failed");
-      }
+  }
+
+  if ((isTransition || canRecheck) && (optionSide === "BUY_CALL" || optionSide === "BUY_PUT")) {
+    lastDispatchAt = now;
+    try {
+      await dispatchEntryForSide(OPTION_ASSET_ID, optionSide);
+    } catch (err) {
+      logger.error({ err }, "tick-evaluator: option dispatch failed");
     }
   }
 

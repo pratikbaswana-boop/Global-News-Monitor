@@ -1,0 +1,89 @@
+TOON_FILE: STORY_CONTEXT.toon | VERSION: 1
+
+## Story
+GOAL: Overhaul news pipeline to reduce news-to-decision latency from ~10 min to <2 min, eliminate 19,800 regex scans/cycle, and give AI narrative-threaded context instead of isolated headlines
+TYPE: Backend infrastructure improvement (4 phases)
+SOURCE: NEWS_PIPELINE_PLAN.md (850-line detailed plan)
+
+## Acceptance Criteria
+- News-to-decision latency <2 min for Guardian-sourced breaking news
+- News-to-decision latency <4 min for RSS-sourced news
+- 0 regex scans at query time (was 19,800 per cycle)
+- AI receives narrative-threaded news grouped by developing stories
+- AI receives previous signal for maintain/flip reasoning
+- Breaking news from any source triggers immediate ensemble re-run (debounced 1/min)
+- Guardian API polls at 2-min interval (2,880 req/day, within 5,000/day free tier)
+- RSS Tier-1 feeds poll at 3 min, India-specific at 5 min, Tier-2 at 10 min
+- parseRssDate fallback events are logged
+- Monday morning news gets priority over weekend noise (freshness bonus)
+- GDELT fetches every 5 min (was 15 min)
+- Asset pre-tagging at ingestion time eliminates query-time scanning
+- No new API keys needed (all existing in .env)
+- No external WebSocket dependency
+
+## User Flow
+  RSS feed publishes article
+      → 1-3 min (RSS poll) or <2 min (Guardian API)
+  processArticle() runs
+      → URL dedup → semantic dedup → DB INSERT → asset pre-tagging
+      → is_breaking keyword check
+      → if breaking + market open → trigger ensemble re-run
+  AI ensemble runs (per-asset, 3 windows: 6h/24h/72h)
+      → Gets narrative-threaded news block (stories, not headlines)
+      → Gets previous signal (maintain or flip)
+      → Gets "what changed" context if breaking-triggered
+  Hot context updated
+      → Tick evaluator reads on next tick (<1 sec)
+
+## Scope Boundaries
+IN_SCOPE:
+- Phase 1: Bug fixes (parseRssDate logging, article cap increase, freshness bonus, GDELT interval)
+- Phase 2: Guardian API fast-poll + RSS interval reduction + is_breaking column
+- Phase 3: DB INSERT trigger for breaking news → immediate AI re-evaluation
+- Phase 4: Narrative threading + asset pre-tagging + previous signal injection
+
+OUT_OF_SCOPE (from "What NOT to Change" section):
+- RSS polling architecture (stays as base, just interval tweaks)
+- Semantic dedup (stays, enhanced with narrative_sequence_id)
+- Hot context architecture (stays — in-memory, lock-free, atomic swap)
+- Tick evaluator (stays — reads hot context on next tick)
+- Trading strategy / gating logic (unchanged)
+- News Trunk WebSocket (removed — unverified, unreliable)
+- GNews/NewsAPI.org in ingestion pipeline (too limited for free tier)
+
+## Dependencies
+- Guardian API key: GUARDIAN_KEY (already in .env)
+- GPT-4o API (existing, used for ensemble + event extraction)
+- PostgreSQL (existing, needs migrations for is_breaking, narrative_sequence_id, article_asset_tags)
+- Existing RSS infrastructure (feed-registry-seed.ts, rss-fetcher.ts, scheduler.ts)
+- Existing semantic dedup (semantic-dedup.ts)
+- Existing market scheduler (market/scheduler.ts, market-agent.ts)
+
+## Similar Features in Codebase
+- RSS ingestion: artifacts/api-server/src/services/ingestion/scheduler.ts
+- RSS fetching: artifacts/api-server/src/services/ingestion/rss-fetcher.ts
+- Feed registry: artifacts/api-server/src/services/ingestion/feed-registry-seed.ts
+- Semantic dedup: artifacts/api-server/src/services/ingestion/semantic-dedup.ts
+- News-to-asset matching: artifacts/api-server/src/services/market/stock-news.ts
+- Market scheduler: artifacts/api-server/src/services/market/scheduler.ts
+- AI agent: artifacts/api-server/src/services/market/market-agent.ts
+- News display route (uses Guardian/NewsAPI/GNews): artifacts/api-server/src/routes/news.ts
+- DB schema: lib/db/src/schema/raw-articles.ts
+
+## Design Direction
+N/A — backend infrastructure only, no UI changes
+
+## Constraints
+- Free tier only: Guardian 5,000 req/day, GNews 100 req/day, NewsAPI 100 req/day + 1-day delay
+- No external WebSocket dependency (News Trunk removed)
+- RSS IP block risk: faster polling must be moderate, quarantine system as safety net
+- GPT-4o API: 99 calls per 5-min cycle already, breaking news triggers must be debounced
+- DB migrations must be backwards-compatible (additive, not destructive)
+- processArticle latency: pre-tagging adds ~3ms, acceptable vs 2-5 sec embedding+dedup
+
+## Implementation Phases
+PHASE_1: Bug fixes (parseRssDate logging, article cap, freshness bonus, GDELT interval) — ~40 min
+PHASE_2: Guardian API fast-poll + RSS interval reduction + is_breaking column — ~3 hours
+PHASE_3: DB INSERT trigger → immediate AI re-evaluation — ~2.5 hours
+PHASE_4: Narrative threading + asset pre-tagging + previous signal — ~7 hours
+TOTAL: ~13 hours

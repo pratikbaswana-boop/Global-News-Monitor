@@ -2,7 +2,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { Server } from "http";
 import { logger } from "./logger.js";
 
-type Channel = "market-data" | "executions" | "orders" | "paper-trading" | "condor";
+type Channel = "market-data" | "executions" | "orders" | "paper-trading" | "condor" | "condor-user";
 
 interface ClientMeta {
   userId: string | null;
@@ -95,6 +95,10 @@ export function broadcastPaperTrading(data: unknown): void {
 
 export function broadcastCondor(data: unknown): void {
   broadcast("condor", data);
+}
+
+export function broadcastCondorUser(userId: string, data: unknown): void {
+  broadcast("condor-user", data, userId);
 }
 
 export function getConnectedClientCount(): number {

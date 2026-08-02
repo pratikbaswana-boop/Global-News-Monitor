@@ -19,6 +19,7 @@ export const brokerAccountsTable = pgTable("broker_accounts", {
   maxRiskPerTradePct: integer("max_risk_per_trade_pct").notNull().default(2), // % of available margin
   defaultProduct: text("default_product").notNull().default("MIS"), // MIS | CNC | NRML
   defaultOrderType: text("default_order_type").notNull().default("MARKET"), // MARKET | LIMIT
+  strategyPreference: text("strategy_preference").notNull().default("fno"), // fno | condor
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

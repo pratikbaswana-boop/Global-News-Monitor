@@ -9,6 +9,7 @@ export const condorPositionsTable = pgTable("condor_positions", {
   id: text("id").primaryKey(),
   mode: text("mode").notNull().default("paper"), // paper | real
   status: text("status").notNull().default("open"), // open | closed | cancelled
+  userId: text("user_id"), // null for paper mode, set for real per-user condor positions
 
   spotAtEntry: numeric("spot_at_entry").notNull(),
   expiryDate: text("expiry_date").notNull(), // YYYY-MM-DD

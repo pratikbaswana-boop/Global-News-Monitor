@@ -1,18 +1,38 @@
-import { db, feedRegistryTable, rawArticlesTable } from "@workspace/db";
+import { db, feedRegistryTable, rawArticlesTable, articleAssetTagsTable } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
 import { randomUUID } from "crypto";
 import { logger } from "../../lib/logger.js";
 import { FEED_REGISTRY_SEED } from "./feed-registry-seed.js";
 import { fetchRssFeed, computeBackoffMs } from "./rss-fetcher.js";
+import { fetchGuardianApi } from "./guardian-fetcher.js";
 import { fetchGdeltBatch } from "./gdelt-fetcher.js";
 import { deduplicateArticle } from "./semantic-dedup.js";
 import { extractEventFromArticle, insertGdeltEvent } from "./event-extractor.js";
+import { onNewArticle } from "./breaking-news-detector.js";
+import { ASSET_MATCHERS, scoreArticle } from "../market/stock-news.js";
 import type { FeedRegistry } from "@workspace/db";
 
 // Track consecutive failures per feed for backoff
 const failureCount = new Map<string, number>();
 // Track last processed GDELT batch URL
 let lastGdeltBatchUrl: string | undefined;
+
+// ─── Breaking News Keyword Detection ──────────────────────────────────────────
+
+const BREAKING_DRIVERS = [
+  "rbi", "repo rate", "rate cut", "rate hike", "monetary policy",
+  "crude oil", "brent", "wti", "oil price",
+  "war", "invasion", "missile", "nuclear", "ceasefire",
+  "sanctions", "embargo", "ofac",
+  "earnings", "q1", "q2", "q3", "q4", "results",
+  "fii", "foreign institutional", "dii",
+  "sensex", "nifty", "market crash", "circuit breaker",
+];
+
+function isBreakingNews(title: string, body: string): boolean {
+  const text = `${title} ${body}`.toLowerCase();
+  return BREAKING_DRIVERS.some((d) => text.includes(d));
+}
 
 // ─── Feed Registry Bootstrap ──────────────────────────────────────────────────
 
@@ -54,7 +74,21 @@ async function processArticle(
     return;
   }
 
-  // Step 2: Persist raw article
+  // Step 2: Determine narrative_sequence_id
+  let narrativeSequenceId: string;
+  if (dedupResult.status === "corroboration" && dedupResult.primaryArticleId) {
+    const primary = await db
+      .select({ nsid: rawArticlesTable.narrativeSequenceId })
+      .from(rawArticlesTable)
+      .where(eq(rawArticlesTable.id, dedupResult.primaryArticleId))
+      .limit(1);
+    narrativeSequenceId = primary[0]?.nsid ?? randomUUID();
+  } else {
+    narrativeSequenceId = randomUUID();
+  }
+
+  // Step 3: Persist raw article
+  const isBreaking = isBreakingNews(title, body);
   await db.insert(rawArticlesTable).values({
     id: articleId,
     feedId,
@@ -69,13 +103,39 @@ async function processArticle(
     dedupStatus: dedupResult.status,
     corroborationCount: 0,
     requiresCorroboration: isStateMedia && credibilityTier >= 3,
+    isBreaking,
+    narrativeSequenceId,
   }).onConflictDoNothing();
 
-  // Step 3: GPT-4o CAMEO extraction (skip for state-media-only hypotheses until corroborated)
+  if (isBreaking) {
+    logger.info({ articleId, title: title.slice(0, 100) }, "breaking news flagged at ingestion");
+  }
+
+  // Step 4: GPT-4o CAMEO extraction (skip for state-media-only hypotheses until corroborated)
   const skipExtraction = isStateMedia && credibilityTier >= 3;
   if (!skipExtraction) {
     await extractEventFromArticle(articleId, title, body, credibilityTier, isStateMedia, publishedAt);
   }
+
+  // Step 5: Pre-tag assets for this article (eliminates query-time regex scanning)
+  const scanText = `${title}\n${body.slice(0, 2000)}`.toLowerCase();
+  const tagInserts: Array<{ articleId: string; assetId: string; matchedDrivers: string[]; driverScore: number }> = [];
+  for (const assetId of Object.keys(ASSET_MATCHERS)) {
+    const { score, drivers } = scoreArticle(assetId, scanText);
+    if (score > 0) {
+      tagInserts.push({ articleId, assetId, matchedDrivers: drivers, driverScore: score });
+    }
+  }
+  if (tagInserts.length > 0) {
+    try {
+      await db.insert(articleAssetTagsTable).values(tagInserts).onConflictDoNothing();
+    } catch (err) {
+      logger.warn({ articleId, err: err instanceof Error ? err.message : err }, "asset pre-tagging failed");
+    }
+  }
+
+  // Step 6: Trigger breaking news detector (may emit event for immediate ensemble re-run)
+  onNewArticle({ id: articleId, title, url, isBreaking, publishedAt });
 }
 
 // ─── RSS Feed Processor ────────────────────────────────────────────────────────
@@ -237,9 +297,42 @@ export async function startIngestionScheduler(): Promise<void> {
     }, staggerMs);
   }
 
-  // GDELT: every 15 minutes
+  // Guardian API: every 2 minutes (fast-poll, 2,880 req/day, within 5,000/day free tier)
+  const processGuardianApi = async () => {
+    try {
+      const articles = await fetchGuardianApi();
+      for (const article of articles) {
+        try {
+          await processArticle(
+            article.feedId,
+            article.url,
+            article.title,
+            article.body,
+            article.publishedAt,
+            article.credibilityTier,
+            article.isStateMedia,
+          );
+        } catch (err) {
+          logger.warn({ url: article.url, err: err instanceof Error ? err.message : err },
+            "guardian-api: article processing error");
+        }
+      }
+      if (articles.length > 0) {
+        logger.info({ count: articles.length }, "guardian-api: processed");
+      }
+    } catch (err) {
+      logger.warn({ err: err instanceof Error ? err.message : err }, "guardian-api: fetch failed");
+    }
+  };
+
+  setTimeout(() => {
+    processGuardianApi().catch(() => null);
+    setInterval(() => processGuardianApi().catch(() => null), 120 * 1000);
+  }, 5_000); // 5 sec stagger after startup
+
+  // GDELT: every 5 minutes
   processGdeltBatch().catch(() => null);
-  setInterval(() => processGdeltBatch().catch(() => null), 15 * 60 * 1000);
+  setInterval(() => processGdeltBatch().catch(() => null), 5 * 60 * 1000);
 
   logger.info({ feeds: feeds.length }, "ingestion scheduler started — all feeds scheduled");
 }
