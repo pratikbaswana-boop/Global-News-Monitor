@@ -16,6 +16,9 @@ import { startWsBroadcaster } from "./services/kite/ws-broadcaster.js";
 import { startPaperTradeEngine } from "./services/kite/paper-trade-engine.js";
 import { startCondorPaperEngine } from "./services/kite/condor-paper-engine.js";
 import { startEventLoopMonitor } from "./lib/event-loop-monitor.js";
+// Crypto trading module — completely independent of NSE/Kite. Only starts when
+// CRYPTO_TRADING_ENABLED=true. Additive: does not modify any NSE behavior.
+import { startCryptoModule } from "./services/crypto/index.js";
 // Phase 1-3/5 scheduler imports are deliberately NOT static here — they're loaded
 // via dynamic import() only in the BG_IN_WORKER=false rollback path, so the main
 // bundle doesn't statically depend on Phase 1-3 scheduler code (B6 cleanup).
@@ -169,5 +172,12 @@ server.listen(port, (err) => {
     // Iron Condor paper trading: separate Rs 1L capital pool, option-SELLING strategy
     // (see nifty_master_guide.md) — fully independent of the option-buying engines above.
     startCondorPaperEngine();
+
+    // Crypto trading module — completely independent of NSE/Kite.
+    // Only starts when CRYPTO_TRADING_ENABLED=true. Defaults to paper mode.
+    // Does NOT affect any NSE behavior — all crypto code lives in services/crypto/.
+    startCryptoModule().catch((e) => {
+      logger.error({ err: e }, "Crypto module failed to start");
+    });
   }
 });

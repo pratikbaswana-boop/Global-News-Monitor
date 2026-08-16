@@ -28,7 +28,7 @@ const router = Router();
 // POST /trading/orders — Place a new order
 router.post("/trading/orders", async (req, res) => {
   try {
-    const { userId, exchange, tradingsymbol, transactionType, quantity, orderType, product, price, triggerPrice, variety, tag } = req.body;
+    const { userId, exchange, tradingsymbol, transactionType, quantity, orderType, product, price, triggerPrice, variety, tag, marketProtection } = req.body;
 
     if (!userId || !exchange || !tradingsymbol || !transactionType || !quantity || !orderType || !product) {
       res.status(400).json({ error: "Missing required order parameters" });
@@ -46,6 +46,7 @@ router.post("/trading/orders", async (req, res) => {
       triggerPrice,
       variety,
       tag,
+      marketProtection,
     });
 
     res.json(result);

@@ -868,7 +868,7 @@ async function executeSpotSignalForUser(
     quantity,
     orderType,
     product,
-    tag: `auto-signal-${snapshot.assetId}-${snapshot.id}`,
+    tag: `auto-sig-${snapshot.assetId.slice(0, 8)}`.slice(0, 20),
   };
 
   // For LIMIT orders, set price near current price
@@ -972,8 +972,14 @@ async function executeOptionSignalForUser(
     return { executed: false, reason: `Only intraday trades enabled, got ${snapshot.timeframe}` };
   }
 
-  // Derive option signal from snapshot tier-3 data
-  const optionSig = deriveOptionSignalFromSnapshot(snapshot);
+  // Derive option signal from snapshot tier-3 data.
+  // When skipConfidenceCheck=true (tick-driven entry), the signal was already gated
+  // by computeLiveOptionSide() with FRESH Tier-3 data. Re-deriving from the snapshot
+  // applies the gates AGAIN with STALE cached tier3Evidence, which can block the trade.
+  // Use deriveBaseOptionSignal (no gates) to get just the suggestedStrike.
+  const optionSig = skipConfidenceCheck
+    ? deriveBaseOptionSignal(snapshot)
+    : deriveOptionSignalFromSnapshot(snapshot);
   if (optionSig.signal === "NO_TRADE" || optionSig.suggestedStrike === null) {
     return { executed: false, reason: optionSig.reason };
   }
@@ -1329,7 +1335,7 @@ async function tryOverrideEntry(
     orderType: "LIMIT",
     price: exitLimitPrice,
     product: (currentExec.product ?? "MIS") as "CNC" | "MIS" | "NRML",
-    tag: `override-exit-${currentExec.id.slice(0, 14)}`,
+    tag: `ovrexit-${currentExec.id.slice(0, 11)}`,
   });
 
   // Cancel any resting SL orders for the current position

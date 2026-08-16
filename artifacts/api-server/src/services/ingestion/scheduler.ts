@@ -27,6 +27,16 @@ const BREAKING_DRIVERS = [
   "earnings", "q1", "q2", "q3", "q4", "results",
   "fii", "foreign institutional", "dii",
   "sensex", "nifty", "market crash", "circuit breaker",
+  // Crypto breaking news drivers — additive, for crypto trading module
+  "bitcoin etf", "ethereum etf", "crypto etf",
+  "sec crypto", "cftc crypto", "crypto regulation", "crypto bill",
+  "binance", "coinbase", "ftx", "binance settlement",
+  "crypto crash", "crypto rally", "bitcoin crash", "bitcoin dump",
+  "liquidation", "long squeeze", "short squeeze",
+  "stablecoin depeg", "usdt depeg", "usdc depeg", "tether",
+  "crypto hack", "exchange hack", "defi exploit", "bridge hack",
+  "halving", "bitcoin halving",
+  "fomc", "fed rate", "rate cut", "rate hike",
 ];
 
 function isBreakingNews(title: string, body: string): boolean {

@@ -262,6 +262,32 @@ export function getNextWeeklyExpiry(): Date {
 }
 
 /**
+ * Get the next expiry after the nearest one from Kite's instruments cache.
+ * Used when the nearest expiry is past gamma cutoff and we need to roll.
+ * Falls back to getNextWeeklyExpiry() if instruments haven't been cached.
+ */
+export async function getNextExpiry(): Promise<Date> {
+  if (instrumentsCache && instrumentsCache.length > 0) {
+    const availableExpiries = [...new Set(instrumentsCache.map((i) => i.expiry))].sort();
+    const todayStr = formatExpiryDate(new Date());
+    // Find the nearest expiry excluding today, then pick the one after it
+    const upcoming = availableExpiries.filter((e) => e > todayStr);
+    if (upcoming.length >= 2) {
+      const [y, m, d] = upcoming[1]!.split("-").map(Number);
+      return new Date(Date.UTC(y!, m! - 1, d!));
+    }
+    if (upcoming.length === 1) {
+      // Only one upcoming expiry, add 7 days as fallback
+      const [y, m, d] = upcoming[0]!.split("-").map(Number);
+      const dt = new Date(Date.UTC(y!, m! - 1, d!));
+      dt.setDate(dt.getDate() + 7);
+      return dt;
+    }
+  }
+  return getNextWeeklyExpiry();
+}
+
+/**
  * Format expiry date as YYYY-MM-DD (Kite instrument format).
  */
 function formatExpiryDate(expiry: Date): string {

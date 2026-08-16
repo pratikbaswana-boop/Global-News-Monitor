@@ -4,6 +4,7 @@ import { Link } from "wouter";
 import { ArrowRight, Database, MemoryStick, Network, TrendingUp, LogIn } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { AuthModal } from "@/components/auth/auth-modal";
+import { PublicNav, PublicFooter } from "@/components/public-shell";
 
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
 
@@ -279,14 +280,14 @@ function HeroGlobe() {
 function IngestionOpsCard() {
   const [total, setTotal] = useState(499800);
   const sources = [
-    { name: "Open-source news", count: "184,200", pct: 92, type: "active", dot: "bg-[#1e50d4] shadow-[0_0_6px_rgba(30,80,212,0.8)]" },
-    { name: "Social sentiment", count: "112,400", pct: 78, type: "live", dot: "bg-[#1e50d4] shadow-[0_0_6px_rgba(30,80,212,0.8)]" },
-    { name: "Satellite imagery", count: "38,100", pct: 55, type: "live", dot: "bg-[#d4701e] shadow-[0_0_6px_rgba(212,112,30,0.7)]" },
-    { name: "Shipping manifests", count: "61,800", pct: 67, type: "active", dot: "bg-[#1e50d4] shadow-[0_0_6px_rgba(30,80,212,0.8)]" },
-    { name: "Financial signals", count: "29,300", pct: 48, type: "live", dot: "bg-[#1e50d4] shadow-[0_0_6px_rgba(30,80,212,0.8)]" },
-    { name: "Dark web monitoring", count: "14,700", pct: 32, type: "active", dot: "bg-[#c0392b] shadow-[0_0_6px_rgba(192,57,43,0.8)]" },
-    { name: "Gov & diplomatic", count: "22,900", pct: 41, type: "live", dot: "bg-[#d4701e] shadow-[0_0_6px_rgba(212,112,30,0.7)]" },
-    { name: "SIGINT intercepts", count: "9,100", pct: 24, type: "active", dot: "bg-[#c0392b] shadow-[0_0_6px_rgba(192,57,43,0.8)]" },
+    { name: "Open-source news", count: "184,200", pct: 92, type: "live", dot: "bg-[#1e50d4] shadow-[0_0_6px_rgba(30,80,212,0.8)]" },
+    { name: "Gov & diplomatic", count: "22,900", pct: 41, type: "live", dot: "bg-[#1e50d4] shadow-[0_0_6px_rgba(30,80,212,0.8)]" },
+    { name: "Social sentiment", count: "112,400", pct: 78, type: "planned", dot: "bg-[#d4701e] shadow-[0_0_6px_rgba(212,112,30,0.7)]" },
+    { name: "Satellite imagery", count: "38,100", pct: 55, type: "planned", dot: "bg-[#d4701e] shadow-[0_0_6px_rgba(212,112,30,0.7)]" },
+    { name: "Shipping manifests", count: "61,800", pct: 67, type: "planned", dot: "bg-[#d4701e] shadow-[0_0_6px_rgba(212,112,30,0.7)]" },
+    { name: "Financial signals", count: "29,300", pct: 48, type: "planned", dot: "bg-[#c0392b] shadow-[0_0_6px_rgba(192,57,43,0.8)]" },
+    { name: "Dark web monitoring", count: "14,700", pct: 32, type: "planned", dot: "bg-[#c0392b] shadow-[0_0_6px_rgba(192,57,43,0.8)]" },
+    { name: "SIGINT intercepts", count: "9,100", pct: 24, type: "planned", dot: "bg-[#c0392b] shadow-[0_0_6px_rgba(192,57,43,0.8)]" },
   ];
 
   useEffect(() => {
@@ -303,25 +304,25 @@ function IngestionOpsCard() {
         <div className="p-10 md:p-11 flex flex-col justify-center" style={{ borderRight: "0.5px solid rgba(255,255,255,0.04)" }}>
           <div className="text-[9px] tracking-[0.22em] text-[#1e50d4] font-semibold uppercase mb-[18px]">01 / Data Sources</div>
           <div className="text-[28px] md:text-[32px] font-bold text-[#dde6f5] leading-[1.1] mb-[18px] tracking-[-0.02em]">Intelligent<br />Ingestion</div>
-          <div className="text-[12px] md:text-[12.5px] text-[#3d5270] leading-[1.8]">Automated monitoring of 500,000+ sources including local news, social sentiment, satellite imagery, and shipping manifests. Neural filters eliminate noise before it reaches your desk.</div>
+          <div className="text-[12px] md:text-[12.5px] text-[#94a3c4] leading-[1.8]">Automated monitoring of 500,000+ sources including local news, social sentiment, satellite imagery, and shipping manifests. Neural filters eliminate noise before it reaches your desk.</div>
         </div>
         <div className="p-7 md:p-9 flex flex-col justify-center">
           <div>
             {sources.map((s) => (
               <div key={s.name} className="flex items-center py-[11px]" style={{ borderBottom: "0.5px solid rgba(255,255,255,0.03)" }}>
                 <div className={`w-[5px] h-[5px] rounded-full mr-[14px] flex-shrink-0 ${s.dot}`} />
-                <div className="text-[11px] text-[#5a7090] tracking-[0.04em] flex-1">{s.name}</div>
-                <div className="text-[10px] text-[#1e3060] mr-4 tabular-nums">{s.count}</div>
-                <div className="w-[60px] h-[1px] bg-white/5 relative">
-                  <div className="src-bar-fill absolute top-0 left-0 h-[1px] bg-[#1e50d4] transition-[width] duration-[2000ms] ease-out" style={{ width: "0%" }} data-pct={String(s.pct)} />
+                <div className="text-[11px] text-[#b8c6e0] tracking-[0.04em] flex-1">{s.name}</div>
+                <div className="text-[10px] text-[#7086ab] mr-4 tabular-nums">{s.count}</div>
+                <div className="w-[60px] h-[1px] bg-white/10 relative">
+                  <div className="src-bar-fill absolute top-0 left-0 h-[1px] bg-[#3d7bf0] transition-[width] duration-[2000ms] ease-out" style={{ width: "0%" }} data-pct={String(s.pct)} />
                 </div>
-                <div className={`text-[8.5px] tracking-[0.1em] uppercase ml-[14px] min-w-[40px] text-right ${s.type === "live" ? "text-[#1e6040]" : "text-[#1e3060]"}`}>{s.type}</div>
+                <div className={`text-[8.5px] tracking-[0.1em] uppercase ml-[14px] min-w-[40px] text-right font-semibold ${s.type === "live" ? "text-[#34d399]" : "text-[#7086ab]"}`}>{s.type}</div>
               </div>
             ))}
           </div>
           <div className="mt-5 pt-4" style={{ borderTop: "0.5px solid rgba(255,255,255,0.06)" }}>
             <div className="text-[26px] font-bold text-[#dde6f5] tracking-[-0.02em] tabular-nums">{total.toLocaleString()}+</div>
-            <div className="text-[9px] tracking-[0.14em] text-[#1e3060] uppercase mt-[3px]">Active sources monitored</div>
+            <div className="text-[9px] tracking-[0.14em] text-[#7086ab] uppercase mt-[3px]">Active sources monitored</div>
           </div>
         </div>
       </div>
@@ -331,16 +332,15 @@ function IngestionOpsCard() {
 
 /* Feature 2: Extraction Ops Card */
 function ExtractionOpsCard() {
-  const [sps, setSps] = useState(1100);
   const [entries, setEntries] = useState<{ ts: string; raw: string; tags: { t: string; c: string }[]; causal: string; effect: string }[]>([]);
   const idxRef = useRef(0);
 
   const EVENTS = [
     { ts: "14:32:07 UTC", raw: "Central bank raises rates 50bps — bond markets react sharply", tags: [{ t: "Central Bank", c: "bg-[rgba(30,80,212,0.1)] text-[#2a60d4] border-[0.5px] border-[rgba(30,80,212,0.2)]" }, { t: "50bps", c: "bg-[rgba(30,80,212,0.1)] text-[#2a60d4] border-[0.5px] border-[rgba(30,80,212,0.2)]" }, { t: "Bearish", c: "bg-[rgba(160,40,40,0.1)] text-[#a02828] border-[0.5px] border-[rgba(160,40,40,0.2)]" }], causal: "Rate hike", effect: "→ bond selloff, EM capital flight +34%" },
-    { ts: "14:31:54 UTC", raw: "3 dark vessels detected near contested strait, MMSI masked", tags: [{ t: "Maritime", c: "bg-[rgba(30,80,212,0.1)] text-[#2a60d4] border-[0.5px] border-[rgba(30,80,212,0.2)]" }, { t: "SIGINT", c: "bg-[rgba(30,80,212,0.1)] text-[#2a60d4] border-[0.5px] border-[rgba(30,80,212,0.2)]" }, { t: "Alert", c: "bg-[rgba(160,100,20,0.1)] text-[#a06414] border-[0.5px] border-[rgba(160,100,20,0.2)]" }], causal: "Vessel movement", effect: "→ escalation probability +18%" },
+    { ts: "14:31:54 UTC", raw: "OPEC+ signals extended output cuts through Q3", tags: [{ t: "Energy", c: "bg-[rgba(30,80,212,0.1)] text-[#2a60d4] border-[0.5px] border-[rgba(30,80,212,0.2)]" }, { t: "OPEC+", c: "bg-[rgba(30,80,212,0.1)] text-[#2a60d4] border-[0.5px] border-[rgba(30,80,212,0.2)]" }, { t: "Bullish", c: "bg-[rgba(20,100,60,0.1)] text-[#1a6040] border-[0.5px] border-[rgba(20,100,60,0.2)]" }], causal: "Supply cut signal", effect: "→ crude repricing, inflation pass-through risk" },
     { ts: "14:31:41 UTC", raw: "Tech sector beats estimates 23% — rotation into AI accelerates", tags: [{ t: "Tech", c: "bg-[rgba(30,80,212,0.1)] text-[#2a60d4] border-[0.5px] border-[rgba(30,80,212,0.2)]" }, { t: "AI/ML", c: "bg-[rgba(30,80,212,0.1)] text-[#2a60d4] border-[0.5px] border-[rgba(30,80,212,0.2)]" }, { t: "Bullish", c: "bg-[rgba(20,100,60,0.1)] text-[#1a6040] border-[0.5px] border-[rgba(20,100,60,0.2)]" }], causal: "Earnings beat", effect: "→ growth rotation, vol compression" },
     { ts: "14:31:28 UTC", raw: "Asian port congestion >72hrs across 3 major logistics hubs", tags: [{ t: "Supply Chain", c: "bg-[rgba(30,80,212,0.1)] text-[#2a60d4] border-[0.5px] border-[rgba(30,80,212,0.2)]" }, { t: "Asia Pacific", c: "bg-[rgba(30,80,212,0.1)] text-[#2a60d4] border-[0.5px] border-[rgba(30,80,212,0.2)]" }, { t: "Bearish", c: "bg-[rgba(160,40,40,0.1)] text-[#a02828] border-[0.5px] border-[rgba(160,40,40,0.2)]" }], causal: "Port disruption", effect: "→ commodity lag, CPI uptick Q2" },
-    { ts: "14:31:15 UTC", raw: "Unusual comms burst near border — 14 actors identified, HUMINT corroborated", tags: [{ t: "HUMINT", c: "bg-[rgba(30,80,212,0.1)] text-[#2a60d4] border-[0.5px] border-[rgba(30,80,212,0.2)]" }, { t: "14 Actors", c: "bg-[rgba(30,80,212,0.1)] text-[#2a60d4] border-[0.5px] border-[rgba(30,80,212,0.2)]" }, { t: "Critical", c: "bg-[rgba(160,40,40,0.1)] text-[#a02828] border-[0.5px] border-[rgba(160,40,40,0.2)]" }], causal: "Comms pattern", effect: "→ mobilisation signal, conflict risk elevated" },
+    { ts: "14:31:15 UTC", raw: "Major exporter halts grain shipments amid drought conditions", tags: [{ t: "Agriculture", c: "bg-[rgba(30,80,212,0.1)] text-[#2a60d4] border-[0.5px] border-[rgba(30,80,212,0.2)]" }, { t: "Trade Policy", c: "bg-[rgba(30,80,212,0.1)] text-[#2a60d4] border-[0.5px] border-[rgba(30,80,212,0.2)]" }, { t: "Bearish", c: "bg-[rgba(160,40,40,0.1)] text-[#a02828] border-[0.5px] border-[rgba(160,40,40,0.2)]" }], causal: "Export halt", effect: "→ food price pressure, import-dependent markets exposed" },
   ];
 
   useEffect(() => {
@@ -354,8 +354,7 @@ function ExtractionOpsCard() {
     };
     addEntry();
     const iv = setInterval(addEntry, 3200);
-    const iv2 = setInterval(() => setSps(Math.round(1100 + Math.random() * 500)), 900);
-    return () => { clearInterval(iv); clearInterval(iv2); };
+    return () => clearInterval(iv);
   }, []);
 
   return (
@@ -364,19 +363,19 @@ function ExtractionOpsCard() {
         <div className="p-7 md:p-9 flex flex-col justify-center overflow-hidden">
           <div className="flex items-center gap-2 mb-4">
             <div className="w-[5px] h-[5px] rounded-full bg-[#1e6040] shadow-[0_0_5px_rgba(30,96,64,0.9)] animate-pulse" />
-            <div className="text-[9px] tracking-[0.18em] text-[#1e3060] uppercase">Live extraction feed</div>
+            <div className="text-[9px] tracking-[0.18em] text-[#7086ab] uppercase">Live extraction feed</div>
           </div>
           <div className="space-y-0">
             {entries.map((ev, i) => (
               <div key={(ev as any).key || i} className="py-[13px]" style={{ borderBottom: "0.5px solid rgba(255,255,255,0.03)" }}>
-                <div className="text-[8px] text-[#1a2540] tracking-[0.08em] uppercase mb-1">{ev.ts}</div>
-                <div className="text-[10px] text-[#3a4e68] font-mono leading-[1.5] mb-[7px]">{ev.raw}</div>
+                <div className="text-[8px] text-[#64749a] tracking-[0.08em] uppercase mb-1">{ev.ts}</div>
+                <div className="text-[10px] text-[#c3d0e6] font-mono leading-[1.5] mb-[7px]">{ev.raw}</div>
                 <div className="flex flex-wrap gap-1 mb-[5px]">
                   {ev.tags.map((t) => (
                     <span key={t.t} className={`text-[8.5px] tracking-[0.06em] px-[7px] py-[2px] rounded-[2px] font-semibold uppercase ${t.c}`}>{t.t}</span>
                   ))}
                 </div>
-                <div className="text-[9px] text-[#1e3355] tracking-[0.02em]">{ev.causal} <span className="text-[#1e50d4]">{ev.effect}</span></div>
+                <div className="text-[9px] text-[#8b9bc0] tracking-[0.02em]">{ev.causal} <span className="text-[#5c9cff]">{ev.effect}</span></div>
               </div>
             ))}
           </div>
@@ -384,12 +383,12 @@ function ExtractionOpsCard() {
         <div className="p-10 md:p-11 flex flex-col justify-center" style={{ borderLeft: "0.5px solid rgba(255,255,255,0.04)" }}>
           <div className="text-[9px] tracking-[0.22em] text-[#1e50d4] font-semibold uppercase mb-[18px]">02 / Processing</div>
           <div className="text-[28px] md:text-[32px] font-bold text-[#dde6f5] leading-[1.1] mb-[18px] tracking-[-0.02em]">Structured<br />Extraction</div>
-          <div className="text-[12px] md:text-[12.5px] text-[#3d5270] leading-[1.8]">Transforming chaotic world events into high-fidelity data points. Entities, sentiments, and causal relationships identified with 99.8% precision across 40 languages.</div>
+          <div className="text-[12px] md:text-[12.5px] text-[#94a3c4] leading-[1.8]">Transforming raw reporting into structured, traceable assessments. Every extraction is run through independent reasoning passes before it's surfaced for review.</div>
           <div className="mt-7 grid grid-cols-2 gap-3">
-            {[{ n: sps.toLocaleString(), l: "Signals / sec" }, { n: "99.8%", l: "Precision" }, { n: "40", l: "Languages" }, { n: "<80ms", l: "Latency" }].map((s) => (
+            {[{ n: "Context", l: "What is happening?" }, { n: "Memory", l: "Seen before?" }, { n: "Challenge", l: "What contradicts it?" }, { n: "Forecast", l: "What happens next?" }].map((s) => (
               <div key={s.l} className="pt-3" style={{ borderTop: "1px solid rgba(30,80,212,0.3)" }}>
-                <div className="text-[22px] font-bold text-[#dde6f5] tracking-[-0.02em]">{s.n}</div>
-                <div className="text-[9px] tracking-[0.12em] text-[#1e3060] uppercase mt-[3px]">{s.l}</div>
+                <div className="text-[16px] font-bold text-[#dde6f5] tracking-[-0.02em]">{s.n}</div>
+                <div className="text-[9px] tracking-[0.1em] text-[#7086ab] uppercase mt-[3px]">{s.l}</div>
               </div>
             ))}
           </div>
@@ -408,8 +407,8 @@ function KnowledgeGraphOpsCard() {
   const EFFECTS = [
     { cause: "Fed rate hike", effect: "USD strength → EM debt stress → contagion" },
     { cause: "Port congestion", effect: "Shipping lag → commodity spike → CPI drift" },
-    { cause: "Dark vessel activity", effect: "Strait closure risk → oil +$4.20 → inflation" },
-    { cause: "SIGINT burst", effect: "Mobilisation signal → border risk elevated" },
+    { cause: "OPEC+ supply signal", effect: "Crude repricing → inflation pass-through → rate path shift" },
+    { cause: "Grain export halt", effect: "Food price pressure → EM import stress → policy response" },
     { cause: "Equity rotation", effect: "Growth bid → yield curve steepening" },
   ];
 
@@ -530,12 +529,12 @@ function KnowledgeGraphOpsCard() {
         <div className="p-10 md:p-11 flex flex-col justify-center" style={{ borderRight: "0.5px solid rgba(255,255,255,0.04)" }}>
           <div className="text-[9px] tracking-[0.22em] text-[#1e50d4] font-semibold uppercase mb-[18px]">03 / Synthesis</div>
           <div className="text-[28px] md:text-[32px] font-bold text-[#dde6f5] leading-[1.1] mb-[18px] tracking-[-0.02em]">Living Knowledge<br />Graph</div>
-          <div className="text-[12px] md:text-[12.5px] text-[#3d5270] leading-[1.8] mb-6">A dynamic, interconnected map of global power dynamics. Every event ripples through the graph, revealing second-order effects before they manifest.</div>
+          <div className="text-[12px] md:text-[12.5px] text-[#94a3c4] leading-[1.8] mb-6">A dynamic, interconnected map connecting causal relationships across global events, surfacing how one signal could cascade into others for analyst review.</div>
           <div className="space-y-0">
             {effects.map((ef, i) => (
               <div key={i} className="flex items-start gap-[10px] py-[10px]" style={{ borderBottom: "0.5px solid rgba(255,255,255,0.03)" }}>
-                <div className="text-[#1e50d4] text-[10px] mt-[1px] flex-shrink-0">→</div>
-                <div className="text-[10.5px] text-[#2a3d58] leading-[1.5]"><strong className="text-[#3a5580] font-semibold">{ef.cause}</strong> — {ef.effect}</div>
+                <div className="text-[#5c9cff] text-[10px] mt-[1px] flex-shrink-0">→</div>
+                <div className="text-[10.5px] text-[#9db0d0] leading-[1.5]"><strong className="text-[#dde6f5] font-semibold">{ef.cause}</strong> — {ef.effect}</div>
               </div>
             ))}
           </div>
@@ -551,7 +550,7 @@ function KnowledgeGraphOpsCard() {
 /* Feature 4: Reasoning Cards */
 function ReasoningCards() {
   const cards = [
-    { label: "Outcome Probability", value: "74%", icon: <TrendingUp className="w-4 h-4 text-[#0a84ff]" />, sub: "High Confidence" },
+    { label: "Outcome Probability", value: "ELEVATED", icon: <TrendingUp className="w-4 h-4 text-[#0a84ff]" />, sub: "Under Review" },
     { label: "Asset Volatility", value: "LOW", sub: "Stable Regime" },
     { label: "Sentiment Index", value: "NEUTRAL", sub: "Consistent Data" },
     { label: "Drift Alert", value: "NONE", sub: "Model Calibrated" },
@@ -575,10 +574,10 @@ function ReasoningCards() {
 /* Feature 5: Market Cards */
 function MarketCards() {
   const markets = [
-    { name: "NIFTY 50", value: "24,350.25", bar: "w-2/3", forecast: "Forecast: +1.2% Expectation" },
-    { name: "SENSEX", value: "79,940.10", bar: "w-1/2", forecast: "Forecast: Stable" },
-    { name: "GOLD (XAU)", value: "$2,410.80", bar: "w-4/5", forecast: "Forecast: High Demand" },
-    { name: "CRUDE OIL", value: "$82.40", bar: "w-1/3", forecast: "Forecast: Correction Pending" },
+    { name: "NIFTY 50", value: "24,350.25", bar: "w-2/3", forecast: "Modeled scenario: Upward bias" },
+    { name: "SENSEX", value: "79,940.10", bar: "w-1/2", forecast: "Modeled scenario: Stable" },
+    { name: "GOLD (XAU)", value: "$2,410.80", bar: "w-4/5", forecast: "Modeled scenario: High demand" },
+    { name: "CRUDE OIL", value: "$82.40", bar: "w-1/3", forecast: "Modeled scenario: Correction risk" },
   ];
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -633,8 +632,10 @@ export default function LandingPage() {
   return (
     <div className="min-h-screen bg-[#0a0a0f] text-[#a1a1a6] font-sans selection:bg-[#0a84ff]/30">
 
+      <PublicNav />
+
       {/* Hero */}
-      <section className="min-h-screen flex flex-col items-center justify-center text-center px-5 md:px-16">
+      <section className="min-h-screen flex flex-col items-center text-center px-5 md:px-16 pt-40 pb-20 md:pt-48">
         <div className="max-w-4xl mx-auto">
           <motion.h1 initial={{ opacity: 0, y: 30 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.8, ease: [0.25, 0.1, 0.25, 1] }}
             className="text-white text-4xl md:text-6xl lg:text-7xl font-extrabold tracking-tighter leading-[1.05] mb-6">
@@ -645,7 +646,7 @@ export default function LandingPage() {
             AI-powered geopolitical intelligence and market prediction. Built for clarity in an age of noise.
           </motion.p>
           <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.8, delay: 0.3 }}
-            className="flex flex-col md:flex-row items-center justify-center gap-4 mb-20">
+            className="flex flex-col md:flex-row items-center justify-center gap-4 mb-24">
             <HeroAuthButtons />
           </motion.div>
         </div>
@@ -678,7 +679,7 @@ export default function LandingPage() {
             <span className="text-[#0a84ff] text-xs font-semibold tracking-widest uppercase mb-4 block">04 / Analysis</span>
             <h2 className="text-white text-2xl md:text-4xl font-bold tracking-tight leading-tight mb-6">Probabilistic Reasoning</h2>
             <p className="text-[#a1a1a6] text-base md:text-lg leading-relaxed">
-              We don't just report what's happening; we calculate what's next. Our Bayesian engines simulate millions of scenarios to give you concrete likelihoods for critical outcomes.
+              We don't just report what's happening; we reason about what's next. Independent reasoning passes — context, memory, counter-evidence, and forecast — debate every signal before a conclusion is surfaced.
             </p>
           </ScrollReveal>
         </div>
@@ -688,10 +689,13 @@ export default function LandingPage() {
       <section className="py-32 md:py-40 px-5 md:px-16 max-w-7xl mx-auto">
         <div className="text-center mb-12">
           <ScrollReveal>
-            <span className="text-[#0a84ff] text-xs font-semibold tracking-widest uppercase mb-4 block">05 / Markets</span>
-            <h2 className="text-white text-2xl md:text-4xl font-bold tracking-tight leading-tight mb-6">Market Forecasting</h2>
+            <span className="text-[#0a84ff] text-xs font-semibold tracking-widest uppercase mb-2 block">05 / Markets</span>
+            <div className="flex items-center justify-center gap-3 mb-6">
+              <h2 className="text-white text-2xl md:text-4xl font-bold tracking-tight leading-tight">Market Forecasting</h2>
+              <span className="text-[8.5px] tracking-[0.1em] uppercase text-[#7086ab] border border-[#7086ab]/30 rounded-full px-2.5 py-1">Planned</span>
+            </div>
             <p className="text-[#a1a1a6] text-base md:text-lg max-w-2xl mx-auto">
-              Real-time geopolitical impact on global indices. Bridge the gap between world news and asset movement.
+              Modeling how geopolitical events could move global indices — bridging world news and asset movement. This is a validation domain on our roadmap, illustrated below.
             </p>
           </ScrollReveal>
         </div>
@@ -713,18 +717,7 @@ export default function LandingPage() {
         </ScrollReveal>
       </section>
 
-      {/* Footer */}
-      <footer className="bg-[#0a0a0f]">
-        <div className="flex flex-col md:flex-row justify-between items-center w-full px-5 md:px-16 py-8 max-w-7xl mx-auto border-t border-white/5">
-          <div className="text-white text-lg font-bold mb-6 md:mb-0">Global News Monitor</div>
-          <div className="flex gap-8 mb-6 md:mb-0">
-            <a href="#" className="text-[#a1a1a6] hover:text-white transition-colors">Privacy Policy</a>
-            <a href="#" className="text-[#a1a1a6] hover:text-white transition-colors">Terms of Service</a>
-            <a href="#" className="text-[#a1a1a6] hover:text-white transition-colors">Contact</a>
-          </div>
-          <div className="text-[#a1a1a6] text-sm text-center md:text-right">&copy; 2024 Global News Monitor. All rights reserved.</div>
-        </div>
-      </footer>
+      <PublicFooter />
 
     </div>
   );

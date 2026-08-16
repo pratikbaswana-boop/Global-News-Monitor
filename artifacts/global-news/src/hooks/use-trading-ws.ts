@@ -9,6 +9,7 @@ interface WsMessage {
 }
 
 let globalWs: WebSocket | null = null;
+let globalWsUserId: string | undefined = undefined;
 let refCount = 0;
 const channelHandlers = new Map<Channel, Set<(data: unknown) => void>>();
 
@@ -22,14 +23,31 @@ function getWsUrl(userId?: string, channels?: Channel[]): string {
 }
 
 function ensureWs(userId?: string): WebSocket {
+  // If existing connection was created without a userId (or a different one),
+  // and now we have a userId, reconnect so the server can filter broadcasts to us.
+  // Handle both OPEN and CONNECTING states — if the WS is still connecting without
+  // userId, close it and create a new one with userId before it finishes connecting.
+  if (globalWs && globalWsUserId !== userId && userId) {
+    if (globalWs.readyState === WebSocket.OPEN || globalWs.readyState === WebSocket.CONNECTING) {
+      const oldWs = globalWs;
+      globalWs = null;
+      oldWs.onclose = null;
+      oldWs.onerror = null;
+      oldWs.onmessage = null;
+      oldWs.close();
+    }
+  }
+
   if (globalWs && globalWs.readyState === WebSocket.OPEN) return globalWs;
   if (globalWs && globalWs.readyState === WebSocket.CLOSING) globalWs = null;
   if (globalWs && globalWs.readyState === WebSocket.CONNECTING) return globalWs;
 
+  globalWsUserId = userId;
   const allChannels: Channel[] = ["market-data", "executions", "orders", "paper-trading", "condor", "condor-user"];
-  globalWs = new WebSocket(getWsUrl(userId, allChannels));
+  const ws = new WebSocket(getWsUrl(userId, allChannels));
+  globalWs = ws;
 
-  globalWs.onmessage = (event) => {
+  ws.onmessage = (event) => {
     try {
       const msg: WsMessage = JSON.parse(event.data);
       const handlers = channelHandlers.get(msg.channel);
@@ -43,16 +61,19 @@ function ensureWs(userId?: string): WebSocket {
     }
   };
 
-  globalWs.onclose = () => {
-    globalWs = null;
-    // Reconnect after 3s
-    setTimeout(() => {
-      if (refCount > 0) ensureWs(userId);
-    }, 3000);
+  ws.onclose = () => {
+    // Only nullify if this is still the current WS (a newer one may have replaced it)
+    if (globalWs === ws) {
+      globalWs = null;
+      // Reconnect after 3s with the last userId
+      setTimeout(() => {
+        if (refCount > 0) ensureWs(globalWsUserId);
+      }, 3000);
+    }
   };
 
-  globalWs.onerror = () => {
-    globalWs?.close();
+  ws.onerror = () => {
+    if (globalWs === ws) ws.close();
   };
 
   return globalWs;

@@ -2,7 +2,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { Server } from "http";
 import { logger } from "./logger.js";
 
-type Channel = "market-data" | "executions" | "orders" | "paper-trading" | "condor" | "condor-user";
+type Channel = "market-data" | "executions" | "orders" | "paper-trading" | "condor" | "condor-user" | "crypto";
 
 interface ClientMeta {
   userId: string | null;
@@ -22,7 +22,7 @@ export function attachWebSocketServer(server: Server): void {
     const channels = new Set<Channel>(
       channelsParam
         ? (channelsParam.split(",") as Channel[])
-        : ["market-data", "executions", "orders", "paper-trading", "condor"]
+        : ["market-data", "executions", "orders", "paper-trading", "condor", "crypto"]
     );
 
     clients.set(ws, { userId, channels });
@@ -99,6 +99,10 @@ export function broadcastCondor(data: unknown): void {
 
 export function broadcastCondorUser(userId: string, data: unknown): void {
   broadcast("condor-user", data, userId);
+}
+
+export function broadcastCrypto(data: unknown): void {
+  broadcast("crypto", data);
 }
 
 export function getConnectedClientCount(): number {

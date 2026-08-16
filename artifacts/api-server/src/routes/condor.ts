@@ -2,7 +2,7 @@ import { Router } from "express";
 import { logger } from "../lib/logger.js";
 import { db, condorPositionsTable } from "@workspace/db";
 import { eq, desc, and } from "drizzle-orm";
-import { getCondorState } from "../services/kite/condor-paper-engine.js";
+import { getCondorState, refanOutCondor } from "../services/kite/condor-paper-engine.js";
 
 const router = Router();
 
@@ -52,6 +52,17 @@ router.get("/condor/user-positions", async (req, res) => {
   } catch (err) {
     logger.error({ err }, "condor: user positions fetch failed");
     res.status(500).json({ error: err instanceof Error ? err.message : "Failed to fetch user condor positions" });
+  }
+});
+
+// POST /condor/refanout — Re-trigger real broker fan-out for active condor (manual override)
+router.post("/condor/refanout", async (_req, res) => {
+  try {
+    const result = await refanOutCondor();
+    res.json(result);
+  } catch (err) {
+    logger.error({ err }, "condor: refanout failed");
+    res.status(500).json({ error: err instanceof Error ? err.message : "Re-fan-out failed" });
   }
 });
 

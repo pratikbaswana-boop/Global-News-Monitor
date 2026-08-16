@@ -209,6 +209,40 @@ export async function getOrders(appUserId: string): Promise<unknown[]> {
   return Array.isArray(orders) ? orders : [];
 }
 
+/** Place an order and poll until it reaches a terminal status (COMPLETE or REJECTED).
+ *  Returns the final status. Timeout after maxWaitMs. */
+export async function placeOrderAndWaitForFill(
+  appUserId: string,
+  params: PlaceOrderParams,
+  maxWaitMs = 10000
+): Promise<{ kiteOrderId: string; status: string; filled: boolean }> {
+  const result = await placeOrder(appUserId, params);
+  const kiteOrderId = result.kiteOrderId;
+
+  const startTime = Date.now();
+  while (Date.now() - startTime < maxWaitMs) {
+    await new Promise(r => setTimeout(r, 500));
+    try {
+      const kite = await getKiteClientForUser(appUserId);
+      if (!kite) break;
+      const history = await runKiteLimited(() => kite.getOrderHistory(kiteOrderId));
+      const orders = Array.isArray(history) ? history : [];
+      const last = orders[orders.length - 1] as Record<string, unknown> | undefined;
+      const status = String(last?.["status"] ?? "");
+      if (status === "COMPLETE") {
+        return { kiteOrderId, status: "COMPLETE", filled: true };
+      }
+      if (status === "REJECTED" || status === "CANCELLED") {
+        return { kiteOrderId, status, filled: false };
+      }
+    } catch {
+      // Keep polling on transient errors
+    }
+  }
+  logger.warn({ appUserId, kiteOrderId }, "order wait timed out, assuming open");
+  return { kiteOrderId, status: "OPEN", filled: false };
+}
+
 export async function getOrderHistory(appUserId: string, kiteOrderId: string): Promise<unknown[]> {
   const kite = await getKiteClientForUser(appUserId);
   if (!kite) {

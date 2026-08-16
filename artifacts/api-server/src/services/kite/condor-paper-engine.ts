@@ -20,11 +20,11 @@ import { eq, desc, and } from "drizzle-orm";
 import { randomUUID } from "crypto";
 import { logger } from "../../lib/logger.js";
 import { marketTicker, getLatestChainMetrics, getLtpBySymbol } from "./market-ticker.js";
-import { getGlobalKiteClient, getNearestWeeklyExpiry, getNextWeeklyExpiry, lookupOptionSymbol } from "./kite-option-chain.js";
+import { getGlobalKiteClient, getNearestExpiry, getNextExpiry, getNearestWeeklyExpiry, getNextWeeklyExpiry, lookupOptionSymbol } from "./kite-option-chain.js";
 import { getHotContext } from "../market/hot-context.js";
 import { broadcastCondor, broadcastCondorUser } from "../../lib/ws-hub.js";
 import { pushTradeNotification } from "../../lib/trade-notifications.js";
-import { placeOrder } from "./orders.js";
+import { placeOrder, placeOrderAndWaitForFill } from "./orders.js";
 import { getMargins } from "./portfolio.js";
 import {
   startDayRangeTracker,
@@ -161,10 +161,16 @@ async function getOptionPremium(symbol: string): Promise<number | null> {
   if (tick !== null && tick > 0) return tick;
   try {
     const kite = await getGlobalKiteClient();
-    if (!kite) return null;
+    if (!kite) {
+      logger.warn({ symbol }, "condor-paper: getGlobalKiteClient returned null for premium fetch");
+      return null;
+    }
     const quotes = await kite.getQuote([`NFO:${symbol}`]);
     const q = (quotes as Record<string, unknown>)[`NFO:${symbol}`] as Record<string, unknown> | undefined;
     const ltp = Number(q?.["last_price"] ?? 0);
+    if (ltp <= 0) {
+      logger.warn({ symbol, quoteKeys: Object.keys(quotes ?? {}) }, "condor-paper: REST quote returned 0 or missing for symbol");
+    }
     return ltp > 0 ? ltp : null;
   } catch (err) {
     logger.warn({ symbol, err: err instanceof Error ? err.message : err }, "condor-paper: REST quote fallback failed");
@@ -351,12 +357,14 @@ async function tryEnterCondor(): Promise<void> {
   const hedgePutStrike = soldPutStrike - HEDGE_GAP;
   const hedgeCallStrike = soldCallStrike + HEDGE_GAP;
 
-  // Pick expiry — if nearest is past gamma cutoff (Wed afternoon/Thu), roll to next week.
-  let expiry = getNearestWeeklyExpiry();
+  // Pick expiry — use Kite's instruments cache for the real expiry date.
+  // NSE moved NIFTY expiry from Thursday to Tuesday, so hardcoded Thursday
+  // calculation no longer works. Falls back to Thursday if cache is cold.
+  let expiry = await getNearestExpiry(true);
   const nearestExpiryKey = formatExpiryDateKey(expiry);
   if (isPastGammaCutoff(nearestExpiryKey)) {
-    expiry = getNextWeeklyExpiry();
-    logger.info({ nearestExpiryKey, rolledTo: formatExpiryDateKey(expiry) }, "condor-paper: nearest expiry past gamma cutoff, rolling to next week");
+    expiry = await getNextExpiry();
+    logger.info({ nearestExpiryKey, rolledTo: formatExpiryDateKey(expiry) }, "condor-paper: nearest expiry past gamma cutoff, rolling to next expiry");
   }
 
   // Fetch only the premiums for the sides we're actually selling.
@@ -415,10 +423,13 @@ async function tryEnterCondor(): Promise<void> {
   const maxLossPerLot = maxLossPerUnit * LOT_SIZE;
   if (maxLossPerLot <= 0) return;
 
+  // Use realistic Kite SPAN+exposure margin per lot, not theoretical max loss.
+  // Kite's basket margin for a NIFTY condor is ~₹75-90k per lot depending on spread width.
+  // SPAN includes volatility risk premium, so it's much higher than pure max loss.
+  const kiteMarginPerLot = Math.round(75000 + HEDGE_GAP * LOT_SIZE * 0.2);
+
   const marginBudget = paperCapital * MARGIN_CAPITAL_PCT;
-  let lots = Math.floor(marginBudget / maxLossPerLot);
-  // Edge #6 — VIX bonus: size up slightly when premiums are fat.
-  if (regime?.vixLevel && regime.vixLevel >= VIX_HIGH_THRESHOLD) lots += 1;
+  let lots = Math.floor(marginBudget / kiteMarginPerLot);
   lots = Math.max(1, lots);
 
   const quantity = lots * LOT_SIZE;
@@ -598,6 +609,7 @@ async function placeCondorLegOrder(
       quantity: leg.quantity,
       orderType: "MARKET",
       product: product as "MIS" | "CNC" | "NRML",
+      marketProtection: 20,
       tag: `condor-${leg.role}`,
     });
     logger.info({ userId, leg: leg.role, symbol: leg.symbol, orderId: result.kiteOrderId }, "condor-real: leg order placed");
@@ -635,17 +647,38 @@ async function fanOutCondorEntry(state: ActiveCondorState): Promise<void> {
         pushTradeNotification("condor", "skip", `Could not place Iron Condor orders for your account — broker token expired or margins unavailable. Please re-login to Kite.`, { userId: account.userId });
         return;
       }
-      availableCash = margins.equity?.available?.cash ?? margins.equity?.available?.liveBalance ?? 0;
+      const rawCash = margins.equity?.available?.cash ?? 0;
+      const rawLiveBalance = margins.equity?.available?.liveBalance ?? 0;
+      const rawIntradayPayin = margins.equity?.available?.intradayPayin ?? 0;
+      // Kite may report cash=0 when funds are added via intraday payin.
+      // Use liveBalance (which includes payin) as the primary source when cash is 0.
+      availableCash = rawCash > 0 ? rawCash : (rawLiveBalance > 0 ? rawLiveBalance : rawIntradayPayin);
+      logger.info({ userId: account.userId, rawCash, rawLiveBalance, rawIntradayPayin, rawOpeningBalance: margins.equity?.available?.openingBalance, resolvedCash: availableCash, net: margins.equity?.net }, "condor-real: margin check details");
 
-      // Recalculate lots based on user's actual available cash (same formula as paper engine)
+      // Recalculate lots based on user's actual available cash.
+      // Kite's margin per lot for a condor spread is much lower than naked margin
+      // because the hedge legs cap the risk. The actual spread margin is roughly
+      // (strike_gap × lot_size) + some SPAN buffer. We use the hedge gap as the basis.
+      const putSpreadGap = Math.abs((state.legs.find(l => l.role === "sold_put")?.strike ?? 0) - (state.legs.find(l => l.role === "hedge_put")?.strike ?? 0)) || HEDGE_GAP;
+      const callSpreadGap = Math.abs((state.legs.find(l => l.role === "sold_call")?.strike ?? 0) - (state.legs.find(l => l.role === "hedge_call")?.strike ?? 0)) || HEDGE_GAP;
+      const maxSpreadGap = Math.max(putSpreadGap, callSpreadGap);
+      // Spread margin ≈ strike_gap × lot_size × 1.3 (SPAN + exposure buffer for spread)
+      const kiteMarginPerLot = Math.round(maxSpreadGap * LOT_SIZE * 1.3);
+
       const userMarginBudget = availableCash * MARGIN_CAPITAL_PCT;
-      userLots = Math.max(1, Math.floor(userMarginBudget / state.maxLossPerLot));
+      // Account for hedge leg premium cost (BUY legs consume cash on top of margin)
+      const hedgePremiumPerLot = (state.legs.find(l => l.role === "hedge_put")?.entryPremium ?? 0) * LOT_SIZE
+        + (state.legs.find(l => l.role === "hedge_call")?.entryPremium ?? 0) * LOT_SIZE;
+      const totalCostPerLot = kiteMarginPerLot + hedgePremiumPerLot;
+      userLots = Math.max(1, Math.floor(userMarginBudget / totalCostPerLot));
       userQuantity = userLots * LOT_SIZE;
       userMaxLoss = state.maxLossPerLot * userLots;
       userNetPremium = state.netPremiumPerUnit * userQuantity;
       userMaxProfit = userNetPremium;
 
-      if (availableCash < userMaxLoss) {
+      logger.info({ userId: account.userId, kiteMarginPerLot, hedgePremiumPerLot, totalCostPerLot, userMarginBudget, userLots, availableCash, maxSpreadGap }, "condor-real: lot calculation");
+
+      if (availableCash < totalCostPerLot * userLots) {
         logger.warn({ userId: account.userId, availableCash, maxLoss: userMaxLoss }, "condor-real: insufficient margin, skipping user");
         pushTradeNotification("condor", "skip", `Iron Condor entry skipped for your account — insufficient margin. Available: ₹${availableCash.toFixed(0)}, Required: ₹${userMaxLoss.toFixed(0)}.`, { userId: account.userId });
         return;
@@ -661,19 +694,99 @@ async function fanOutCondorEntry(state: ActiveCondorState): Promise<void> {
       quantity: userQuantity,
     }));
 
-    // Place orders: hedges first (BUY), then sold legs (SELL) — same sequence as paper
-    const hedgeLegs = userLegs.filter((l) => l.role === "hedge_put" || l.role === "hedge_call");
-    const soldLegs = userLegs.filter((l) => l.role === "sold_put" || l.role === "sold_call");
+    // Place orders in two phases so Kite recognizes spread margin:
+    // Phase 1: Place hedge (BUY) legs and wait for COMPLETE.
+    // Phase 2: Place sold (SELL) legs — Kite now sees hedges as positions and charges spread margin.
+    // If any leg fails, rollback by exiting all filled legs.
+    const buyLegs = userLegs.filter(l => l.role === "hedge_put" || l.role === "hedge_call");
+    const sellLegs = userLegs.filter(l => l.role === "sold_put" || l.role === "sold_call");
 
-    const results: boolean[] = [];
-    for (const leg of hedgeLegs) {
-      results.push(await placeCondorLegOrder(account.userId, leg, product));
-    }
-    for (const leg of soldLegs) {
-      results.push(await placeCondorLegOrder(account.userId, leg, product));
-    }
+    const filledLegs: CondorLeg[] = [];
+    let allSuccess = false;
 
-    const allSuccess = results.every((r) => r);
+    // Phase 1: Place hedge legs and wait for fills
+    const hedgeResults = await Promise.all(
+      buyLegs.map(async (leg) => {
+        const isSold = leg.role === "sold_put" || leg.role === "sold_call";
+        const transactionType = isSold ? "SELL" : "BUY";
+        try {
+          const res = await placeOrderAndWaitForFill(account.userId, {
+            exchange: "NFO",
+            tradingsymbol: leg.symbol,
+            transactionType,
+            quantity: leg.quantity,
+            orderType: "MARKET",
+            product: product as "MIS" | "CNC" | "NRML",
+            marketProtection: 20,
+            tag: `condor-${leg.role}`,
+          });
+          if (res.filled) {
+            filledLegs.push(leg);
+            logger.info({ userId: account.userId, leg: leg.role, symbol: leg.symbol, orderId: res.kiteOrderId }, "condor-real: hedge leg filled");
+            return true;
+          }
+          logger.error({ userId: account.userId, leg: leg.role, symbol: leg.symbol, status: res.status }, "condor-real: hedge leg not filled");
+          return false;
+        } catch (err) {
+          logger.error({ userId: account.userId, leg: leg.role, symbol: leg.symbol, err: err instanceof Error ? err.message : err }, "condor-real: hedge leg failed");
+          return false;
+        }
+      })
+    );
+
+    const allHedgesFilled = hedgeResults.every(r => r);
+
+    if (!allHedgesFilled) {
+      // Rollback: exit any filled hedge legs
+      logger.warn({ userId: account.userId, filledCount: filledLegs.length }, "condor-real: hedges failed, rolling back");
+      for (const leg of filledLegs) {
+        await placeCondorExitOrder(account.userId, leg, product);
+      }
+      allSuccess = false;
+    } else {
+      // Phase 2: Place sold legs SEQUENTIALLY (not parallel).
+      // First sold leg consumes naked margin temporarily; after it fills,
+      // Kite recalculates margin for the spread and releases the excess.
+      // This gives the second sold leg enough margin to succeed.
+      const soldResults: boolean[] = [];
+      for (const leg of sellLegs) {
+        const isSold = leg.role === "sold_put" || leg.role === "sold_call";
+        const transactionType = isSold ? "SELL" : "BUY";
+        try {
+          const res = await placeOrderAndWaitForFill(account.userId, {
+            exchange: "NFO",
+            tradingsymbol: leg.symbol,
+            transactionType,
+            quantity: leg.quantity,
+            orderType: "MARKET",
+            product: product as "MIS" | "CNC" | "NRML",
+            marketProtection: 20,
+            tag: `condor-${leg.role}`,
+          });
+          if (res.filled) {
+            filledLegs.push(leg);
+            logger.info({ userId: account.userId, leg: leg.role, symbol: leg.symbol, orderId: res.kiteOrderId }, "condor-real: sold leg filled");
+            soldResults.push(true);
+          } else {
+            logger.error({ userId: account.userId, leg: leg.role, symbol: leg.symbol, status: res.status }, "condor-real: sold leg not filled");
+            soldResults.push(false);
+          }
+        } catch (err) {
+          logger.error({ userId: account.userId, leg: leg.role, symbol: leg.symbol, err: err instanceof Error ? err.message : err }, "condor-real: sold leg failed");
+          soldResults.push(false);
+        }
+      }
+
+      allSuccess = soldResults.every(r => r);
+
+      if (!allSuccess) {
+        // Rollback: exit all filled legs (hedges + any sold legs that filled)
+        logger.warn({ userId: account.userId, filledCount: filledLegs.length }, "condor-real: some sold legs failed, rolling back all filled legs");
+        for (const leg of filledLegs) {
+          await placeCondorExitOrder(account.userId, leg, product);
+        }
+      }
+    }
     const userCondorId = randomUUID();
 
     // Save a per-user real condor position row
@@ -695,7 +808,7 @@ async function fanOutCondorEntry(state: ActiveCondorState): Promise<void> {
       marginBlocked: String(userMaxLoss),
       notesJson: JSON.stringify({
         paperCondorId: state.id,
-        orderResults: results,
+        orderResults: allSuccess ? 'phased_success' : 'phased_partial_rolled_back',
         product,
         netPremiumPerUnit: state.netPremiumPerUnit,
         maxLossPerLot: state.maxLossPerLot,
@@ -706,8 +819,8 @@ async function fanOutCondorEntry(state: ActiveCondorState): Promise<void> {
       logger.info({ userId: account.userId, condorId: userCondorId, lots: userLots }, "condor-real: all legs placed for user");
       pushTradeNotification("condor", "entry", `Iron Condor entered for your account — ${userLots} lots, ${userLegs.length} legs placed on Kite. Net premium: ₹${userNetPremium.toFixed(2)}, Max loss: ₹${userMaxLoss.toFixed(0)}.`, { userId: account.userId, condorId: userCondorId });
     } else {
-      logger.warn({ userId: account.userId, condorId: userCondorId, results }, "condor-real: some legs failed for user");
-      pushTradeNotification("condor", "warning", `Iron Condor partially placed for your account — some legs failed. Please check your Kite orders tab and manually close any filled legs.`, { userId: account.userId, condorId: userCondorId });
+      logger.warn({ userId: account.userId, condorId: userCondorId }, "condor-real: some legs failed for user");
+      pushTradeNotification("condor", "warning", `Iron Condor entry failed for your account — some legs could not be placed. All filled legs have been rolled back. Please verify your Kite positions.`, { userId: account.userId, condorId: userCondorId });
     }
   }));
 }
@@ -728,7 +841,8 @@ async function placeCondorExitOrder(
       quantity: leg.quantity,
       orderType: "MARKET",
       product: product as "MIS" | "CNC" | "NRML",
-      tag: `condor-exit-${leg.role}`,
+      marketProtection: 20,
+      tag: `cexit-${leg.role}`.substring(0, 20),
     });
     logger.info({ userId, leg: leg.role, symbol: leg.symbol, orderId: result.kiteOrderId }, "condor-real: exit leg order placed");
     return true;
@@ -1079,6 +1193,16 @@ async function broadcastUserCondorStates(): Promise<void> {
 
 export async function getCondorState(): Promise<CondorPublicState> {
   return buildPublicState();
+}
+
+/** Re-trigger real broker fan-out for the current active condor (manual override). */
+export async function refanOutCondor(): Promise<{ success: boolean; message: string }> {
+  if (!activeState) {
+    return { success: false, message: "No active condor position to fan out" };
+  }
+  logger.info({ condorId: activeState.id }, "condor-real: manual re-fan-out triggered");
+  await fanOutCondorEntry(activeState);
+  return { success: true, message: "Re-fan-out completed for active condor" };
 }
 
 // ── Lifecycle ──────────────────────────────────────────────────────────────────

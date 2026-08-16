@@ -19,6 +19,7 @@ export async function getMargins(appUserId: string): Promise<MarginsSummary | nu
   if (!kite) return null;
 
   const raw = await runKiteLimited(() => kite.getMargins()) as Record<string, any>;
+  logger.info({ appUserId, rawEquity: raw?.equity, rawCommodity: raw?.commodity ? "present" : "absent" }, "portfolio: raw margins response");
   const eq = raw?.equity ?? {};
   const avail = eq.available ?? {};
   const used = eq.used ?? {};

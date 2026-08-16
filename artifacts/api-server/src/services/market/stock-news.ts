@@ -128,6 +128,61 @@ const ASSET_NEWS_DRIVERS: Record<string, string[]> = {
 
   // Telecom
   "bharti-artl": ["bharti airtel", "bhartiartl", "airtel", "telecom sector", "arpu", "5g", "tariff hike", "subscriber addition", "fiber", "africa telecom", "vodafone idea", "jio"],
+
+  // ── Crypto Assets (for crypto trading module) ────────────────────────────────
+  // These reuse the exact same news matching pipeline. The ASSET_MATCHERS
+  // regex compilation at the bottom of this file auto-includes these entries.
+  btc: [
+    "bitcoin", "btc", "btc price", "crypto market",
+    "bitcoin etf", "spot bitcoin etf", "blackrock bitcoin", "ibit", "fbtc",
+    "sec bitcoin", "gary gensler", "sec crypto",
+    "halving", "block reward", "mining difficulty", "hash rate",
+    "microstrategy", "michael saylor", "tesla bitcoin", "el salvador bitcoin",
+    "bitcoin dominance", "btc dominance", "risk-on", "risk-off",
+    "fed rate", "fomc", "dollar index", "dxy", "treasury yield",
+    "binance", "coinbase", "kraken", "crypto exchange",
+    "crypto regulation", "crypto bill", "stablecoin regulation",
+    "futures funding", "funding rate", "open interest", "liquidation",
+    "whale", "whale alert", "large transfer", "cold wallet",
+  ],
+  eth: [
+    "ethereum", "eth", "ether", "eth price",
+    "ethereum etf", "spot ethereum etf", "blackrock ethereum",
+    "vitalik buterin", "vitalik",
+    "ethereum upgrade", "ethereum fork", "pectra", "dencun", "shapella",
+    "ethereum staking", "staked eth", "eth staking", "withdrawal queue",
+    "ethereum gas", "gas fees", "blob fees", "eip-4844",
+    "l2 tvl", "layer 2", "rollup", "base", "arbitrum", "optimism",
+    "defi tvl", "total value locked", "defi protocol",
+    "ethereum supply", "burned eth", "deflationary eth", "ultrasound money",
+    "sec ethereum", "ethereum regulation",
+  ],
+  sol: [
+    "solana", "sol", "sol price",
+    "solana outage", "solana congestion", "solana fork",
+    "solana tvl", "solana ecosystem", "solana defi",
+    "solana memecoin", "pump.fun", "bonk", "jito",
+    "solana phone", "saga",
+    "solana stake", "jito stake",
+    "solana etf", "solana futures",
+    "anatoly yakovenko", "raj gokal",
+  ],
+  bnb: [
+    "bnb", "binance coin", "bnb price",
+    "binance", "cz", "changpeng zhao", "binance settlement",
+    "binance listing", "launchpool", "megadrop",
+    "bnb chain", "bsc", "bnb smart chain",
+    "binance regulation", "doj binance", "sec binance",
+    "bnb burn", "quarterly burn",
+  ],
+  xrp: [
+    "xrp", "ripple", "xrp price",
+    "sec ripple", "ripple lawsuit", "ripple settlement",
+    "xrp etf", "ripple etf",
+    "ripple payments", "ripple remittance", "odl",
+    "brad garlinghouse",
+    "xrp ledger", "xrpl",
+  ],
 };
 
 // ── Time window: back to the last trading day ─────────────────────────────────

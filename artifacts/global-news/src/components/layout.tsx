@@ -13,12 +13,14 @@ import {
   SidebarFooter,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
-import { LayoutDashboard, TrendingUp, Database, Globe, Brain, Wallet, Menu, FlaskConical, Rocket } from "lucide-react";
+import { LayoutDashboard, TrendingUp, Database, Brain, Wallet, Menu, FlaskConical, Rocket } from "lucide-react";
 import React from "react";
 import { UserMenu } from "@/components/auth/user-menu";
 import { useAuth } from "@/hooks/use-auth";
 import { canAccessPaperTrading } from "@/lib/paper-trading-access";
 const basePath = import.meta.env.BASE_URL;
+// TEMP: hides Paper Trading and AMF nav links. Set to true to restore.
+const HIDE_TEMP_NAV = false;
 
 export function AppLayout({ children }: { children: React.ReactNode }) {
   const [location] = useLocation();
@@ -30,10 +32,8 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
         <Sidebar className="border-r border-border/40 bg-[#0c0e14]">
           <SidebarHeader className="p-4 border-b border-border/40">
             <div className="flex items-center gap-2.5 px-2">
-              <div className="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center">
-                <Globe className="h-5 w-5 text-primary" />
-              </div>
-              <span className="font-bold text-base tracking-tight" style={{ fontFamily: "'Inter', sans-serif" }}>Intel<span className="text-muted-foreground font-medium">Dash</span></span>
+              <img src={`${basePath}aumorphic-logo.png`} alt="Aumorphic" className="h-6 w-auto" />
+              <span className="font-bold text-base tracking-tight" style={{ fontFamily: "'Inter', sans-serif" }}>Harness</span>
             </div>
           </SidebarHeader>
           <SidebarContent>
@@ -81,7 +81,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
                       </Link>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
-                  {canAccessPaperTrading(user?.email) && (
+                  {HIDE_TEMP_NAV && canAccessPaperTrading(user?.email) && (
                     <SidebarMenuItem>
                       <SidebarMenuButton asChild isActive={location === "/paper-trading"} className="data-[active=true]:bg-primary/10 data-[active=true]:text-primary data-[active=true]:border-l-2 data-[active=true]:border-primary rounded-md px-3 py-2.5 text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-all">
                         <Link href={`${basePath}paper-trading`}>
@@ -91,6 +91,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
                       </SidebarMenuButton>
                     </SidebarMenuItem>
                   )}
+                  {HIDE_TEMP_NAV && (
                   <SidebarMenuItem>
                     <SidebarMenuButton asChild isActive={location === "/amf"} className="data-[active=true]:bg-emerald-500/10 data-[active=true]:text-emerald-400 data-[active=true]:border-l-2 data-[active=true]:border-emerald-500 rounded-md px-3 py-2.5 text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-all">
                       <Link href={`${basePath}amf`}>
@@ -99,6 +100,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
                       </Link>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
+                  )}
                 </SidebarMenu>
               </SidebarGroupContent>
             </SidebarGroup>
@@ -113,7 +115,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
               <Menu className="h-5 w-5" />
               <span className="sr-only">Toggle menu</span>
             </SidebarTrigger>
-            <span className="font-bold text-sm tracking-tight" style={{ fontFamily: "'Inter', sans-serif" }}>Intel<span className="text-muted-foreground font-medium">Dash</span></span>
+            <span className="font-bold text-sm tracking-tight" style={{ fontFamily: "'Inter', sans-serif" }}>Harness</span>
           </div>
           {children}
         </main>

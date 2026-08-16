@@ -26,11 +26,11 @@ const READY_FRACTION = 0.5;       // buffer must span ≥ 50% of WINDOW_MS to fi
 const DO_SCALE_FALLBACK = 0.02;   // Do normaliser before percentile history warms up
 const DO_SCALE_MIN_SAMPLES = 10;  // need this many Do_raw points for a real percentile
 
-const THETA_D = 0.30;
-const THETA_P_LOW = 0.30;
-const THETA_P_HIGH = 0.55;
+const THETA_D = 0.15;
+const THETA_P_LOW = 0.20;
+const THETA_P_HIGH = 0.40;
 const K_FADE = 0.5;
-const TAU = 0.08;                 // deadzone — lowered from 0.18 to allow more signals
+const TAU = 0.05;                 // deadzone — lowered from 0.18 to allow more signals
 
 // ── Public types ──────────────────────────────────────────────────────────────
 

@@ -11,6 +11,8 @@ import tradingRouter from "./trading";
 import paperTradingRouter from "./paper-trading";
 import condorRouter from "./condor";
 import amfRouter from "./amf";
+import reportRouter from "./report";
+import cryptoRouter from "./crypto";
 
 const router: IRouter = Router();
 
@@ -26,5 +28,7 @@ router.use(tradingRouter);
 router.use(paperTradingRouter);
 router.use(condorRouter);
 router.use(amfRouter);
+router.use(reportRouter);
+router.use(cryptoRouter);
 
 export default router;

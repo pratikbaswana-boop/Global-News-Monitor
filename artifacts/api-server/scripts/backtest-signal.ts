@@ -74,11 +74,11 @@ const EMA_SPAN = 30;
 const READY_FRACTION = 0.5;
 const DO_SCALE_FALLBACK = 0.02;
 const DO_SCALE_MIN_SAMPLES = 10;
-const THETA_D = 0.30;
-const THETA_P_LOW = 0.30;
-const THETA_P_HIGH = 0.55;
+const THETA_D = 0.15;
+const THETA_P_LOW = 0.20;
+const THETA_P_HIGH = 0.40;
 const K_FADE = 0.5;
-const TAU = 0.08;
+const TAU = 0.05;
 
 interface Tier3Observation {
   t: number;
