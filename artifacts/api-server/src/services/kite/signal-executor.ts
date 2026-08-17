@@ -369,40 +369,43 @@ function deriveBaseFromInputs(
   // PCR is temporarily extreme but the market is clearly moving the other way.
   //
   // Logic:
-  //   - Spot rising (>+0.1%) and AI says UP → follow AI (BUY_CALL), even if PCR says BUY_PUT
-  //   - Spot falling (<-0.1%) and AI says DOWN → follow AI (BUY_PUT), even if PCR says BUY_CALL
-  //   - Spot flat or AI neutral → let PCR/max pain win (structural signal)
+  //   - AI says UP and spot not falling → follow AI (BUY_CALL), even if PCR/max pain says BUY_PUT
+  //   - AI says DOWN and spot not rising → follow AI (BUY_PUT), even if PCR/max pain says BUY_CALL
+  //   - Spot actively confirms reversal (falling for PUT, rising for CALL) → let PCR/max pain win
+  //   - AI neutral → let PCR/max pain win (structural signal)
   const spotRising = spotMovePct !== null && spotMovePct > SPOT_MOMENTUM_THRESHOLD;
   const spotFalling = spotMovePct !== null && spotMovePct < -SPOT_MOMENTUM_THRESHOLD;
   const aiSaysUp = aiDirection === "up";
   const aiSaysDown = aiDirection === "down";
 
   // Reversal: Max Pain stretch (with hysteresis — stays active until release band)
+  // AI direction takes priority unless spot momentum actively confirms the reversal.
   if (hysteresis.maxPainSignal === "BUY_PUT") {
-    if (spotRising && aiSaysUp) {
-      return { signal: "BUY_CALL", reason: `Max pain stretch +${maxPainDistancePct!.toFixed(1)}% (hysteresis) but spot rising +${spotMovePct!.toFixed(2)}% + AI up → tiebreaker CALL`, suggestedStrike };
+    if (aiSaysUp && !spotFalling) {
+      return { signal: "BUY_CALL", reason: `Max pain stretch +${maxPainDistancePct!.toFixed(1)}% (hysteresis) but AI up + spot not falling → follow AI CALL`, suggestedStrike };
     }
-    return { signal: "BUY_PUT", reason: `Max pain stretch +${maxPainDistancePct!.toFixed(1)}% (hysteresis)`, suggestedStrike };
+    return { signal: "BUY_PUT", reason: `Max pain stretch +${maxPainDistancePct!.toFixed(1)}% (hysteresis)${spotFalling ? " + spot falling confirms" : " + AI neutral"}`, suggestedStrike };
   }
   if (hysteresis.maxPainSignal === "BUY_CALL") {
-    if (spotFalling && aiSaysDown) {
-      return { signal: "BUY_PUT", reason: `Max pain stretch ${maxPainDistancePct!.toFixed(1)}% (hysteresis) but spot falling ${spotMovePct!.toFixed(2)}% + AI down → tiebreaker PUT`, suggestedStrike };
+    if (aiSaysDown && !spotRising) {
+      return { signal: "BUY_PUT", reason: `Max pain stretch ${maxPainDistancePct!.toFixed(1)}% (hysteresis) but AI down + spot not rising → follow AI PUT`, suggestedStrike };
     }
-    return { signal: "BUY_CALL", reason: `Max pain stretch ${maxPainDistancePct!.toFixed(1)}% (hysteresis)`, suggestedStrike };
+    return { signal: "BUY_CALL", reason: `Max pain stretch ${maxPainDistancePct!.toFixed(1)}% (hysteresis)${spotRising ? " + spot rising confirms" : " + AI neutral"}`, suggestedStrike };
   }
 
   // Reversal: PCR extremes (with hysteresis)
+  // AI direction takes priority unless spot momentum actively confirms the reversal.
   if (hysteresis.pcrSignal === "BUY_PUT") {
-    if (spotRising && aiSaysUp) {
-      return { signal: "BUY_CALL", reason: `PCR ${putCallRatio!.toFixed(2)} too bullish (hysteresis) but spot rising +${spotMovePct!.toFixed(2)}% + AI up → tiebreaker CALL`, suggestedStrike };
+    if (aiSaysUp && !spotFalling) {
+      return { signal: "BUY_CALL", reason: `PCR ${putCallRatio!.toFixed(2)} too bullish (hysteresis) but AI up + spot not falling → follow AI CALL`, suggestedStrike };
     }
-    return { signal: "BUY_PUT", reason: `PCR ${putCallRatio!.toFixed(2)} too bullish (hysteresis)`, suggestedStrike };
+    return { signal: "BUY_PUT", reason: `PCR ${putCallRatio!.toFixed(2)} too bullish (hysteresis)${spotFalling ? " + spot falling confirms" : " + AI neutral"}`, suggestedStrike };
   }
   if (hysteresis.pcrSignal === "BUY_CALL") {
-    if (spotFalling && aiSaysDown) {
-      return { signal: "BUY_PUT", reason: `PCR ${putCallRatio!.toFixed(2)} too bearish (hysteresis) but spot falling ${spotMovePct!.toFixed(2)}% + AI down → tiebreaker PUT`, suggestedStrike };
+    if (aiSaysDown && !spotRising) {
+      return { signal: "BUY_PUT", reason: `PCR ${putCallRatio!.toFixed(2)} too bearish (hysteresis) but AI down + spot not rising → follow AI PUT`, suggestedStrike };
     }
-    return { signal: "BUY_CALL", reason: `PCR ${putCallRatio!.toFixed(2)} too bearish (hysteresis)`, suggestedStrike };
+    return { signal: "BUY_CALL", reason: `PCR ${putCallRatio!.toFixed(2)} too bearish (hysteresis)${spotRising ? " + spot rising confirms" : " + AI neutral"}`, suggestedStrike };
   }
 
   // Trend: Short covering
