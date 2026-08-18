@@ -465,6 +465,89 @@ function applyChain(next: ResolvedChain): void {
 }
 
 // ── Lifecycle ───────────────────────────────────────────────────────────────────
+
+/**
+ * Force a full reconnect: tear down the old KiteTicker (which has a stale
+ * access_token baked in) and create a fresh one using the latest credentials
+ * from the DB. Called when the ticker gets 403 Forbidden or the watchdog
+ * detects a tick stall.
+ */
+let reconnectInProgress = false;
+async function triggerFullReconnect(): Promise<void> {
+  if (reconnectInProgress) return;
+  reconnectInProgress = true;
+  try {
+    logger.warn("market-ticker: full reconnect — fetching fresh credentials from DB");
+    const creds = await getGlobalDataCreds();
+    if (!creds) {
+      logger.error("market-ticker: no valid credentials available for reconnect");
+      return;
+    }
+    // Tear down old ticker
+    if (ticker) {
+      try { ticker.disconnect(); } catch { /* ignore */ }
+      ticker = null;
+    }
+    // Create fresh ticker with new token
+    ticker = new KiteTicker({
+      api_key: creds.apiKey,
+      access_token: creds.accessToken,
+      reconnect: true,
+      max_retry: 300,
+      max_delay: 60,
+    });
+    // Re-attach all handlers
+    ticker.on("connect", () => {
+      logger.info("market-ticker: connected (reconnect)");
+      startTickArchive();
+      ticker!.subscribe([NIFTY_SPOT_TOKEN]);
+      ticker!.setMode(ticker!.modeFull, [NIFTY_SPOT_TOKEN]);
+      if (subscribedOptionTokens.length) {
+        ticker!.subscribe(subscribedOptionTokens);
+        ticker!.setMode(ticker!.modeFull, subscribedOptionTokens);
+      }
+      if (heldTokens.size) {
+        const held = [...heldTokens];
+        ticker!.subscribe(held);
+        ticker!.setMode(ticker!.modeFull, held);
+      }
+      const equityTokens = Object.values(SPOT_EQUITY_TOKENS).map((e) => e.token);
+      ticker!.subscribe(equityTokens);
+      ticker!.setMode(ticker!.modeFull, equityTokens);
+      if (amfStockTokens.size > 0) {
+        const amfTokens = [...amfStockTokens.values()];
+        ticker!.subscribe(amfTokens);
+        ticker!.setMode(ticker!.modeFull, amfTokens);
+      }
+    });
+    ticker.on("ticks", (ticks: unknown[]) => {
+      try { onTicks(ticks); } catch (err) {
+        logger.error({ err: err instanceof Error ? err.message : err }, "market-ticker: onTicks failed");
+      }
+    });
+    ticker.on("order_update", (order: unknown) => marketTicker.emit("order_update", order));
+    ticker.on("reconnect", (attempt: number, delay: number) => logger.warn({ attempt, delay }, "market-ticker: reconnecting"));
+    ticker.on("noreconnect", () => logger.error("market-ticker: gave up reconnecting"));
+    ticker.on("error", (err: unknown) => {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      logger.error({ err: errMsg }, "market-ticker: error");
+      if (errMsg.includes("403") || errMsg.includes("Forbidden")) {
+        logger.warn("market-ticker: 403 Forbidden detected — triggering full reconnect with fresh token");
+        triggerFullReconnect();
+      }
+    });
+    ticker.on("disconnect", () => logger.warn("market-ticker: disconnected"));
+    ticker.on("close", (code: number, reason: string) => logger.warn({ code, reason }, "market-ticker: closed"));
+    ticker.connect();
+    lastTickAt = Date.now();
+    logger.info("market-ticker: full reconnect complete with fresh token");
+  } catch (err) {
+    logger.error({ err: err instanceof Error ? err.message : err }, "market-ticker: full reconnect failed");
+  } finally {
+    reconnectInProgress = false;
+  }
+}
+
 export async function startMarketTicker(): Promise<boolean> {
   if (started) return true;
 
@@ -531,7 +614,16 @@ export async function startMarketTicker(): Promise<boolean> {
     logger.warn({ attempt, delay }, "market-ticker: reconnecting");
   });
   ticker.on("noreconnect", () => logger.error("market-ticker: gave up reconnecting"));
-  ticker.on("error", (err: unknown) => logger.error({ err }, "market-ticker: error"));
+  ticker.on("error", (err: unknown) => {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    logger.error({ err: errMsg }, "market-ticker: error");
+    // 403 = token expired/invalid. KiteTicker will keep retrying with the same stale
+    // token forever. Force a full reconnect with fresh credentials from the DB.
+    if (errMsg.includes("403") || errMsg.includes("Forbidden")) {
+      logger.warn("market-ticker: 403 Forbidden detected — triggering full reconnect with fresh token");
+      triggerFullReconnect();
+    }
+  });
   ticker.on("disconnect", () => logger.warn("market-ticker: disconnected"));
   ticker.on("close", (code: number, reason: string) => logger.warn({ code, reason }, "market-ticker: closed"));
 
@@ -555,23 +647,9 @@ export async function startMarketTicker(): Promise<boolean> {
     if (lastTickAt > 0 && now - lastTickAt > WATCHDOG_STALL_MS) {
       logger.warn(
         { stallMs: now - lastTickAt, connected: ticker.connected() },
-        "market-ticker: tick stall detected — forcing reconnect",
+        "market-ticker: tick stall detected — forcing full reconnect with fresh token",
       );
-      try {
-        ticker.disconnect();
-      } catch {
-        // ignore — disconnect may fail if already broken
-      }
-      // Reconnect after a short delay to allow the disconnect event to settle
-      setTimeout(() => {
-        if (!started || !ticker) return;
-        try {
-          ticker.connect();
-          lastTickAt = Date.now();
-        } catch (err) {
-          logger.error({ err: err instanceof Error ? err.message : err }, "market-ticker: watchdog reconnect failed");
-        }
-      }, 2000);
+      triggerFullReconnect();
     }
   }, WATCHDOG_INTERVAL_MS);
 
